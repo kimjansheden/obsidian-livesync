@@ -82,7 +82,7 @@ jobs:
 
       - name: Create SBOM and checksums
         run: |
-          npm sbom --sbom-format cyclonedx > sbom.cdx.json
+          npm run sbom -- --output-file sbom.cdx.json
           sha256sum main.js manifest.json styles.css package-lock.json sbom.cdx.json > SHA256SUMS
 
       - name: Attest release artifacts
