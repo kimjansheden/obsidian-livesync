@@ -181,6 +181,9 @@ describe("release workflow", () => {
         expect(workflow).not.toMatch(/^\s+push:/m);
         expect(workflow).toContain("expected_sha:");
         expect(workflow).toContain('git verify-tag "$TAG"');
+        expect(workflow).toContain("security-events: read");
+        expect(workflow).toContain("node scripts/security/verify-github-security-state.mjs");
+        expect(workflow).toContain("npm run test:security-state-mutations");
         expect(workflow).toContain("npm ci --ignore-scripts");
         expect(workflow).toContain("npm audit --audit-level=low");
         expect(workflow).toContain("npm run sbom -- --output-file sbom.cdx.json");

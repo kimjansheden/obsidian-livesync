@@ -21,6 +21,7 @@ permissions:
   contents: write
   id-token: write
   attestations: write
+  security-events: read
 
 concurrency:
   group: release-${{ inputs.tag }}
@@ -66,12 +67,19 @@ jobs:
           node-version: 24.7.0
           cache: npm
 
+      - name: Require exact analyses and zero open GitHub security alerts
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/security/verify-github-security-state.mjs
+
       - name: Install locked dependencies without lifecycle scripts
         run: npm ci --ignore-scripts --no-audit --no-fund
 
       - name: Re-run the release gate
         run: |
           npm run security:policy
+          npm run test:security-state-mutations
           npm audit --audit-level=low
           npm run tsc-check
           npm run tsc-check:apps

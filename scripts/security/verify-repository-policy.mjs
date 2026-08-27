@@ -47,6 +47,7 @@ const ROOT_FILES = new Set([
     "pouchdb-browser.js",
     "setup-flyio-on-the-fly-v2.ipynb",
     "styles.css",
+    "stryker.config.json",
     "terser.config.mjs",
     "terser_vite.config.ts",
     "tsconfig.json",
@@ -59,6 +60,7 @@ const ROOT_FILES = new Set([
     "vitest.config.common.ts",
     "vitest.config.e2e-runner.ts",
     "vitest.config.integration.ts",
+    "vitest.config.security-mutation.ts",
     "vitest.config.unit.ts",
 ]);
 
@@ -151,6 +153,54 @@ for (const workflow of tracked.filter((path) => path.startsWith(".github/workflo
             failures.push(`action is not pinned to a full commit: ${workflow}: ${match[1]}@${match[2]}`);
     }
     if (!/^permissions:/m.test(content)) failures.push(`top-level permissions are missing: ${workflow}`);
+}
+
+const packageJson = JSON.parse(readFileSync("package.json", "utf8"));
+if (packageJson.scripts?.["test:security-state-faults"] !== "vitest run --config vitest.config.security-mutation.ts") {
+    failures.push(
+        "security-state fault script is missing; restore test:security-state-faults so the zero-alert gate's negative paths run"
+    );
+}
+if (packageJson.scripts?.["test:security-state-mutations"] !== "stryker run") {
+    failures.push(
+        "security-state mutation script is missing; restore test:security-state-mutations so production gate mutants block CI"
+    );
+}
+
+const strykerConfig = JSON.parse(readFileSync("stryker.config.json", "utf8"));
+if (JSON.stringify(strykerConfig.mutate) !== JSON.stringify(["scripts/security/verify-github-security-state.mjs"])) {
+    failures.push(
+        "Stryker must mutate the production GitHub security-state gate and no substitute test implementation"
+    );
+}
+if (
+    strykerConfig.thresholds?.high !== 100 ||
+    strykerConfig.thresholds?.low !== 100 ||
+    strykerConfig.thresholds?.break !== 100
+) {
+    failures.push("Stryker thresholds must remain high=100, low=100, break=100 so any relevant survivor blocks CI");
+}
+const forbiddenMutationExclusions = new Set([
+    "BooleanLiteral",
+    "ConditionalExpression",
+    "EqualityOperator",
+    "LogicalOperator",
+]);
+for (const mutation of strykerConfig.mutator?.excludedMutations ?? []) {
+    if (forbiddenMutationExclusions.has(mutation)) {
+        failures.push(`Stryker may not exclude security-decision mutator ${mutation}; remove that exclusion`);
+    }
+}
+
+const releaseWorkflow = readFileSync(".github/workflows/release.yml", "utf8");
+const securityWorkflow = readFileSync(".github/workflows/security-ci.yml", "utf8");
+for (const [label, workflow] of [
+    ["release", releaseWorkflow],
+    ["security CI", securityWorkflow],
+]) {
+    if (!workflow.includes("npm run test:security-state-mutations")) {
+        failures.push(`${label} workflow must run test:security-state-mutations before it can be green`);
+    }
 }
 
 const historySearch = [

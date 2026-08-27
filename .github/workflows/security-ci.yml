@@ -37,6 +37,12 @@ jobs:
       - name: Verify repository security policy
         run: npm run security:policy
 
+      - name: Prove the release gate rejects security-state faults
+        run: npm run test:security-state-faults
+
+      - name: Mutation-test the release gate implementation
+        run: npm run test:security-state-mutations
+
       - name: Audit the complete npm lock graph
         run: npm audit --audit-level=low
 
