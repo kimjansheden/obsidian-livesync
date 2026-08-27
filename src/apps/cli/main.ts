@@ -9,6 +9,7 @@ import {
 } from "@vrtmrz/livesync-commonlib/compat/common/types";
 import type { InjectableServiceHub } from "@vrtmrz/livesync-commonlib/compat/services/implements/injectable/InjectableServiceHub";
 import type { InjectableSettingService } from "@vrtmrz/livesync-commonlib/compat/services/implements/injectable/InjectableSettingService";
+import { prepareSettingsForPersistence } from "@/common/security/settingsPersistence";
 import {
     LOG_LEVEL_DEBUG,
     setGlobalLogFunction,
@@ -290,7 +291,10 @@ export async function main(
 ) {
     const options = parseArgs(standardIo);
     if (options.interval && options.command !== "daemon") {
-        writeStderrLine(standardIo, `Warning: --interval is only used in daemon mode, ignored for '${options.command}'`);
+        writeStderrLine(
+            standardIo,
+            `Warning: --interval is only used in daemon mode, ignored for '${options.command}'`
+        );
     }
     const avoidStdoutNoise =
         options.command === "cat" ||
@@ -420,7 +424,10 @@ export async function main(
     // In daemon mode the default handler must run so changes are applied to the filesystem.
     if (options.command !== "daemon") {
         serviceHubInstance.replication.processSynchroniseResult.addHandler(async () => {
-            writeStderrLine(standardIo, `[Info] Replication result received, but not processed automatically in CLI mode.`);
+            writeStderrLine(
+                standardIo,
+                `[Info] Replication result received, but not processed automatically in CLI mode.`
+            );
             return await Promise.resolve(true);
         }, -100);
     }
@@ -436,7 +443,7 @@ export async function main(
     (settingService as InjectableSettingService<NodeServiceContext>).saveData.setHandler(
         async (data: ObsidianLiveSyncSettings) => {
             try {
-                latestPreparedSettingsText = JSON.stringify(data, null, 2);
+                latestPreparedSettingsText = JSON.stringify(prepareSettingsForPersistence(data), null, 2);
                 preparedSettingsRevision++;
                 if (commandIsRunning) {
                     commandPreparedSettingsTexts.push(latestPreparedSettingsText);

@@ -9,6 +9,7 @@ import {
     type SettingServiceDependencies,
 } from "@vrtmrz/livesync-commonlib/compat/services/base/SettingService";
 import type { ObsidianServiceContext } from "@/modules/services/ObsidianServiceContext";
+import { prepareSettingsForPersistence } from "@/common/security/settingsPersistence";
 
 export function normaliseObsidianSettingsData(data: unknown): ObsidianLiveSyncSettings | undefined {
     if (typeof data !== "object" || data === null || Array.isArray(data)) return undefined;
@@ -41,7 +42,7 @@ export class ObsidianSettingService<T extends ObsidianServiceContext> extends Se
     }
 
     protected override async saveData(data: ObsidianLiveSyncSettings): Promise<void> {
-        return await this.context.liveSyncPlugin.saveData(data);
+        return await this.context.liveSyncPlugin.saveData(prepareSettingsForPersistence(data));
     }
     protected override async loadData(): Promise<ObsidianLiveSyncSettings | undefined> {
         return normaliseObsidianSettingsData(await this.context.liveSyncPlugin.loadData());
