@@ -31,6 +31,7 @@
         "i18n:yaml2json": "tsx _tools/yaml2json.ts",
         "test:unit": "vitest run --config vitest.config.unit.ts",
         "security:policy": "node scripts/security/verify-repository-policy.mjs",
+        "sbom": "cyclonedx-npm --package-lock-only --output-reproducible --spec-version 1.6 --validate",
         "build:browser-apps": "npm run build --workspace livesync-webapp --workspace webpeer",
         "test:browser-apps": "npm run test:browser --workspace livesync-webapp && npm run test:browser --workspace webpeer",
         "test:browser-apps:pages": "deno test -A --no-check --frozen --config test/browser-apps/deno.json --lock test/browser-apps/deno.lock test/browser-apps/pages/browser-smoke.test.ts",
@@ -108,6 +109,7 @@
     "author": "vorotamoroz",
     "license": "MIT",
     "devDependencies": {
+        "@cyclonedx/cyclonedx-npm": "6.0.1",
         "@dword-design/eslint-plugin-import-alias": "^8.1.8",
         "@emnapi/core": "1.11.1",
         "@emnapi/runtime": "1.11.1",
@@ -139,6 +141,7 @@
         "eslint-plugin-svelte": "^3.19.0",
         "events": "^3.3.0",
         "globals": "^14.0.0",
+        "picomatch": "4.0.7",
         "playwright": "^1.58.2",
         "postcss": "^8.5.6",
         "pouchdb-adapter-http": "^9.0.0",
@@ -195,6 +198,9 @@
     "overrides": {
         "@puppeteer/browsers": "3.2.1",
         "deepmerge-ts": "8.0.2",
+        "fdir": {
+            "picomatch": "4.0.7"
+        },
         "pouchdb-core": {
             "uuid": "11.1.1"
         },
