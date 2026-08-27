@@ -40,10 +40,12 @@ export password=couchdb-admin-password
 export database=obsidiannotes
 export passphrase=a-strong-vault-encryption-passphrase
 export uri_passphrase=a-separate-setup-uri-passphrase # Optional
-deno run --minimum-dependency-age=0 --config=./flyio/deno.jsonc --frozen --lock=./flyio/deno.lock --allow-env ./setup/generate_setup_uri.ts
+export setup_uri_file=/secure/output/setup-uri.txt
+export uri_passphrase_file=/secure/output/setup-passphrase.txt # Required only when uri_passphrase is omitted
+deno run --minimum-dependency-age=0 --config=./flyio/deno.jsonc --frozen --lock=./flyio/deno.lock --allow-env --allow-write=/secure/output ./setup/generate_setup_uri.ts
 ```
 
-If `uri_passphrase` is omitted, the tool generates and prints a cryptographically random one. Store the Setup URI and its passphrase separately. The `passphrase` value protects synchronised Vault data and must also be stored safely.
+The tool never prints a Setup URI or passphrase. It creates `setup_uri_file` exclusively with owner-only permissions where the platform supports them. If `uri_passphrase` is omitted, set `uri_passphrase_file`; the tool generates a cryptographically random value and writes it to that separate, new file. Existing paths are rejected. Store the Setup URI and its passphrase separately. The `passphrase` value protects synchronised Vault data and must also be stored safely.
 
 ### Object Storage
 
@@ -56,7 +58,9 @@ export bucket=vault-data
 export region=auto
 export bucket_prefix=team-a # Optional
 export passphrase=<A STRONG VAULT ENCRYPTION PASSPHRASE>
-deno run --minimum-dependency-age=0 --config=./flyio/deno.jsonc --frozen --lock=./flyio/deno.lock --allow-env ./setup/generate_setup_uri.ts
+export setup_uri_file=/secure/output/setup-uri.txt
+export uri_passphrase_file=/secure/output/setup-passphrase.txt
+deno run --minimum-dependency-age=0 --config=./flyio/deno.jsonc --frozen --lock=./flyio/deno.lock --allow-env --allow-write=/secure/output ./setup/generate_setup_uri.ts
 ```
 
 Optional Object Storage variables are `use_custom_request_handler`, `force_path_style`, and `bucket_custom_headers`.
@@ -66,7 +70,9 @@ Optional Object Storage variables are `use_custom_request_handler`, `force_path_
 ```sh
 export remote_type=p2p
 export passphrase=<A STRONG VAULT ENCRYPTION PASSPHRASE>
-deno run --minimum-dependency-age=0 --config=./flyio/deno.jsonc --frozen --lock=./flyio/deno.lock --allow-env ./setup/generate_setup_uri.ts
+export setup_uri_file=/secure/output/setup-uri.txt
+export uri_passphrase_file=/secure/output/setup-passphrase.txt
+deno run --minimum-dependency-age=0 --config=./flyio/deno.jsonc --frozen --lock=./flyio/deno.lock --allow-env --allow-write=/secure/output ./setup/generate_setup_uri.ts
 ```
 
 If `p2p_room_id` or `p2p_passphrase` is omitted, the tool generates it with Commonlib's room-ID contract or cryptographically secure randomness. Optional variables are `p2p_relays`, `p2p_app_id`, `p2p_auto_start`, and `p2p_auto_broadcast`. Auto-start and auto-broadcast retain Commonlib's disabled defaults unless explicitly enabled. A peer name is deliberately absent because it identifies one device and must not be copied to another device through a Setup URI.

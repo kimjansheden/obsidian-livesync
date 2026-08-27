@@ -26,12 +26,13 @@ export region=auto
 export bucket_prefix=my-vault
 export passphrase=<A STRONG VAULT ENCRYPTION PASSPHRASE>
 export uri_passphrase=<A SEPARATE SETUP URI PASSPHRASE>
-deno run --minimum-dependency-age=0 --allow-env https://raw.githubusercontent.com/vrtmrz/obsidian-livesync/main/utils/setup/generate_setup_uri.ts
+export setup_uri_file=/secure/output/setup-uri.txt
+deno run --minimum-dependency-age=0 --allow-env --allow-write=/secure/output https://raw.githubusercontent.com/kimjansheden/obsidian-livesync/main/utils/setup/generate_setup_uri.ts
 ```
 
 For providers which require them, set `force_path_style`, `use_custom_request_handler`, or `bucket_custom_headers` as described in the [setup utility reference](../utils/readme.md#object-storage).
 
-Store the generated Setup URI and Setup URI passphrase separately. The URI is encrypted, but it contains the Object Storage credentials.
+The generator creates the requested file without replacing an existing path and does not print the URI or passphrase. Store the generated Setup URI and Setup URI passphrase separately. The URI is encrypted, but it contains the Object Storage credentials.
 
 ## Set up the first device
 

@@ -3,33 +3,36 @@
 ## Table of Contents
 
 - [Setup a CouchDB server](#setup-a-couchdb-server)
-  - [Table of Contents](#table-of-contents)
-  - [1. Prepare CouchDB](#1-prepare-couchdb)
-    - [A. Using Docker](#a-using-docker)
-      - [1. Prepare](#1-prepare)
-      - [2. Run docker container](#2-run-docker-container)
-    - [B. Using Docker Compose](#b-using-docker-compose)
-      - [1. Prepare](#1-prepare-1)
-      - [2. Creating Compose file](#2-create-a-docker-composeyml-file-with-the-following-added-to-it)
-      - [3. Boot check](#3-run-the-docker-compose-file-to-boot-check)
-      - [4. Starting Docker Compose in background](#4-run-the-docker-compose-file-in-the-background)
-    - [C. Install CouchDB directly](#c-install-couchdb-directly)
-  - [2. Run couchdb-init.sh for initialise](#2-run-couchdb-initsh-for-initialise)
-  - [3. Expose CouchDB to the Internet](#3-expose-couchdb-to-the-internet)
-  - [4. Client Setup](#4-client-setup)
-    - [1. Generate the setup URI on a desktop device or server](#1-generate-the-setup-uri-on-a-desktop-device-or-server)
-    - [2. Setup Self-hosted LiveSync to Obsidian](#2-setup-self-hosted-livesync-to-obsidian)
-  - [Manual setup information](#manual-setup-information)
-    - [Setting up your domain](#setting-up-your-domain)
-  - [Reverse Proxies](#reverse-proxies)
-    - [Traefik](#traefik)
-    - [Nginx](#nginx)
+    - [Table of Contents](#table-of-contents)
+    - [1. Prepare CouchDB](#1-prepare-couchdb)
+        - [A. Using Docker](#a-using-docker)
+            - [1. Prepare](#1-prepare)
+            - [2. Run docker container](#2-run-docker-container)
+        - [B. Using Docker Compose](#b-using-docker-compose)
+            - [1. Prepare](#1-prepare-1)
+            - [2. Creating Compose file](#2-create-a-docker-composeyml-file-with-the-following-added-to-it)
+            - [3. Boot check](#3-run-the-docker-compose-file-to-boot-check)
+            - [4. Starting Docker Compose in background](#4-run-the-docker-compose-file-in-the-background)
+        - [C. Install CouchDB directly](#c-install-couchdb-directly)
+    - [2. Run couchdb-init.sh for initialise](#2-run-couchdb-initsh-for-initialise)
+    - [3. Expose CouchDB to the Internet](#3-expose-couchdb-to-the-internet)
+    - [4. Client Setup](#4-client-setup)
+        - [1. Generate the setup URI on a desktop device or server](#1-generate-the-setup-uri-on-a-desktop-device-or-server)
+        - [2. Setup Self-hosted LiveSync to Obsidian](#2-setup-self-hosted-livesync-to-obsidian)
+    - [Manual setup information](#manual-setup-information)
+        - [Setting up your domain](#setting-up-your-domain)
+    - [Reverse Proxies](#reverse-proxies)
+        - [Traefik](#traefik)
+        - [Nginx](#nginx)
+
 ---
 
 ## 1. Prepare CouchDB
+
 ### A. Using Docker
 
 #### 1. Prepare
+
 ```bash
 
 # Adding environment variables.
@@ -43,20 +46,25 @@ mkdir couchdb-etc
 ```
 
 #### 2. Run docker container
+
 1. Boot Check.
+
 ```
 $ docker run --name couchdb-for-ols --rm -it -e COUCHDB_USER=${username} -e COUCHDB_PASSWORD=${password} -v ${PWD}/couchdb-data:/opt/couchdb/data -v ${PWD}/couchdb-etc:/opt/couchdb/etc/local.d -p 5984:5984 couchdb
 ```
+
 > [!WARNING]
 > If your container threw an error or exited unexpectedly, please check the permission of couchdb-data, and couchdb-etc.  
 > Once CouchDB starts, these directories will be owned by uid:`5984`. Please chown it for that uid again.
 
 2. Enable it in the background
+
 ```
 $ docker run --name couchdb-for-ols -d --restart always -e COUCHDB_USER=${username} -e COUCHDB_PASSWORD=${password} -v ${PWD}/couchdb-data:/opt/couchdb/data -v ${PWD}/couchdb-etc:/opt/couchdb/etc/local.d -p 5984:5984 couchdb
 ```
 
 Congrats, move on to [step 2](#2-run-couchdb-initsh-for-initialise)
+
 ### B. Using Docker Compose
 
 #### 1. Prepare
@@ -72,6 +80,7 @@ chown -R 5984:5984 ./couchdb-etc
 ```
 
 #### 2. Create a `docker-compose.yml` file with the following added to it
+
 ```
 services:
   couchdb:
@@ -96,12 +105,15 @@ docker compose up
 # Or if using the old version
 docker-compose up
 ```
+
 > [!WARNING]
 > If your container threw an error or exited unexpectedly, please check the permission of couchdb-data, and couchdb-etc.  
 > Once CouchDB starts, these directories will be owned by uid:`5984`. Please chown it for that uid again.
 
 #### 4. Run the Docker Compose file in the background
+
 If all went well and didn't throw any errors, `CTRL+C` out of it, and then run this command
+
 ```
 docker compose up -d
 # Or if using the old version
@@ -110,8 +122,8 @@ docker-compose up -d
 
 Congrats, move on to [step 2](#2-run-couchdb-initsh-for-initialise)
 
-
 ### C. Install CouchDB directly
+
 Please refer to the [official document](https://docs.couchdb.org/en/stable/install/index.html). However, we do not have to configure it fully. Just the administrator needs to be configured.
 
 ## 2. Run couchdb-init.sh for initialise
@@ -129,6 +141,7 @@ curl -s https://raw.githubusercontent.com/vrtmrz/obsidian-livesync/main/utils/co
 ```
 
 If it results like the following:
+
 ```
 CouchDB provisioning completed.
 ```
@@ -136,6 +149,7 @@ CouchDB provisioning completed.
 The wrapper runs the exact registry-pinned Commonlib consumer. When `database` is supplied, it creates the database and initialises its LiveSync database-version document through Commonlib. Without `database`, it configures only the CouchDB server.
 
 If you are using Docker Compose and the above command does not work or displays `ERROR: Hostname missing`, you can try running the following command, replacing the placeholders with your own values:
+
 ```
 curl -s https://raw.githubusercontent.com/vrtmrz/obsidian-livesync/main/utils/couchdb/couchdb-init.sh | hostname=http://<YOUR SERVER IP>:5984 username=<INSERT COUCHDB ADMINISTRATOR USERNAME HERE> password=<INSERT COUCHDB ADMINISTRATOR PASSWORD HERE> database=obsidiannotes bash
 ```
@@ -143,7 +157,7 @@ curl -s https://raw.githubusercontent.com/vrtmrz/obsidian-livesync/main/utils/co
 ## 3. Expose CouchDB to the Internet
 
 - You can skip this instruction if you using only in intranet and only with desktop devices.
-  - For mobile devices, Obsidian requires a valid SSL certificate. Usually, it needs exposing the internet.
+    - For mobile devices, Obsidian requires a valid SSL certificate. Usually, it needs exposing the internet.
 
 Whatever solutions we can use. For simplicity, the following sample uses Cloudflare Zero Trust for testing.
 
@@ -164,10 +178,11 @@ You will then get the following output:
   :
   :
 ```
+
 Now `https://tiles-photograph-routine-groundwater.trycloudflare.com` is our server. Make it into the background once, please.
 
-
 ## 4. Client Setup
+
 > [!TIP]
 > A generated Setup URI is the recommended path because it carries the current defaults for a new Vault and the selected remote profile. If a Setup URI cannot be generated, follow [Configure CouchDB manually on the first device](./quick_setup.md#configure-couchdb-manually-on-the-first-device), then generate a new Setup URI from that working device for every additional device.
 
@@ -182,23 +197,23 @@ export username=<INSERT COUCHDB USERNAME FOR LIVESYNC>
 export password=<INSERT THE COUCHDB PASSWORD>
 export passphrase=<INSERT A STRONG VAULT ENCRYPTION PASSPHRASE>
 export uri_passphrase=<INSERT A SEPARATE SETUP URI PASSPHRASE> # Optional
-deno run --minimum-dependency-age=0 --allow-env https://raw.githubusercontent.com/vrtmrz/obsidian-livesync/main/utils/setup/generate_setup_uri.ts
+export setup_uri_file=/secure/output/setup-uri.txt
+export uri_passphrase_file=/secure/output/setup-passphrase.txt # Required only when uri_passphrase is omitted
+deno run --minimum-dependency-age=0 --allow-env --allow-write=/secure/output https://raw.githubusercontent.com/kimjansheden/obsidian-livesync/main/utils/setup/generate_setup_uri.ts
 ```
 
 > [!TIP]
 > `passphrase` protects the synchronised Vault data with end-to-end encryption. `uri_passphrase` protects only the Setup URI. Use different values, store both securely, and do not send the Setup URI and its passphrase through the same channel.
 >
-> If `uri_passphrase` is omitted, the generator creates a cryptographically random value and prints it once.
+> If `uri_passphrase` is omitted, the generator creates a cryptographically random value and writes it to the separate, new `uri_passphrase_file`.
 
 The generator consumes the exact registry-pinned Commonlib release used by the provisioning utility. It creates a configured CouchDB remote profile, applies the current defaults for a new Vault, and encodes them with Commonlib's Setup URI contract.
 
-You will then get the following output:
+The generator creates new output files and refuses to replace existing paths. It does not expose the Setup URI or either passphrase through process output:
 
 ```bash
-Generated couchdb Setup URI.
-Your passphrase for the Setup URI is: H7vX...a-random-32-character-value
-This passphrase is never shown again, so store it safely.
-obsidian://setuplivesync?settings=%5B%22tm2DpsOE74nJAryprZO2M93wF%2Fvg.......4b26ed33230729%22%5D
+Generated couchdb Setup URI and wrote it to the requested protected file.
+No Setup URI or passphrase was written to the process output.
 ```
 
 Store the Setup URI and its passphrase separately.
@@ -223,7 +238,6 @@ I have published [docker-compose.yml and ini files](https://github.com/vrtmrz/se
 
 And, be sure to check the server log and be careful of malicious access.
 
-
 ## Reverse Proxies
 
 ### Traefik
@@ -232,64 +246,64 @@ If you are using Traefik, this [docker-compose.yml](https://github.com/vrtmrz/ob
 
 ```yaml
 services:
-  couchdb:
-    image: couchdb:latest
-    container_name: obsidian-livesync
-    user: 1000:1000
-    environment:
-      - COUCHDB_USER=username
-      - COUCHDB_PASSWORD=password
-    volumes:
-      - ./data:/opt/couchdb/data
-      - ./local.ini:/opt/couchdb/etc/local.ini
-    # Ports not needed when already passed to Traefik
-    #ports:
-    #  - 5984:5984
-    restart: unless-stopped
-    networks:
-      - proxy
-    labels:
-      - "traefik.enable=true"
-      # The Traefik Network
-      - "traefik.docker.network=proxy"
-      # Don't forget to replace 'obsidian-livesync.example.org' with your own domain
-      - "traefik.http.routers.obsidian-livesync.rule=Host(`obsidian-livesync.example.org`)"
-      # The 'websecure' entryPoint is basically your HTTPS entrypoint. Check the next code snippet if you are encountering problems only; you probably have a working traefik configuration if this is not your first container you are reverse proxying.
-      - "traefik.http.routers.obsidian-livesync.entrypoints=websecure"
-      - "traefik.http.routers.obsidian-livesync.service=obsidian-livesync"
-      - "traefik.http.services.obsidian-livesync.loadbalancer.server.port=5984"
-      - "traefik.http.routers.obsidian-livesync.tls=true"
-      # Replace the string 'letsencrypt' with your own certificate resolver
-      - "traefik.http.routers.obsidian-livesync.tls.certresolver=letsencrypt"
-      - "traefik.http.routers.obsidian-livesync.middlewares=obsidiancors"
-      # The part needed for CORS to work on Traefik 2.x starts here
-      - "traefik.http.middlewares.obsidiancors.headers.accesscontrolallowmethods=GET,PUT,POST,HEAD,DELETE"
-      - "traefik.http.middlewares.obsidiancors.headers.accesscontrolallowheaders=accept,authorization,content-type,origin,referer"
-      - "traefik.http.middlewares.obsidiancors.headers.accesscontrolalloworiginlist=app://obsidian.md,capacitor://localhost,http://localhost"
-      - "traefik.http.middlewares.obsidiancors.headers.accesscontrolmaxage=3600"
-      - "traefik.http.middlewares.obsidiancors.headers.addvaryheader=true"
-      - "traefik.http.middlewares.obsidiancors.headers.accessControlAllowCredentials=true"
+    couchdb:
+        image: couchdb:latest
+        container_name: obsidian-livesync
+        user: 1000:1000
+        environment:
+            - COUCHDB_USER=username
+            - COUCHDB_PASSWORD=password
+        volumes:
+            - ./data:/opt/couchdb/data
+            - ./local.ini:/opt/couchdb/etc/local.ini
+        # Ports not needed when already passed to Traefik
+        #ports:
+        #  - 5984:5984
+        restart: unless-stopped
+        networks:
+            - proxy
+        labels:
+            - "traefik.enable=true"
+            # The Traefik Network
+            - "traefik.docker.network=proxy"
+            # Don't forget to replace 'obsidian-livesync.example.org' with your own domain
+            - "traefik.http.routers.obsidian-livesync.rule=Host(`obsidian-livesync.example.org`)"
+            # The 'websecure' entryPoint is basically your HTTPS entrypoint. Check the next code snippet if you are encountering problems only; you probably have a working traefik configuration if this is not your first container you are reverse proxying.
+            - "traefik.http.routers.obsidian-livesync.entrypoints=websecure"
+            - "traefik.http.routers.obsidian-livesync.service=obsidian-livesync"
+            - "traefik.http.services.obsidian-livesync.loadbalancer.server.port=5984"
+            - "traefik.http.routers.obsidian-livesync.tls=true"
+            # Replace the string 'letsencrypt' with your own certificate resolver
+            - "traefik.http.routers.obsidian-livesync.tls.certresolver=letsencrypt"
+            - "traefik.http.routers.obsidian-livesync.middlewares=obsidiancors"
+            # The part needed for CORS to work on Traefik 2.x starts here
+            - "traefik.http.middlewares.obsidiancors.headers.accesscontrolallowmethods=GET,PUT,POST,HEAD,DELETE"
+            - "traefik.http.middlewares.obsidiancors.headers.accesscontrolallowheaders=accept,authorization,content-type,origin,referer"
+            - "traefik.http.middlewares.obsidiancors.headers.accesscontrolalloworiginlist=app://obsidian.md,capacitor://localhost,http://localhost"
+            - "traefik.http.middlewares.obsidiancors.headers.accesscontrolmaxage=3600"
+            - "traefik.http.middlewares.obsidiancors.headers.addvaryheader=true"
+            - "traefik.http.middlewares.obsidiancors.headers.accessControlAllowCredentials=true"
 
 networks:
-  proxy:
-    external: true
+    proxy:
+        external: true
 ```
 
 Partial `traefik.yml` config file mentioned in above:
+
 ```yml
+
 ...
-
 entryPoints:
-  web:
-    address: ":80"
-    http:
-      redirections:
-        entryPoint:
-          to: "websecure"
-          scheme: "https"
-  websecure:
-    address: ":443"
-
+    web:
+        address: ":80"
+        http:
+            redirections:
+                entryPoint:
+                    to: "websecure"
+                    scheme: "https"
+    websecure:
+        address: ":443"
 ...
 ```
 
@@ -317,7 +331,6 @@ location / {
 }
 ```
 
-
 3. If you get the "404 Database not found" error, make sure you placed CouchDB at the root location (recommended):
 
 ```nginx
@@ -341,11 +354,11 @@ server {
     location /couchdb {
         rewrite ^ $request_uri;
         rewrite ^/couchdb/(.*) /$1 break;
-        
+
         proxy_pass http://127.0.0.1:5984$uri;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        ... 
+        ...
     }
     location /_session {
         proxy_pass http://127.0.0.1:5984/_session;
@@ -359,23 +372,24 @@ server {
 4. If you added custom HTTP headers in database connection advanced settings, make sure to update both nginx and CouchDB configurations:
 
 Nginx:
+
 ```nginx
 location / {
-    set $pass 1; 
-    
+    set $pass 1;
+
     # Example of handling custom HTTP header
-    if ($http_x_custom_header != 'foo'){ 
-        set $pass 0; 
-    } 
+    if ($http_x_custom_header != 'foo'){
+        set $pass 0;
+    }
 
     # Important: OPTIONS requests don't carry headers, so they should always be proxied to the CouchDB
-    if ($request_method = 'OPTIONS') { 
-        set $pass 1; 
-    } 
+    if ($request_method = 'OPTIONS') {
+        set $pass 1;
+    }
 
-    if ($pass = 0) { 
-        return 403; 
-    } 
+    if ($pass = 0) {
+        return 403;
+    }
 
     proxy_pass http://127.0.0.1:5984;
     ...
@@ -383,6 +397,7 @@ location / {
 ```
 
 couchdb-etc/docker.ini:
+
 ```ini
 ...
 [cors]
