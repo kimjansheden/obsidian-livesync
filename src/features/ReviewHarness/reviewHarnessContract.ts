@@ -1,9 +1,6 @@
 import type { ObsidianLiveSyncSettings, SettingsMigrationState } from "@vrtmrz/livesync-commonlib/settings";
 import type { CompatibilityPause } from "@/common/databaseCompatibility.ts";
-import type {
-    ReviewHarnessScenarioResult,
-    ReviewHarnessScenarioStatus,
-} from "./reviewHarnessTypes";
+import type { ReviewHarnessScenarioResult, ReviewHarnessScenarioStatus } from "./reviewHarnessTypes";
 
 export type { ReviewHarnessScenarioResult, ReviewHarnessScenarioStatus } from "./reviewHarnessTypes";
 
@@ -27,8 +24,7 @@ export const REVIEW_HARNESS_SCENARIOS = [
     {
         id: "p2p-composition",
         title: "P2P composition",
-        description:
-            "Checks that the Obsidian host and P2P interface still resolve the current Commonlib replicator.",
+        description: "Checks that the Obsidian host and P2P interface still resolve the current Commonlib replicator.",
         mode: "automatic",
         access: "read-only",
     },
@@ -122,7 +118,9 @@ const NEW_VAULT_RECOMMENDATION_KEYS = [
     "E2EEAlgorithm",
 ] as const;
 
-type LifecycleSettingKey = (typeof PRESERVED_SYNC_SETTING_KEYS)[number] | (typeof NEW_VAULT_RECOMMENDATION_KEYS)[number];
+type LifecycleSettingKey =
+    | (typeof PRESERVED_SYNC_SETTING_KEYS)[number]
+    | (typeof NEW_VAULT_RECOMMENDATION_KEYS)[number];
 type SettingsForLifecycleInspection = Partial<Pick<ObsidianLiveSyncSettings, LifecycleSettingKey>>;
 
 export function inspectSettingsLifecycle(input: {
@@ -138,9 +136,7 @@ export function inspectSettingsLifecycle(input: {
         };
     }
 
-    const invalidSyncSettings = PRESERVED_SYNC_SETTING_KEYS.filter(
-        (key) => typeof input.settings[key] !== "boolean"
-    );
+    const invalidSyncSettings = PRESERVED_SYNC_SETTING_KEYS.filter((key) => typeof input.settings[key] !== "boolean");
     if (invalidSyncSettings.length > 0) {
         return {
             status: "failed",
@@ -233,7 +229,7 @@ export interface ReviewHarnessReportInput {
 }
 
 function tableCell(value: string): string {
-    return value.replace(/\|/gu, "\\|").replace(/\r?\n/gu, "<br>");
+    return value.replace(/\\/gu, "\\\\").replace(/\|/gu, "\\|").replace(/\r?\n/gu, "<br>");
 }
 
 function table(headers: readonly string[], rows: readonly (readonly string[])[]): string {
@@ -256,12 +252,7 @@ export function formatReviewHarnessReport(input: ReviewHarnessReportInput): stri
     );
     const scenarios = table(
         ["Scenario", "Mode", "Status", "Detail"],
-        input.scenarios.map(({ id, title, mode, status, detail }) => [
-            `${title} (${id})`,
-            mode,
-            status,
-            detail,
-        ])
+        input.scenarios.map(({ id, title, mode, status, detail }) => [`${title} (${id})`, mode, status, detail])
     );
     return `## Self-hosted LiveSync Review Harness report
 

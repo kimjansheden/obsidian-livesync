@@ -8,22 +8,7 @@ import { isCloudantURI } from "@vrtmrz/livesync-commonlib/compat/pouchdb/utils_c
 import { compatGlobal } from "@vrtmrz/livesync-commonlib/compat/common/coreEnvFunctions";
 import { manifestVersion, packageVersion } from "@vrtmrz/livesync-commonlib/compat/common/coreEnvVars";
 import type { LiveSyncBaseCore } from "@/LiveSyncBaseCore";
-function redactObject(obj: Record<string, unknown>, dotted: string, redactedValue = "REDACTED") {
-    const keys = dotted.split(".");
-    let current = obj;
-    for (let i = 0; i < keys.length - 1; i++) {
-        const key = keys[i];
-        if (!(key in current)) {
-            current[key] = {};
-        }
-        current = current[key] as Record<string, unknown>;
-    }
-    const lastKey = keys[keys.length - 1];
-    if (lastKey in current) {
-        current[lastKey] = redactedValue;
-    }
-    return obj;
-}
+import { redactObject } from "./redactObject.ts";
 export async function generateReport(settings: ObsidianLiveSyncSettings, core: LiveSyncBaseCore) {
     let responseConfig: Record<string, unknown> = {};
     const REDACTED = "𝑅𝐸𝐷𝐴𝐶𝑇𝐸𝐷";

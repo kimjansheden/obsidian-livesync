@@ -33,13 +33,20 @@ Deno.test({
             await aggregator.goto(new URL("aggregator.html#id=pages-smoke&n=2&i=0&d=before%2", server.baseUrl).href);
             await aggregator.getByText("1 / 2 Loaded", { exact: true }).waitFor();
             await aggregator.goto(
-                new URL("aggregator.html#id=pages-smoke&n=2&i=1&d=3after%26amp%2Bplus%25percent", server.baseUrl)
-                    .href
+                new URL("aggregator.html#id=pages-smoke&n=2&i=1&d=3after%26amp%2Bplus%25percent", server.baseUrl).href
             );
             assertEquals(
                 await aggregator.getByRole("link", { name: "Open Obsidian to complete setup" }).getAttribute("href"),
                 "obsidian://setuplivesync?settingsQR=before%23after%26amp%2Bplus%25percent"
             );
+            await aggregator.goto(
+                new URL(
+                    "aggregator.html#id=pages-smoke-xss&n=1&i=0&d=%22%3E%3Cimg%20id%3Dxss-marker%20src%3Dx%20onerror%3Dalert(1)%3E",
+                    server.baseUrl
+                ).href
+            );
+            await aggregator.getByRole("link", { name: "Open Obsidian to complete setup" }).waitFor();
+            assertEquals(await aggregator.locator("#xss-marker").count(), 0);
             assertNoAggregatorFailures();
             assertNoAggregatorNetworkFailures();
             await aggregator.close();

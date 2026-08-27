@@ -186,7 +186,7 @@ describe("Review Harness contract", () => {
                 pluginVersion: "1.0.0-beta.1",
                 obsidianVersion: "1.13.1",
                 platform: "ios",
-                userAgent: "Obsidian|mobile\nreview",
+                userAgent: "Obsidian\\mobile|review\nnext",
                 viewport: "390x844",
             },
             scenarios: [
@@ -207,7 +207,7 @@ describe("Review Harness contract", () => {
         });
 
         expect(report).toContain("## Self-hosted LiveSync Review Harness report");
-        expect(report).toContain("Obsidian\\|mobile<br>review");
+        expect(report).toContain("Obsidian\\\\mobile\\|review<br>next");
         expect(report).toContain("Compatibility review boundary (compatibility-review)");
         expect(report).toContain("was not transmitted");
         expect(report).not.toContain("Vault name");
