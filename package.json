@@ -192,6 +192,8 @@
         "xxhash-wasm-102": "npm:xxhash-wasm@^1.0.2"
     },
     "overrides": {
+        "@puppeteer/browsers": "3.2.1",
+        "deepmerge-ts": "8.0.2",
         "pouchdb-core": {
             "uuid": "11.1.1"
         },
