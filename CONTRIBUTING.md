@@ -13,7 +13,7 @@ To set up the development environment, please follow these steps:
 
 2. Install the package dependencies:
    ```bash
-   npm ci
+   npm ci --ignore-scripts
    ```
 
 3. Build the plug-in:
@@ -24,6 +24,12 @@ To set up the development environment, please follow these steps:
 For a more comprehensive guide on development workflows, testing configurations, and the Commonlib dependency, please refer to [devs.md](devs.md).
 
 ## Guidelines for Contributions
+
+### Security boundary
+
+Never include real vault content, credentials, Setup URIs, support exports, private paths, or repository secrets in a contribution. Use explicit synthetic markers and reserved example domains. Run `npm run security:policy` and `npm audit --audit-level=low` before submitting a pull request.
+
+All external actions must be pinned to a complete commit SHA. Pull-request code must not run with `pull_request_target`, repository secrets, write tokens, or self-hosted runners. Report exploitable findings through the private process in [SECURITY.md](SECURITY.md), not in a public issue, branch, or pull request.
 
 ### 1. Code Style and Verification
 

@@ -17,6 +17,7 @@ import { InjectableReplicationService } from "@vrtmrz/livesync-commonlib/compat/
 import { InjectableReplicatorService } from "@vrtmrz/livesync-commonlib/compat/services/implements/injectable/InjectableReplicatorService";
 import { InjectableServiceHub } from "@vrtmrz/livesync-commonlib/compat/services/implements/injectable/InjectableServiceHub";
 import { InjectableSettingService } from "@vrtmrz/livesync-commonlib/compat/services/implements/injectable/InjectableSettingService";
+import { prepareSettingsForPersistence } from "@/common/security/settingsPersistence";
 import { InjectableTestService } from "@vrtmrz/livesync-commonlib/compat/services/implements/injectable/InjectableTestService";
 import { InjectableTweakValueService } from "@vrtmrz/livesync-commonlib/compat/services/implements/injectable/InjectableTweakValueService";
 import { InjectableVaultServiceCompat } from "@vrtmrz/livesync-commonlib/compat/services/implements/injectable/InjectableVaultService";
@@ -24,10 +25,7 @@ import { InjectableVaultServiceCompat } from "@vrtmrz/livesync-commonlib/compat/
 import { setLang, translateLiveSyncMessage } from "@/common/translation";
 import { BrowserConfirm } from "./BrowserConfirm";
 import { createBrowserKeyValueDatabaseFactory } from "./BrowserKeyValueDatabase";
-import {
-    LiveSyncBrowserAPIService,
-    type LiveSyncBrowserAPIServiceOptions,
-} from "./LiveSyncBrowserAPIService";
+import { LiveSyncBrowserAPIService, type LiveSyncBrowserAPIServiceOptions } from "./LiveSyncBrowserAPIService";
 import { LiveSyncBrowserUIService } from "./LiveSyncBrowserUIService";
 
 export interface LiveSyncBrowserSettingsPersistence {
@@ -51,9 +49,7 @@ export interface LiveSyncBrowserServiceHubOptions<T extends ServiceContext> {
     API?: Omit<LiveSyncBrowserAPIServiceOptions, "confirm" | "getSystemVaultName">;
 }
 
-class LiveSyncBrowserAppLifecycleService<
-    T extends ServiceContext,
-> extends InjectableAppLifecycleService<T> {}
+class LiveSyncBrowserAppLifecycleService<T extends ServiceContext> extends InjectableAppLifecycleService<T> {}
 
 class LiveSyncBrowserDatabaseService<T extends ServiceContext> extends DatabaseService<T> {}
 
@@ -101,13 +97,11 @@ export class LiveSyncBrowserServiceHub<T extends ServiceContext> extends Injecta
         });
         const settingsPersistence = options.settings;
         setting.loadData.setHandler(
-            settingsPersistence
-                ? () => settingsPersistence.load()
-                : () => Promise.resolve(undefined)
+            settingsPersistence ? () => settingsPersistence.load() : () => Promise.resolve(undefined)
         );
         setting.saveData.setHandler(
             settingsPersistence
-                ? (settings) => settingsPersistence.save(settings)
+                ? (settings) => settingsPersistence.save(prepareSettingsForPersistence(settings))
                 : () => Promise.resolve()
         );
 
@@ -163,8 +157,7 @@ export class LiveSyncBrowserServiceHub<T extends ServiceContext> extends Injecta
             databaseService: database,
         });
         const keyValueDB = new LiveSyncBrowserKeyValueDBService(context, {
-            openKeyValueDatabase:
-                options.openKeyValueDatabase ?? createBrowserKeyValueDatabaseFactory(),
+            openKeyValueDatabase: options.openKeyValueDatabase ?? createBrowserKeyValueDatabaseFactory(),
             appLifecycle,
             databaseEvents,
             vault,

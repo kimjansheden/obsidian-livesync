@@ -86,4 +86,82 @@ describe("LiveSync browser service context contract", () => {
         expect(hub.appLifecycle.isReloadingScheduled()).toBe(true);
         expect(restartCalls).toEqual(["schedule", "perform", "ask:restart now"]);
     });
+
+    it("encrypts a newly created remote profile before the persistence adapter receives it", async () => {
+        const deviceLocalSettings = new Map<string, string>();
+        vi.stubGlobal("localStorage", {
+            getItem: (key: string) => deviceLocalSettings.get(key) ?? null,
+            setItem: (key: string, value: string) => deviceLocalSettings.set(key, value),
+            removeItem: (key: string) => deviceLocalSettings.delete(key),
+            clear: () => deviceLocalSettings.clear(),
+        });
+        const savedSettings: (typeof DEFAULT_SETTINGS)[] = [];
+        const hub = createLiveSyncBrowserServiceHub({
+            settings: {
+                load: async () => ({ ...DEFAULT_SETTINGS }),
+                save: async (settings) => savedSettings.push(settings),
+            },
+        });
+
+        await hub.setting.loadSettings();
+        savedSettings.length = 0;
+        await hub.setting.updateSettings(
+            (settings) => ({
+                ...settings,
+                remoteConfigurations: {
+                    synthetic: {
+                        id: "synthetic",
+                        name: "Synthetic remote",
+                        uri: "sls+https://marker-user:marker-password@example.invalid/synthetic",
+                        isEncrypted: false,
+                    },
+                },
+            }),
+            true
+        );
+
+        expect(savedSettings).toHaveLength(1);
+        const persisted = savedSettings[0].remoteConfigurations.synthetic;
+        expect(persisted.isEncrypted).toBe(true);
+        expect(persisted.uri).not.toContain("marker-user");
+        expect(persisted.uri).not.toContain("marker-password");
+        expect(persisted.uri).not.toContain("example.invalid");
+    });
+
+    it("refuses a new remote profile when its configured persistence passphrase is unavailable", async () => {
+        vi.stubGlobal("localStorage", {
+            getItem: () => null,
+            setItem: () => undefined,
+            removeItem: () => undefined,
+            clear: () => undefined,
+        });
+        const save = vi.fn(async () => undefined);
+        const hub = createLiveSyncBrowserServiceHub({
+            settings: {
+                load: async () => ({ ...DEFAULT_SETTINGS }),
+                save,
+            },
+        });
+
+        await hub.setting.loadSettings();
+        save.mockClear();
+        await expect(
+            hub.setting.updateSettings(
+                (settings) => ({
+                    ...settings,
+                    configPassphraseStore: "LOCALSTORAGE",
+                    remoteConfigurations: {
+                        synthetic: {
+                            id: "synthetic",
+                            name: "Synthetic remote",
+                            uri: "sls+https://marker-user:marker-password@example.invalid/synthetic",
+                            isEncrypted: false,
+                        },
+                    },
+                }),
+                true
+            )
+        ).rejects.toThrow("remoteConfigurations.synthetic.uri");
+        expect(save).not.toHaveBeenCalled();
+    });
 });

@@ -13,6 +13,7 @@ import { AbstractModule } from "@/modules/AbstractModule.ts";
 import type { ServiceContext } from "@vrtmrz/livesync-commonlib/context";
 import type { InjectableServiceHub } from "@vrtmrz/livesync-commonlib/compat/services/implements/injectable/InjectableServiceHub";
 import type { LiveSyncCore } from "@/main.ts";
+import { sanitizeSettingsForMarkdown } from "@/common/security/settingsPersistence";
 const SETTING_HEADER = "````yaml:livesync-setting\n";
 const SETTING_FOOTER = "\n````";
 export class ModuleObsidianSettingsAsMarkdown extends AbstractModule {
@@ -194,20 +195,10 @@ export class ModuleObsidianSettingsAsMarkdown extends AbstractModule {
         settings?: ObsidianLiveSyncSettings,
         keepCredential?: boolean
     ): Partial<ObsidianLiveSyncSettings> {
-        const saveData = { ...(settings ? settings : this.settings) } as Partial<ObsidianLiveSyncSettings>;
-        delete saveData.encryptedCouchDBConnection;
-        delete saveData.encryptedPassphrase;
-        delete saveData.additionalSuffixOfDatabaseName;
-        if (!saveData.writeCredentialsForSettingSync && !keepCredential) {
-            delete saveData.couchDB_USER;
-            delete saveData.couchDB_PASSWORD;
-            delete saveData.passphrase;
-            delete saveData.jwtKey;
-            delete saveData.jwtKid;
-            delete saveData.jwtSub;
-            delete saveData.couchDB_CustomHeaders;
-            delete saveData.bucketCustomHeaders;
-        }
+        const saveData = sanitizeSettingsForMarkdown(settings ? settings : this.settings);
+        // Markdown is never a credential transport. The legacy flags are kept
+        // in the signature for compatibility but cannot opt credentials in.
+        void keepCredential;
         return saveData;
     }
 
