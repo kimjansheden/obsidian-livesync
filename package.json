@@ -30,6 +30,7 @@
         "i18n:json2yaml": "tsx _tools/json2yaml.ts",
         "i18n:yaml2json": "tsx _tools/yaml2json.ts",
         "test:unit": "vitest run --config vitest.config.unit.ts",
+        "security:policy": "node scripts/security/verify-repository-policy.mjs",
         "build:browser-apps": "npm run build --workspace livesync-webapp --workspace webpeer",
         "test:browser-apps": "npm run test:browser --workspace livesync-webapp && npm run test:browser --workspace webpeer",
         "test:browser-apps:pages": "deno test -A --no-check --frozen --config test/browser-apps/deno.json --lock test/browser-apps/deno.lock test/browser-apps/pages/browser-smoke.test.ts",

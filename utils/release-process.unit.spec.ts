@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -36,18 +36,29 @@ function writeJson(directory: string, path: string, value: unknown): void {
 }
 
 function runNode(script: string, args: string[], cwd: string, env: Record<string, string> = {}) {
+    const overriddenKeys = new Set(Object.keys(env).map((key) => key.toLowerCase()));
+    const inherited = Object.fromEntries(
+        Object.entries(process.env).filter(([key]) => !overriddenKeys.has(key.toLowerCase()))
+    );
     return spawnSync(process.execPath, [script, ...args], {
         cwd,
         encoding: "utf8",
-        env: { ...process.env, ...env },
+        env: { ...inherited, ...env },
     });
 }
 
 function runNpm(args: string[], cwd: string) {
-    return spawnSync(process.platform === "win32" ? "npm.cmd" : "npm", args, {
+    const npmCli = process.env.npm_execpath;
+    if (!npmCli) throw new Error("npm_execpath is unavailable");
+    const cleanEnvironment = Object.fromEntries(
+        Object.entries(process.env).filter(
+            ([key]) => !key.toLowerCase().startsWith("npm_package_") && !key.toLowerCase().startsWith("npm_lifecycle_")
+        )
+    );
+    return spawnSync(process.execPath, [npmCli, ...args], {
         cwd,
         encoding: "utf8",
-        env: process.env,
+        env: cleanEnvironment,
     });
 }
 
@@ -158,28 +169,27 @@ describe("release notes", () => {
 });
 
 describe("release workflow", () => {
-    it("uses the locked Commonlib package instead of generated fallback declarations", () => {
-        const workflow = readFileSync(prepareReleaseWorkflow, "utf8");
-        const body = renderReleasePrBody("1.0.0-beta.0", "integration");
-
-        expect(workflow).not.toContain("npm run build:lib:types");
-        expect(workflow).not.toMatch(/git add[^\n]*_types/);
-        expect(workflow).toMatch(/git add[^\n]*package-lock\.json/);
-        expect(body).toContain("locked Commonlib package version");
+    it("removes inherited branch-writing and container-publication workflows", () => {
+        expect(existsSync(prepareReleaseWorkflow)).toBe(false);
+        expect(existsSync(finaliseReleaseWorkflow)).toBe(false);
+        expect(existsSync(cliDockerWorkflow)).toBe(false);
     });
 
-    it("reruns the version lifecycle when the integration branch already selects the release version", () => {
-        const workflow = readFileSync(prepareReleaseWorkflow, "utf8");
+    it("uses one manual, immutable, pinned, and attested release path", () => {
+        const workflow = readFileSync(releaseWorkflow, "utf8");
 
-        expect(workflow).toContain('npm version "${VERSION}" --no-git-tag-version --allow-same-version');
-    });
-
-    it("generates the release PR body from the selected version and base branch", () => {
-        const workflow = readFileSync(prepareReleaseWorkflow, "utf8");
-
-        expect(workflow).toContain('node utils/release-pr-body.mjs "${VERSION}" "${BASE_BRANCH}"');
-        expect(workflow).not.toContain("leave \\`main\\`");
-        expect(workflow).not.toContain("latest stable release");
+        expect(workflow).not.toMatch(/^\s+push:/m);
+        expect(workflow).toContain("expected_sha:");
+        expect(workflow).toContain('git verify-tag "$TAG"');
+        expect(workflow).toContain("npm ci --ignore-scripts");
+        expect(workflow).toContain("npm audit --audit-level=low");
+        expect(workflow).toContain("npm sbom --sbom-format cyclonedx");
+        expect(workflow).toContain("sha256sum main.js manifest.json styles.css package-lock.json sbom.cdx.json");
+        expect(workflow).toContain("actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8");
+        expect(workflow).not.toContain("secrets.");
+        for (const match of workflow.matchAll(/uses:\s*[^\s#]+@([^\s#]+)/g)) {
+            expect(match[1]).toMatch(/^[0-9a-f]{40}$/);
+        }
     });
 
     it("keeps an immutable pre-release out of its base branch after BRAT validation", () => {
@@ -209,65 +219,11 @@ describe("release workflow", () => {
         expect(stable).not.toContain("prerelease=false");
     });
 
-    it("requires stable pre-release staging to defer CLI publication", () => {
-        const workflow = readFileSync(finaliseReleaseWorkflow, "utf8");
-
-        expect(workflow).toContain(
-            'if [[ "${VERSION}" != *-* && "${PRERELEASE}" == "true" && "${PUBLISH_CLI}" == "true" ]]; then'
-        );
-        expect(workflow).toContain(
-            "A stable version staged as a pre-release must use publish_cli=false so that the CLI latest and major-minor image tags do not advance before BRAT validation."
-        );
-    });
-
-    it("dispatches the selected plug-in and CLI workflows explicitly", () => {
-        const workflow = readFileSync(finaliseReleaseWorkflow, "utf8");
-
-        expect(workflow).toContain("actions: write");
-        expect(workflow).toContain('node utils/release-tags.mjs ensure "${VERSION}" "${EXPECTED_HEAD_SHA}"');
-        expect(workflow).toContain('git push --atomic origin "refs/tags/${VERSION}" "refs/tags/${VERSION}-cli"');
-        expect(workflow).not.toContain("Tag already exists");
-        expect(workflow).toContain("PUBLISH_CLI: ${{ inputs.publish_cli }}");
-        expect(workflow).toContain('if [[ "${PUBLISH_CLI}" == "true" ]]; then');
-        expect(workflow).toContain("gh workflow run cli-docker.yml");
-        expect(workflow).toContain('--ref "${VERSION}-cli"');
-        expect(workflow).toContain("--field dry_run=false");
-        expect(workflow).toContain("--field force=false");
-        expect(workflow).toContain("gh workflow run release.yml");
-        expect(workflow).toContain("explicitly dispatched the CLI container workflow");
-    });
-
-    it("publishes only by explicit dispatch and validates the selected release", () => {
-        const workflow = readFileSync(releaseWorkflow, "utf8");
-
-        expect(workflow).not.toMatch(/^\s+push:/m);
-        expect(workflow).toContain("ref: ${{ inputs.tag }}");
-        expect(workflow).toContain('node utils/release-notes.mjs validate "${TAG}"');
-        expect(workflow).toContain('TAG_SHA="$(git rev-parse "refs/tags/${TAG}^{commit}")"');
-        expect(workflow).not.toContain("Get Version");
-    });
-
-    it("supports a pre-release plug-in without creating or publishing a CLI release", () => {
-        const workflow = readFileSync(finaliseReleaseWorkflow, "utf8");
-
-        expect(workflow).toContain("prerelease:");
-        expect(workflow).toContain("publish_cli:");
-        expect(workflow).toContain('--field prerelease="${PRERELEASE}"');
-        expect(workflow).toContain("--plugin-only");
-    });
-
     it("does not attach an unsupported release archive", () => {
         const workflow = readFileSync(releaseWorkflow, "utf8");
 
         expect(workflow).not.toContain("zip -r");
         expect(workflow).not.toContain("${{ github.event.repository.name }}.zip");
-    });
-
-    it("does not promote a pre-release CLI image to stable moving tags", () => {
-        const workflow = readFileSync(cliDockerWorkflow, "utf8");
-
-        expect(workflow).toContain('if [[ "${VERSION}" == *-* ]]; then');
-        expect(workflow).toContain('TAGS="${IMAGE}:${VERSION}-cli,${IMAGE}:${VERSION}-sha-${SHORT_SHA}-cli"');
     });
 });
 

@@ -1,73 +1,109 @@
-name: Release Obsidian Plugin
+name: Attested Release
+
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag to build
+        description: Existing signed tag to release
         required: true
         type: string
-      draft:
-        description: Create the GitHub Release as a draft
+      expected_sha:
+        description: Exact reviewed commit SHA
+        required: true
+        type: string
+      prerelease:
+        description: Publish as a prerelease
         required: false
         type: boolean
         default: true
-      prerelease:
-        description: Mark the GitHub Release as a pre-release
-        required: false
-        type: boolean
-        default: false
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: release-${{ inputs.tag }}
+  cancel-in-progress: false
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
+  release:
+    name: Verify, build, attest, and publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
     environment: release
-    permissions:
-      contents: write
-      id-token: write
-      attestations: write
     steps:
-    - uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
-        ref: ${{ inputs.tag }}
-    - name: Use Node.js
-      uses: actions/setup-node@v4
-      with:
-        node-version: '24.x'
-    - name: Validate release
-      env:
-        TAG: ${{ inputs.tag }}
-      run: |
-        set -euo pipefail
-        node utils/release-notes.mjs validate "${TAG}"
-        HEAD_SHA="$(git rev-parse HEAD)"
-        TAG_SHA="$(git rev-parse "refs/tags/${TAG}^{commit}")"
-        if [[ "${HEAD_SHA}" != "${TAG_SHA}" ]]; then
-          echo "Checked-out commit is ${HEAD_SHA}, but tag ${TAG} points to ${TAG_SHA}." >&2
-          exit 1
-        fi
-    # Build the plugin
-    - name: Build
-      id: build
-      run: |
-        npm ci
-        npm run build --if-present
-    # Attest
-    - name: Attest Plugin Artifacts
-      uses: actions/attest-build-provenance@v4
-      with:
+      - name: Validate immutable inputs
+        env:
+          TAG: ${{ inputs.tag }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+-security\.[0-9]+$ ]] || { echo "Invalid release tag" >&2; exit 1; }
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "Invalid expected SHA" >&2; exit 1; }
+
+      - name: Check out the signed tag
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify tag identity
+        env:
+          TAG: ${{ inputs.tag }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test "$(git rev-parse "refs/tags/$TAG^{commit}")" = "$EXPECTED_SHA"
+          git config gpg.ssh.allowedSignersFile docs/security/release-signers.allowed
+          git verify-tag "$TAG"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24.7.0
+          cache: npm
+
+      - name: Install locked dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Re-run the release gate
+        run: |
+          npm run security:policy
+          npm audit --audit-level=low
+          npm run tsc-check
+          npm run tsc-check:apps
+          npm run test:unit
+
+      - name: Build release artifacts
+        run: npm run build
+
+      - name: Create SBOM and checksums
+        run: |
+          npm sbom --sbom-format cyclonedx > sbom.cdx.json
+          sha256sum main.js manifest.json styles.css package-lock.json sbom.cdx.json > SHA256SUMS
+
+      - name: Attest release artifacts
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8
+        with:
           subject-path: |
-              main.js
-              manifest.json
-              styles.css
-    - name: Create Release and Upload Assets
-      uses: softprops/action-gh-release@v2
-      with:
-        files: |
-          main.js
-          manifest.json
-          styles.css
-        name: ${{ inputs.tag }}
-        tag_name: ${{ inputs.tag }}
-        draft: ${{ inputs.draft }}
-        prerelease: ${{ inputs.prerelease }}
+            main.js
+            manifest.json
+            styles.css
+            package-lock.json
+            sbom.cdx.json
+            SHA256SUMS
+
+      - name: Publish immutable GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          set -euo pipefail
+          PRERELEASE_FLAG=""
+          if [[ "$PRERELEASE" = "true" ]]; then PRERELEASE_FLAG="--prerelease"; fi
+          gh release create "$TAG" main.js manifest.json styles.css package-lock.json sbom.cdx.json SHA256SUMS \
+            --verify-tag --title "$TAG" --generate-notes $PRERELEASE_FLAG
