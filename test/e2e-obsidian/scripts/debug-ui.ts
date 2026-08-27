@@ -2,7 +2,9 @@ import { launchObsidian } from "../runner/launch.ts";
 import { installBuiltPlugin } from "../runner/pluginInstaller.ts";
 import { createTemporaryVault } from "../runner/vault.ts";
 import { requireObsidianBinary } from "../runner/environment.ts";
-import { writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { createDiagnosticsDirectory } from "../runner/diagnostics.ts";
 import { obsidianRemoteDebuggingPort, preseedTrustedVaultState, withObsidianPage } from "../runner/ui.ts";
 
 const port = obsidianRemoteDebuggingPort();
@@ -24,6 +26,10 @@ async function main(): Promise<void> {
 
     try {
         await preseedTrustedVaultState(port, vault.id);
+        const diagnosticsDirectory = await createDiagnosticsDirectory(
+            "debug-ui",
+            process.env.E2E_OBSIDIAN_DIAGNOSTICS_DIR
+        );
         const { screenshotPath, textPath } = await withObsidianPage(port, async (page) => {
             await page.waitForTimeout(Number(process.env.E2E_OBSIDIAN_DEBUG_WAIT_MS ?? 5000));
             const title = await page.title().catch((error: unknown) => `title error: ${String(error)}`);
@@ -38,8 +44,12 @@ async function main(): Promise<void> {
                 await page.getByText("Trust author and enable plugins").click({ timeout: 10000 });
                 await page.waitForTimeout(Number(process.env.E2E_OBSIDIAN_DEBUG_AFTER_CLICK_WAIT_MS ?? 3000));
             }
-            const screenshotPath = process.env.E2E_OBSIDIAN_DEBUG_SCREENSHOT ?? "/tmp/obsidian-e2e-debug.png";
-            const textPath = process.env.E2E_OBSIDIAN_DEBUG_TEXT ?? "/tmp/obsidian-e2e-debug.txt";
+            const screenshotPath = process.env.E2E_OBSIDIAN_DEBUG_SCREENSHOT ?? join(diagnosticsDirectory, "debug.png");
+            const textPath = process.env.E2E_OBSIDIAN_DEBUG_TEXT ?? join(diagnosticsDirectory, "debug.txt");
+            await Promise.all([
+                mkdir(dirname(screenshotPath), { recursive: true }),
+                mkdir(dirname(textPath), { recursive: true }),
+            ]);
             await page.screenshot({ path: screenshotPath, fullPage: true });
             await writeFile(textPath, [`title: ${title}`, `url: ${url}`, "", text].join("\n"), "utf-8");
             return { screenshotPath, textPath };

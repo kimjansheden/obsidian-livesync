@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdir, readFile, stat } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { connect } from "node:net";
 import { dirname, extname, relative, resolve } from "node:path";
@@ -59,8 +59,9 @@ function closeServer(server: Server): Promise<void> {
 }
 
 async function startStaticServer(): Promise<StaticServer> {
-    const distribution = await stat(webPeerDist).catch(() => undefined);
-    if (!distribution?.isDirectory()) {
+    try {
+        await readFile(resolve(webPeerDist, "index.html"));
+    } catch {
         throw new Error(
             `WebPeer production bundle was not found at ${webPeerDist}. Build the webpeer workspace first.`
         );
@@ -78,9 +79,15 @@ async function startStaticServer(): Promise<StaticServer> {
             }
 
             try {
-                const candidateStat = await stat(candidate);
-                const filePath = candidateStat.isDirectory() ? resolve(candidate, "index.html") : candidate;
-                const body = await readFile(filePath);
+                let filePath = candidate;
+                let body: Buffer;
+                try {
+                    body = await readFile(filePath);
+                } catch (error) {
+                    if ((error as NodeJS.ErrnoException).code !== "EISDIR") throw error;
+                    filePath = resolve(candidate, "index.html");
+                    body = await readFile(filePath);
+                }
                 response.writeHead(200, {
                     "cache-control": "no-store",
                     "content-type": contentType(filePath),

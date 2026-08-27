@@ -2,6 +2,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { evalObsidianJson } from "../runner/cli.ts";
 import { discoverObsidianCli, requireObsidianBinary } from "../runner/environment.ts";
+import { createDiagnosticsDirectory } from "../runner/diagnostics.ts";
 import { createE2eObsidianDeviceLocalState, waitForLiveSyncCoreReady } from "../runner/liveSyncWorkflow.ts";
 import { startObsidianLiveSyncSession, type ObsidianLiveSyncSession } from "../runner/session.ts";
 import { withObsidianPage } from "../runner/ui.ts";
@@ -121,9 +122,13 @@ async function main(): Promise<void> {
     const vault = await createTemporaryVault();
     let session: ObsidianLiveSyncSession | undefined;
 
-    const screenshotDir =
+    const screenshotDir = await createDiagnosticsDirectory(
+        "document-history-nav",
         process.env.E2E_OBSIDIAN_HISTORY_SCREENSHOT_DIR ??
-        join(process.env.E2E_OBSIDIAN_DIAGNOSTICS_DIR ?? "/tmp/obsidian-livesync-e2e", "document-history-nav");
+            (process.env.E2E_OBSIDIAN_DIAGNOSTICS_DIR
+                ? join(process.env.E2E_OBSIDIAN_DIAGNOSTICS_DIR, "document-history-nav")
+                : undefined)
+    );
     const reportPath = process.env.E2E_OBSIDIAN_HISTORY_REPORT ?? join(screenshotDir, "report.txt");
 
     async function captureStep(page: import("playwright").Page, step: string): Promise<string> {
