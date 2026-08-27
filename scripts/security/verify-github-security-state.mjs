@@ -15,9 +15,9 @@ export function evaluateGitHubSecurityState(state) {
     const dependabotAlerts = requireArray(state.dependabotAlerts, "Dependabot alerts", errors);
     const secretScanningAlerts = requireArray(state.secretScanningAlerts, "Secret scanning alerts", errors);
 
-    if (state.defaultBranchSha !== state.expectedSha) {
+    if (state.resolvedRefSha !== state.expectedSha) {
         errors.push(
-            `Release commit ${state.expectedSha} is not the current main commit ${state.defaultBranchSha ?? "<missing>"}.`
+            `Expected commit ${state.expectedSha} does not match ${state.ref ?? "the declared ref"} at ${state.resolvedRefSha ?? "<missing>"}.`
         );
     }
 
@@ -104,6 +104,8 @@ export async function collectGitHubSecurityState({
     repository,
     expectedSha,
     token,
+    scope = "main",
+    pullRequestNumber,
     apiUrl = "https://api.github.com",
     fetchImplementation = fetch,
 }) {
@@ -114,11 +116,20 @@ export async function collectGitHubSecurityState({
         throw new Error("EXPECTED_SHA must be one full lowercase Git commit SHA.");
     }
     if (!token) throw new Error("GH_TOKEN is required to query the protected GitHub security state.");
+    if (scope !== "main" && scope !== "pull-request") {
+        throw new Error("SECURITY_SCOPE must be main or pull-request.");
+    }
+    if (scope === "pull-request" && !/^[1-9][0-9]*$/u.test(String(pullRequestNumber ?? ""))) {
+        throw new Error("PULL_REQUEST_NUMBER must be a positive integer for pull-request scope.");
+    }
 
     const repositoryUrl = `${apiUrl.replace(/\/$/u, "")}/repos/${repository}`;
-    const commitResponse = await requestJson(`${repositoryUrl}/commits/main`, token, fetchImplementation);
-    const analysesUrl = `${repositoryUrl}/code-scanning/analyses?ref=refs%2Fheads%2Fmain&tool_name=CodeQL&per_page=100`;
-    const codeScanningUrl = `${repositoryUrl}/code-scanning/alerts?state=open&per_page=100`;
+    const ref = scope === "pull-request" ? `refs/pull/${pullRequestNumber}/merge` : "refs/heads/main";
+    const encodedRef = encodeURIComponent(ref);
+    const commitResponse = await requestJson(`${repositoryUrl}/commits/${encodedRef}`, token, fetchImplementation);
+    const analysesUrl = `${repositoryUrl}/code-scanning/analyses?ref=${encodedRef}&tool_name=CodeQL&per_page=100`;
+    const codeScanningSelector = scope === "pull-request" ? `pr=${pullRequestNumber}` : `ref=${encodedRef}`;
+    const codeScanningUrl = `${repositoryUrl}/code-scanning/alerts?state=open&${codeScanningSelector}&per_page=100`;
     const dependabotUrl = `${repositoryUrl}/dependabot/alerts?state=open&per_page=100`;
     const secretScanningUrl = `${repositoryUrl}/secret-scanning/alerts?state=open&per_page=100`;
     const [analyses, codeScanningAlerts, dependabotAlerts, secretScanningAlerts] = await Promise.all([
@@ -129,7 +140,8 @@ export async function collectGitHubSecurityState({
     ]);
     return {
         expectedSha,
-        defaultBranchSha: commitResponse.body?.sha,
+        ref,
+        resolvedRefSha: commitResponse.body?.sha,
         analyses,
         codeScanningAlerts,
         dependabotAlerts,
@@ -142,6 +154,8 @@ export async function runGitHubSecurityStateGate(environment = process.env) {
         repository: environment.GITHUB_REPOSITORY,
         expectedSha: environment.EXPECTED_SHA,
         token: environment.GH_TOKEN,
+        scope: environment.SECURITY_SCOPE,
+        pullRequestNumber: environment.PULL_REQUEST_NUMBER,
         apiUrl: environment.GITHUB_API_URL,
     });
     const result = enforceGitHubSecurityState(state);

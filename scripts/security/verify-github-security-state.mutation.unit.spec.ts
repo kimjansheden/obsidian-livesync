@@ -7,7 +7,8 @@ const expectedSha = "a".repeat(40);
 function cleanState() {
     return {
         expectedSha,
-        defaultBranchSha: expectedSha,
+        ref: "refs/heads/main",
+        resolvedRefSha: expectedSha,
         analyses: [
             { commit_sha: expectedSha, category: "/language:actions", error: "" },
             { commit_sha: expectedSha, category: "/language:javascript-typescript", error: "" },
@@ -48,9 +49,9 @@ describe("GitHub zero-open-alert release gate mutation sensitivity", () => {
         {
             mutation: "a release commit different from main",
             mutate: (state: ReturnType<typeof cleanState>) => {
-                state.defaultBranchSha = "b".repeat(40);
+                state.resolvedRefSha = "b".repeat(40);
             },
-            error: `is not the current main commit ${"b".repeat(40)}`,
+            error: `does not match refs/heads/main at ${"b".repeat(40)}`,
         },
         {
             mutation: "a missing Actions analysis",

@@ -194,6 +194,7 @@ for (const mutation of strykerConfig.mutator?.excludedMutations ?? []) {
 
 const releaseWorkflow = readFileSync(".github/workflows/release.yml", "utf8");
 const securityWorkflow = readFileSync(".github/workflows/security-ci.yml", "utf8");
+const codeqlWorkflow = readFileSync(".github/workflows/codeql.yml", "utf8");
 for (const [label, workflow] of [
     ["release", releaseWorkflow],
     ["security CI", securityWorkflow],
@@ -201,6 +202,12 @@ for (const [label, workflow] of [
     if (!workflow.includes("npm run test:security-state-mutations")) {
         failures.push(`${label} workflow must run test:security-state-mutations before it can be green`);
     }
+}
+if (!codeqlWorkflow.includes("name: Zero open security alerts")) {
+    failures.push("CodeQL workflow must expose the Zero open security alerts status after all analyses");
+}
+if (!codeqlWorkflow.includes("node scripts/security/verify-github-security-state.mjs")) {
+    failures.push("CodeQL workflow must run the production zero-open-alert gate after analysis");
 }
 
 const historySearch = [
