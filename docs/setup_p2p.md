@@ -133,7 +133,7 @@ export p2p_passphrase=<A PRIVATE P2P PASSPHRASE> # Optional; generated when omit
 export passphrase=<A STRONG VAULT ENCRYPTION PASSPHRASE>
 export uri_passphrase=<A SEPARATE SETUP URI PASSPHRASE>
 export setup_uri_file=/secure/output/setup-uri.txt
-deno run --minimum-dependency-age=0 --allow-env --allow-write=/secure/output https://raw.githubusercontent.com/kimjansheden/obsidian-livesync/main/utils/setup/generate_setup_uri.ts
+deno run --minimum-dependency-age=0 --allow-env --allow-write=/secure/output https://raw.githubusercontent.com/kimjansheden/obsidian-livesync/1.0.21-security.3/utils/setup/generate_setup_uri.ts
 ```
 
 The generator writes to a new file and never prints the URI or passphrase. The generated Setup URI contains the encrypted room, relay, and Vault settings. It deliberately omits the device-specific name. Store the URI and its passphrase separately. After importing it on the first device, continue from the initialisation step above, then generate a fresh Setup URI for an additional device from that working device.
