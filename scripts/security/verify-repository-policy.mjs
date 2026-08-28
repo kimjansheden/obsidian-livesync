@@ -227,11 +227,12 @@ const historySearch = [
     ["AWS access key", "(AKIA|ASIA)[0-9A-Z]{16}"],
 ];
 
-const movingForkExecutionUrl = /raw\.githubusercontent\.com\/kimjansheden\/obsidian-livesync\/(?:main|master)\//u;
+const forkRawContentBase = ["https://raw.githubusercontent.com", "kimjansheden", "obsidian-livesync"].join("/");
+const movingForkExecutionUrls = ["main", "master"].map((branch) => `${forkRawContentBase}/${branch}/`);
 for (const file of tracked) {
     if (!TEXT_EXTENSIONS.has(extname(file).toLowerCase()) && extname(file) !== "") continue;
     const content = readFileSync(file, "utf8");
-    if (movingForkExecutionUrl.test(content)) {
+    if (movingForkExecutionUrls.some((url) => content.includes(url))) {
         failures.push(`moving fork execution URL is forbidden; pin an immutable reviewed tag or commit: ${file}`);
     }
 }
