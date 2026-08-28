@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { enforceGitHubSecurityState, evaluateGitHubSecurityState } from "./verify-github-security-state.mjs";
+import {
+    enforceGitHubCodeQLState,
+    enforceGitHubSecurityState,
+    evaluateGitHubCodeQLState,
+    evaluateGitHubSecurityState,
+} from "./verify-github-security-state.mjs";
 
 const expectedSha = "a".repeat(40);
 
@@ -20,6 +25,25 @@ function cleanState() {
 }
 
 describe("GitHub zero-open-alert release gate mutation sensitivity", () => {
+    it("accepts a fully analysed CodeQL-only state and rejects an alert", () => {
+        const clean = cleanState();
+        expect(evaluateGitHubCodeQLState(clean)).toEqual({
+            ok: true,
+            errors: [],
+            counts: { codeScanning: 0 },
+        });
+        expect(enforceGitHubCodeQLState(clean)).toEqual({
+            ok: true,
+            errors: [],
+            counts: { codeScanning: 0 },
+        });
+
+        const alerted = cleanState();
+        alerted.codeScanningAlerts.push({ number: 1 } as never);
+        expect(evaluateGitHubCodeQLState(alerted).ok).toBe(false);
+        expect(() => enforceGitHubCodeQLState(alerted)).toThrow("CodeQL has 1 open alert(s)");
+    });
+
     it("accepts the one fully analysed state with no open alerts", () => {
         const state = cleanState();
         expect(evaluateGitHubSecurityState(state)).toEqual({

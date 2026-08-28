@@ -2,7 +2,10 @@
     "$schema": "./node_modules/@stryker-mutator/core/schema/stryker-schema.json",
     "testRunner": "vitest",
     "plugins": ["@stryker-mutator/vitest-runner"],
-    "mutate": ["scripts/security/verify-github-security-state.mjs"],
+    "mutate": [
+        "scripts/security/verify-github-security-state.mjs",
+        "scripts/security/verify-published-zero-alert-status.mjs"
+    ],
     "vitest": {
         "configFile": "vitest.config.security-mutation.ts",
         "related": false

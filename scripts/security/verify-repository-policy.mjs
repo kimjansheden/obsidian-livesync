@@ -168,9 +168,15 @@ if (packageJson.scripts?.["test:security-state-mutations"] !== "stryker run") {
 }
 
 const strykerConfig = JSON.parse(readFileSync("stryker.config.json", "utf8"));
-if (JSON.stringify(strykerConfig.mutate) !== JSON.stringify(["scripts/security/verify-github-security-state.mjs"])) {
+if (
+    JSON.stringify(strykerConfig.mutate) !==
+    JSON.stringify([
+        "scripts/security/verify-github-security-state.mjs",
+        "scripts/security/verify-published-zero-alert-status.mjs",
+    ])
+) {
     failures.push(
-        "Stryker must mutate the production GitHub security-state gate and no substitute test implementation"
+        "Stryker must mutate both production GitHub security-state gates and no substitute test implementation"
     );
 }
 if (
@@ -203,11 +209,17 @@ for (const [label, workflow] of [
         failures.push(`${label} workflow must run test:security-state-mutations before it can be green`);
     }
 }
-if (!codeqlWorkflow.includes("name: Zero open security alerts")) {
-    failures.push("CodeQL workflow must expose the Zero open security alerts status after all analyses");
+if (!codeqlWorkflow.includes("name: Zero open CodeQL alerts")) {
+    failures.push("CodeQL workflow must expose the Zero open CodeQL alerts status after all analyses");
 }
 if (!codeqlWorkflow.includes("node scripts/security/verify-github-security-state.mjs")) {
-    failures.push("CodeQL workflow must run the production zero-open-alert gate after analysis");
+    failures.push("CodeQL workflow must run the production CodeQL zero-alert gate after analysis");
+}
+if (!codeqlWorkflow.includes("SECURITY_COMPONENTS: codeql")) {
+    failures.push("CodeQL workflow must explicitly limit its token-compatible query to CodeQL alerts");
+}
+if (!releaseWorkflow.includes("verify-published-zero-alert-status.mjs")) {
+    failures.push("release workflow must verify the externally attested zero-open-security-alert status");
 }
 
 const historySearch = [

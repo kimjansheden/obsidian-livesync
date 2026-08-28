@@ -22,6 +22,7 @@ permissions:
   id-token: write
   attestations: write
   security-events: read
+  statuses: read
 
 concurrency:
   group: release-${{ inputs.tag }}
@@ -67,11 +68,19 @@ jobs:
           node-version: 24.7.0
           cache: npm
 
-      - name: Require exact analyses and zero open GitHub security alerts
+      - name: Require exact analyses and zero open CodeQL alerts
         env:
           EXPECTED_SHA: ${{ inputs.expected_sha }}
           GH_TOKEN: ${{ github.token }}
+          SECURITY_COMPONENTS: codeql
         run: node scripts/security/verify-github-security-state.mjs
+
+      - name: Require externally attested zero-alert status
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          EXPECTED_STATUS_ACTOR: ${{ github.repository_owner }}
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/security/verify-published-zero-alert-status.mjs
 
       - name: Install locked dependencies without lifecycle scripts
         run: npm ci --ignore-scripts --no-audit --no-fund
