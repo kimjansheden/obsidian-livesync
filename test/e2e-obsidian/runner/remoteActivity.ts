@@ -1,6 +1,7 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Page } from "playwright";
+import { createDiagnosticsDirectory } from "./diagnostics.ts";
 import { withObsidianPage } from "./ui.ts";
 import {
     REMOTE_OPERATION_ACTIVITY_ICON,
@@ -221,8 +222,10 @@ export async function captureRemoteActivityDiagnostics(
     port: number,
     label: string
 ): Promise<RemoteActivityDiagnostics> {
-    const outputDirectory = process.env.E2E_OBSIDIAN_DIAGNOSTICS_DIR ?? "/tmp/obsidian-livesync-e2e";
-    await mkdir(outputDirectory, { recursive: true });
+    const outputDirectory = await createDiagnosticsDirectory(
+        "remote-activity",
+        process.env.E2E_OBSIDIAN_DIAGNOSTICS_DIR
+    );
     const safeLabel = label.replace(/[^a-z0-9_-]+/gi, "-").replace(/^-+|-+$/g, "") || "remote-activity";
     const prefix = `${safeLabel}-${new Date().toISOString().replace(/[:.]/g, "-")}`;
     const screenshotPath = join(outputDirectory, `${prefix}.png`);

@@ -23,7 +23,7 @@
  */
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { access, mkdir, readFile, writeFile } from "node:fs/promises";
+import { access, readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { evalObsidianJson } from "../runner/cli.ts";
 import {
@@ -41,6 +41,7 @@ import {
     type CouchDbDocument,
 } from "../runner/couchdb.ts";
 import { discoverObsidianCli, requireObsidianBinary } from "../runner/environment.ts";
+import { createDiagnosticsDirectory } from "../runner/diagnostics.ts";
 import {
     createE2eCouchDbPluginData,
     createE2eObsidianDeviceLocalState,
@@ -682,9 +683,11 @@ async function cleanupResources(
 }
 
 async function writeResult(result: unknown): Promise<string> {
-    const outputDirectory = process.env.E2E_OBSIDIAN_DIAGNOSTICS_DIR ?? "/tmp/obsidian-livesync-e2e";
+    const outputDirectory = await createDiagnosticsDirectory(
+        "security-seed-reconnect",
+        process.env.E2E_OBSIDIAN_DIAGNOSTICS_DIR
+    );
     const resultPath = join(outputDirectory, "security-seed-reconnect-result.json");
-    await mkdir(outputDirectory, { recursive: true });
     await writeFile(resultPath, `${JSON.stringify(result, null, 2)}\n`, "utf-8");
     return resultPath;
 }

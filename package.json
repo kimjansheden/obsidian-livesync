@@ -30,6 +30,8 @@
         "i18n:json2yaml": "tsx _tools/json2yaml.ts",
         "i18n:yaml2json": "tsx _tools/yaml2json.ts",
         "test:unit": "vitest run --config vitest.config.unit.ts",
+        "test:security-state-faults": "vitest run --config vitest.config.security-mutation.ts",
+        "test:security-state-mutations": "stryker run",
         "security:policy": "node scripts/security/verify-repository-policy.mjs",
         "sbom": "cyclonedx-npm --package-lock-only --output-reproducible --spec-version 1.6 --validate",
         "build:browser-apps": "npm run build --workspace livesync-webapp --workspace webpeer",
@@ -114,6 +116,8 @@
         "@emnapi/core": "1.11.1",
         "@emnapi/runtime": "1.11.1",
         "@eslint/js": "^9.39.3",
+        "@stryker-mutator/core": "10.0.0",
+        "@stryker-mutator/vitest-runner": "10.0.0",
         "@sveltejs/vite-plugin-svelte": "^7.1.2",
         "@tsconfig/svelte": "^5.0.8",
         "@types/deno": "^2.5.0",
@@ -200,6 +204,9 @@
         "deepmerge-ts": "8.0.2",
         "fdir": {
             "picomatch": "4.0.7"
+        },
+        "typed-rest-client": {
+            "qs": "6.15.3"
         },
         "pouchdb-core": {
             "uuid": "11.1.1"

@@ -47,6 +47,7 @@ const ROOT_FILES = new Set([
     "pouchdb-browser.js",
     "setup-flyio-on-the-fly-v2.ipynb",
     "styles.css",
+    "stryker.config.json",
     "terser.config.mjs",
     "terser_vite.config.ts",
     "tsconfig.json",
@@ -59,6 +60,7 @@ const ROOT_FILES = new Set([
     "vitest.config.common.ts",
     "vitest.config.e2e-runner.ts",
     "vitest.config.integration.ts",
+    "vitest.config.security-mutation.ts",
     "vitest.config.unit.ts",
 ]);
 
@@ -153,10 +155,88 @@ for (const workflow of tracked.filter((path) => path.startsWith(".github/workflo
     if (!/^permissions:/m.test(content)) failures.push(`top-level permissions are missing: ${workflow}`);
 }
 
+const packageJson = JSON.parse(readFileSync("package.json", "utf8"));
+if (packageJson.scripts?.["test:security-state-faults"] !== "vitest run --config vitest.config.security-mutation.ts") {
+    failures.push(
+        "security-state fault script is missing; restore test:security-state-faults so the zero-alert gate's negative paths run"
+    );
+}
+if (packageJson.scripts?.["test:security-state-mutations"] !== "stryker run") {
+    failures.push(
+        "security-state mutation script is missing; restore test:security-state-mutations so production gate mutants block CI"
+    );
+}
+
+const strykerConfig = JSON.parse(readFileSync("stryker.config.json", "utf8"));
+if (
+    JSON.stringify(strykerConfig.mutate) !==
+    JSON.stringify([
+        "scripts/security/verify-github-security-state.mjs",
+        "scripts/security/verify-published-zero-alert-status.mjs",
+    ])
+) {
+    failures.push(
+        "Stryker must mutate both production GitHub security-state gates and no substitute test implementation"
+    );
+}
+if (
+    strykerConfig.thresholds?.high !== 100 ||
+    strykerConfig.thresholds?.low !== 100 ||
+    strykerConfig.thresholds?.break !== 100
+) {
+    failures.push("Stryker thresholds must remain high=100, low=100, break=100 so any relevant survivor blocks CI");
+}
+const forbiddenMutationExclusions = new Set([
+    "BooleanLiteral",
+    "ConditionalExpression",
+    "EqualityOperator",
+    "LogicalOperator",
+]);
+for (const mutation of strykerConfig.mutator?.excludedMutations ?? []) {
+    if (forbiddenMutationExclusions.has(mutation)) {
+        failures.push(`Stryker may not exclude security-decision mutator ${mutation}; remove that exclusion`);
+    }
+}
+
+const releaseWorkflow = readFileSync(".github/workflows/release.yml", "utf8");
+const securityWorkflow = readFileSync(".github/workflows/security-ci.yml", "utf8");
+const codeqlWorkflow = readFileSync(".github/workflows/codeql.yml", "utf8");
+for (const [label, workflow] of [
+    ["release", releaseWorkflow],
+    ["security CI", securityWorkflow],
+]) {
+    if (!workflow.includes("npm run test:security-state-mutations")) {
+        failures.push(`${label} workflow must run test:security-state-mutations before it can be green`);
+    }
+}
+if (!codeqlWorkflow.includes("name: Zero open CodeQL alerts")) {
+    failures.push("CodeQL workflow must expose the Zero open CodeQL alerts status after all analyses");
+}
+if (!codeqlWorkflow.includes("node scripts/security/verify-github-security-state.mjs")) {
+    failures.push("CodeQL workflow must run the production CodeQL zero-alert gate after analysis");
+}
+if (!codeqlWorkflow.includes("SECURITY_COMPONENTS: codeql")) {
+    failures.push("CodeQL workflow must explicitly limit its token-compatible query to CodeQL alerts");
+}
+if (!releaseWorkflow.includes("verify-published-zero-alert-status.mjs")) {
+    failures.push("release workflow must verify the externally attested zero-open-security-alert status");
+}
+
 const historySearch = [
     ["GitHub token", "gh[pousr]_[A-Za-z0-9]{20,}"],
     ["AWS access key", "(AKIA|ASIA)[0-9A-Z]{16}"],
 ];
+
+const forkRawContentBase = ["https://raw.githubusercontent.com", "kimjansheden", "obsidian-livesync"].join("/");
+const movingForkExecutionUrls = ["main", "master"].map((branch) => `${forkRawContentBase}/${branch}/`);
+for (const file of tracked) {
+    if (!TEXT_EXTENSIONS.has(extname(file).toLowerCase()) && extname(file) !== "") continue;
+    const content = readFileSync(file, "utf8");
+    if (movingForkExecutionUrls.some((url) => content.includes(url))) {
+        failures.push(`moving fork execution URL is forbidden; pin an immutable reviewed tag or commit: ${file}`);
+    }
+}
+
 for (const [label, gitPattern] of historySearch) {
     try {
         const matches = execFileSync("git", ["log", "--all", "--format=%H", "-G", gitPattern, "--", ":!*.lock"], {

@@ -1,0 +1,34 @@
+{
+    "$schema": "./node_modules/@stryker-mutator/core/schema/stryker-schema.json",
+    "testRunner": "vitest",
+    "plugins": ["@stryker-mutator/vitest-runner"],
+    "mutate": [
+        "scripts/security/verify-github-security-state.mjs",
+        "scripts/security/verify-published-zero-alert-status.mjs"
+    ],
+    "vitest": {
+        "configFile": "vitest.config.security-mutation.ts",
+        "related": false
+    },
+    "mutator": {
+        "excludedMutations": ["StringLiteral"]
+    },
+    "reporters": ["clear-text", "progress"],
+    "thresholds": {
+        "high": 100,
+        "low": 100,
+        "break": 100
+    },
+    "concurrency": 2,
+    "ignorePatterns": [
+        "/main.js",
+        "/main_org.js",
+        "/docs",
+        "/images",
+        "/instruction_images",
+        "/src",
+        "/test",
+        "/utils",
+        "/utilsdeno"
+    ]
+}

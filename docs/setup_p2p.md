@@ -20,12 +20,12 @@ Before starting:
 2. Open onboarding from the `Welcome to Self-hosted LiveSync` Notice.
 3. Select `I am setting this up for the first time`, choose manual configuration, then select `Peer-to-Peer only`.
 4. In `P2P Configuration`:
-   - enable P2P;
-   - select `Use the project's public signalling relay`, or enter your own signalling relay URLs;
-   - generate or enter a private Group ID;
-   - enter a strong P2P passphrase;
-   - enter a unique name for this device; and
-   - leave automatic start and automatic announcements disabled until the manual round trip succeeds.
+    - enable P2P;
+    - select `Use the project's public signalling relay`, or enter your own signalling relay URLs;
+    - generate or enter a private Group ID;
+    - enter a strong P2P passphrase;
+    - enter a unique name for this device; and
+    - leave automatic start and automatic announcements disabled until the manual round trip succeeds.
 5. Select `Test Settings and Continue`. The test joins the signalling relay; it does not require another peer to be online.
 6. Complete the initialisation and final confirmation on the first device. This initialises the local LiveSync database; P2P has no central remote database to erase.
 
@@ -132,7 +132,8 @@ export p2p_room_id=<A PRIVATE ROOM ID> # Optional; generated when omitted
 export p2p_passphrase=<A PRIVATE P2P PASSPHRASE> # Optional; generated when omitted
 export passphrase=<A STRONG VAULT ENCRYPTION PASSPHRASE>
 export uri_passphrase=<A SEPARATE SETUP URI PASSPHRASE>
-deno run --minimum-dependency-age=0 --allow-env https://raw.githubusercontent.com/vrtmrz/obsidian-livesync/main/utils/setup/generate_setup_uri.ts
+export setup_uri_file=/secure/output/setup-uri.txt
+deno run --minimum-dependency-age=0 --allow-env --allow-write=/secure/output https://raw.githubusercontent.com/kimjansheden/obsidian-livesync/1.0.21-security.3/utils/setup/generate_setup_uri.ts
 ```
 
-The generated Setup URI contains the encrypted room, relay, and Vault settings. It deliberately omits the device-specific name. Store the URI and its passphrase separately. After importing it on the first device, continue from the initialisation step above, then generate a fresh Setup URI for an additional device from that working device.
+The generator writes to a new file and never prints the URI or passphrase. The generated Setup URI contains the encrypted room, relay, and Vault settings. It deliberately omits the device-specific name. Store the URI and its passphrase separately. After importing it on the first device, continue from the initialisation step above, then generate a fresh Setup URI for an additional device from that working device.

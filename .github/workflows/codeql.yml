@@ -42,3 +42,31 @@ jobs:
         uses: github/codeql-action/analyze@fddeee1a7ece751b577e409a89057319e3172939
         with:
           category: /language:${{ matrix.language }}
+
+  zero-open-alerts:
+    name: Zero open CodeQL alerts
+    needs: analyze
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      security-events: read
+    steps:
+      - name: Check out exact revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24.7.0
+
+      - name: Require exact analyses and zero open CodeQL alerts
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
+          SECURITY_COMPONENTS: codeql
+          SECURITY_SCOPE: ${{ github.event_name == 'pull_request' && 'pull-request' || 'main' }}
+          PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number }}
+        run: node scripts/security/verify-github-security-state.mjs

@@ -9,8 +9,13 @@ function assert(condition: unknown, message: string): asserts condition {
 
 Deno.test("generates a current self-hosted Setup URI through the published Commonlib contract", async () => {
   const scriptPath = new URL("./generate_setupuri.ts", import.meta.url);
+  const outputDirectory = await Deno.makeTempDir({
+    prefix: "livesync-setup-uri-test-",
+  });
+  const setupURIPath = `${outputDirectory}/setup-uri.txt`;
   const command = new Deno.Command(Deno.execPath(), {
-    args: ["run", "-A", scriptPath.pathname],
+    args: ["run", "--node-modules-dir=none", "-A", scriptPath.pathname],
+    clearEnv: true,
     env: {
       hostname: "https://couch.example.test",
       username: "alice",
@@ -18,19 +23,30 @@ Deno.test("generates a current self-hosted Setup URI through the published Commo
       database: "notes",
       passphrase: "vault-secret",
       uri_passphrase: "setup-secret",
+      setup_uri_file: setupURIPath,
     },
     stdout: "piped",
     stderr: "piped",
   });
 
-  const result = await command.output();
-  const stdout = new TextDecoder().decode(result.stdout);
-  const stderr = new TextDecoder().decode(result.stderr);
-  assert(result.success, `generator failed:\n${stdout}\n${stderr}`);
-
-  const setupURI = stdout.match(/obsidian:\/\/setuplivesync\?settings=\S+/)
-    ?.[0];
-  assert(setupURI, `generator did not print a Setup URI:\n${stdout}`);
+  let setupURI = "";
+  try {
+    const result = await command.output();
+    const stdout = new TextDecoder().decode(result.stdout);
+    const stderr = new TextDecoder().decode(result.stderr);
+    assert(result.success, `generator failed:\n${stdout}\n${stderr}`);
+    assert(
+      !stdout.includes("obsidian://setuplivesync"),
+      "generator printed the secret Setup URI",
+    );
+    setupURI = await Deno.readTextFile(setupURIPath);
+  } finally {
+    await Deno.remove(outputDirectory, { recursive: true });
+  }
+  assert(
+    setupURI.startsWith("obsidian://setuplivesync?settings="),
+    "generator did not write a Setup URI",
+  );
 
   const decoded = await decodeSettingsFromSetupURI(setupURI, "setup-secret");
   assert(decoded, "Commonlib could not decode the generated Setup URI");

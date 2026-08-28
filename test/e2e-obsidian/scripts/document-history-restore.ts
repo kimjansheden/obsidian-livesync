@@ -3,6 +3,7 @@ import { join } from "node:path";
 import type { Page } from "playwright";
 import { evalObsidianJson } from "../runner/cli.ts";
 import { discoverObsidianCli, requireObsidianBinary } from "../runner/environment.ts";
+import { createDiagnosticsDirectory } from "../runner/diagnostics.ts";
 import {
     createE2eObsidianDeviceLocalState,
     waitForLiveSyncCoreReady,
@@ -222,9 +223,13 @@ async function main(): Promise<void> {
 
     const vault = await createTemporaryVault();
     let session: ObsidianLiveSyncSession | undefined;
-    const screenshotDir =
+    const screenshotDir = await createDiagnosticsDirectory(
+        "document-history-restore",
         process.env.E2E_OBSIDIAN_HISTORY_RESTORE_SCREENSHOT_DIR ??
-        join(process.env.E2E_OBSIDIAN_DIAGNOSTICS_DIR ?? "/tmp/obsidian-livesync-e2e", "document-history-restore");
+            (process.env.E2E_OBSIDIAN_DIAGNOSTICS_DIR
+                ? join(process.env.E2E_OBSIDIAN_DIAGNOSTICS_DIR, "document-history-restore")
+                : undefined)
+    );
     const reportPath =
         process.env.E2E_OBSIDIAN_HISTORY_RESTORE_REPORT ?? join(screenshotDir, "document-history-restore.json");
 
