@@ -48,6 +48,34 @@ describe("published zero-alert status mutation sensitivity", () => {
         expect(() => enforcePublishedZeroAlertStatus(input)).toThrow("is failure, not success");
     });
 
+    it("describes a matching receipt with a missing state as malformed", () => {
+        const result = evaluate([{ ...validStatus(), state: undefined }]);
+
+        expect(result.errors).toContain("Zero open security alerts is malformed, not success.");
+    });
+
+    it("preserves every receipt failure in the enforcement error", () => {
+        const input = {
+            statuses: [
+                {
+                    ...validStatus(),
+                    state: "failure",
+                    description: "incomplete",
+                    creator: { login: "other" },
+                    updated_at: "invalid",
+                },
+            ],
+            expectedActor: "owner",
+            now,
+            maxAgeMilliseconds: 60 * 60 * 1000,
+        };
+        const result = evaluatePublishedZeroAlertStatus(input);
+
+        expect(() => enforcePublishedZeroAlertStatus(input)).toThrow(
+            new Error(`Published zero-alert status policy failed:\n- ${result.errors.join("\n- ")}`)
+        );
+    });
+
     it.each([
         ["malformed response", undefined, "response was malformed"],
         ["missing receipt", [], "has no Zero open security alerts attestation"],

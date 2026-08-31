@@ -21,7 +21,7 @@ export function evaluatePublishedZeroAlertStatus({ statuses, expectedActor, now,
         if (status.creator?.login !== expectedActor) {
             errors.push(`${STATUS_CONTEXT} was not published by the declared repository owner.`);
         }
-        const updatedAt = Date.parse(status.updated_at ?? "");
+        const updatedAt = Date.parse(status.updated_at);
         const age = now - updatedAt;
         if (!Number.isFinite(updatedAt) || age < 0 || age > maxAgeMilliseconds) {
             errors.push(`${STATUS_CONTEXT} is missing, future-dated, or older than the allowed release window.`);
