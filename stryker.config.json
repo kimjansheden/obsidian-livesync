@@ -10,9 +10,6 @@
         "configFile": "vitest.config.security-mutation.ts",
         "related": false
     },
-    "mutator": {
-        "excludedMutations": ["StringLiteral"]
-    },
     "reporters": ["clear-text", "progress"],
     "thresholds": {
         "high": 100,

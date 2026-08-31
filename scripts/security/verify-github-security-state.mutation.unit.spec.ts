@@ -54,6 +54,63 @@ describe("GitHub zero-open-alert release gate mutation sensitivity", () => {
         expect(() => enforceGitHubSecurityState(state)).not.toThrow();
     });
 
+    it("accepts successful analyses whose API payload omits the empty error field", () => {
+        const state = cleanState();
+        state.analyses = state.analyses.map(({ error: _error, ...analysis }) => analysis as never);
+
+        expect(evaluateGitHubCodeQLState(state)).toEqual({
+            ok: true,
+            errors: [],
+            counts: { codeScanning: 0 },
+        });
+    });
+
+    it("preserves fail-closed diagnostics when the declared ref and resolved SHA are missing", () => {
+        const state = cleanState();
+        state.ref = undefined as never;
+        state.resolvedRefSha = undefined as never;
+
+        expect(evaluateGitHubCodeQLState(state).errors[0]).toBe(
+            `Expected commit ${expectedSha} does not match the declared ref at <missing>.`
+        );
+    });
+
+    it.each([
+        ["analyses", "CodeQL analyses"],
+        ["codeScanningAlerts", "Code scanning alerts"],
+        ["dependabotAlerts", "Dependabot alerts"],
+        ["secretScanningAlerts", "Secret scanning alerts"],
+    ] as const)("names a malformed %s collection in the fail-closed diagnostic", (field, label) => {
+        const state = cleanState();
+        state[field] = undefined as never;
+
+        expect(evaluateGitHubSecurityState(state).errors).toContain(
+            `${label} response was missing or malformed; the release gate fails closed.`
+        );
+    });
+
+    it("preserves every CodeQL failure in the enforcement error", () => {
+        const state = cleanState();
+        state.analyses = [];
+        state.codeScanningAlerts = [{ number: 1 }] as never;
+        const result = evaluateGitHubCodeQLState(state);
+
+        expect(() => enforceGitHubCodeQLState(state)).toThrow(
+            new Error(`GitHub zero-open-CodeQL-alert policy failed:\n- ${result.errors.join("\n- ")}`)
+        );
+    });
+
+    it("preserves every alert-class failure in the release enforcement error", () => {
+        const state = cleanState();
+        state.dependabotAlerts = [{ number: 1 }] as never;
+        state.secretScanningAlerts = [{ number: 2 }] as never;
+        const result = evaluateGitHubSecurityState(state);
+
+        expect(() => enforceGitHubSecurityState(state)).toThrow(
+            new Error(`GitHub zero-open-alert release policy failed:\n- ${result.errors.join("\n- ")}`)
+        );
+    });
+
     it.each([
         {
             mutation: "an open CodeQL alert",
