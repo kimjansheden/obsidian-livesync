@@ -8,5 +8,6 @@ Each fork patch is isolated so it can be reviewed, proposed upstream, or removed
 | `SEC-002` | Refuse plaintext settings at Obsidian, CLI, and browser persistence boundaries; scrub auxiliary fields already represented by the encrypted connection. | `settingsPersistence.unit.spec.ts`, browser context tests, type checks, and build. |
 | `SEC-003` | Remove vulnerable locked dependencies and prevent reintroduction. | `npm audit --audit-level=low` and dependency-review workflow. |
 | `SEC-004` | Replace inherited workflows with least-privilege, full-SHA-pinned security workflows. | `verify-repository-policy.mjs` and GitHub workflow runs. |
+| `SEC-005` | Consume the security-qualified Commonlib release by immutable release URL, lock integrity, SHA-256, source receipt, and GitHub attestation. | `ObsidianSettingService.persistence.unit.spec.ts`, `security-release-workflow.test.mjs`, repository policy, and release workflow runs. |
 
 The upstream `1.0.21` workflows were reviewed before Actions was enabled on this fork. They were removed because they used mutable action tags and included publication/deployment privileges outside this fork's current scope.

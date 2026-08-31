@@ -1,0 +1,17 @@
+{
+    "repository": "https://github.com/kimjansheden/livesync-commonlib",
+    "repositorySlug": "kimjansheden/livesync-commonlib",
+    "upstreamRepository": "https://github.com/vrtmrz/livesync-commonlib.git",
+    "upstreamBase": "e8beaf017de243ee3d4beb998905a51de30ebb44",
+    "forkCommit": "e5e61dcd644af468b2df22f92c09fea231d9e4b3",
+    "tag": "0.1.19-security.2",
+    "releaseUrl": "https://github.com/kimjansheden/livesync-commonlib/releases/tag/0.1.19-security.2",
+    "packageUrl": "https://github.com/kimjansheden/livesync-commonlib/releases/download/0.1.19-security.2/vrtmrz-livesync-commonlib-0.1.19-security.2.tgz",
+    "packageSha256": "b1b9d637469b0daa6af56cf96e6c2de02d4a637608bd24016dd421e91ae28603",
+    "packageIntegrity": "sha512-gTaFt40GYUSKDAUgVJZs7mbXQPcKgX1PcSypoiqNhSgNb/PA02n2r5wo9nFDatr9MaeTnU0ILmaHSA522LOr1g==",
+    "packageLockSha256": "7a02f03859febf6b8c8cc1dcb213406d576a3755a11bab6515eb8be95cda043f",
+    "sourceReceiptUrl": "https://github.com/kimjansheden/livesync-commonlib/releases/download/0.1.19-security.2/source-receipt.json",
+    "sourceReceiptSha256": "f6e714404c15b4629dd66bcd6ad03803e0faa41a0dcc2f6264b34457c55c93cb",
+    "releaseWorkflowRun": "33409225923",
+    "signerWorkflow": "kimjansheden/livesync-commonlib/.github/workflows/release.yml"
+}

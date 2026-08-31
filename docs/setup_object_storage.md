@@ -27,7 +27,7 @@ export bucket_prefix=my-vault
 export passphrase=<A STRONG VAULT ENCRYPTION PASSPHRASE>
 export uri_passphrase=<A SEPARATE SETUP URI PASSPHRASE>
 export setup_uri_file=/secure/output/setup-uri.txt
-deno run --minimum-dependency-age=0 --allow-env --allow-write=/secure/output https://raw.githubusercontent.com/kimjansheden/obsidian-livesync/1.0.21-security.3/utils/setup/generate_setup_uri.ts
+deno run --minimum-dependency-age=0 --allow-env --allow-write=/secure/output https://raw.githubusercontent.com/kimjansheden/obsidian-livesync/1.0.21-security.4/utils/setup/generate_setup_uri.ts
 ```
 
 For providers which require them, set `force_path_style`, `use_custom_request_handler`, or `bucket_custom_headers` as described in the [setup utility reference](../utils/readme.md#object-storage).

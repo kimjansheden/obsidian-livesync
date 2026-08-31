@@ -22,4 +22,4 @@ The Obsidian plugin, CLI, browser applications, storage adapters, remote endpoin
 
 ## Required controls
 
-Persistence and export paths fail closed, errors contain field names rather than values, external actions are pinned to complete commits, pull requests receive read-only tokens, and release artifacts are built from a locked identity. The complete review scope is in [REVIEW_SCOPE.md](REVIEW_SCOPE.md).
+Persistence and export paths fail closed, errors contain field names rather than values, external actions are pinned to complete commits, pull requests receive read-only tokens, and release artefacts are built from a locked identity. Commonlib is accepted only through its immutable public security release URL after its SHA-256, lock integrity, source receipt, signer workflow, source commit, and GitHub attestations agree. The complete review scope is in [REVIEW_SCOPE.md](REVIEW_SCOPE.md).

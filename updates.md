@@ -12,6 +12,12 @@ Earlier releases remain available in the 1.0 release history, the 1.0 preview hi
 
 ## Unreleased
 
+### Synchronisation and storage
+
+#### Fixed
+
+- Object Storage connection settings are now encrypted before the host persistence boundary, scrubbed from the plaintext settings record, and restored after restarting the plug-in. Saving a pure S3-compatible profile no longer fails the plaintext-credential guard before the encrypted connection has been created.
+
 ## 1.0.21
 
 26th August, 2026

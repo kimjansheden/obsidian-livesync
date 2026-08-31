@@ -46,6 +46,7 @@ const ROOT_FILES = new Set([
     "package.json",
     "pouchdb-browser.js",
     "setup-flyio-on-the-fly-v2.ipynb",
+    "security-release.json",
     "styles.css",
     "stryker.config.json",
     "terser.config.mjs",
@@ -156,6 +157,79 @@ for (const workflow of tracked.filter((path) => path.startsWith(".github/workflo
 }
 
 const packageJson = JSON.parse(readFileSync("package.json", "utf8"));
+const packageLock = JSON.parse(readFileSync("package-lock.json", "utf8"));
+const securityRelease = JSON.parse(readFileSync("security-release.json", "utf8"));
+const commonlibRelease = JSON.parse(readFileSync("docs/security/commonlib-release.json", "utf8"));
+const commonlibPackage = packageLock.packages?.["node_modules/@vrtmrz/livesync-commonlib"];
+const expectedCommonlibPackageUrl = `${commonlibRelease.repository}/releases/download/${commonlibRelease.tag}/vrtmrz-livesync-commonlib-${commonlibRelease.tag}.tgz`;
+const expectedCommonlibSourceReceiptUrl = `${commonlibRelease.repository}/releases/download/${commonlibRelease.tag}/source-receipt.json`;
+
+if (securityRelease.upstreamRepository !== "https://github.com/vrtmrz/obsidian-livesync.git") {
+    failures.push("security-release.json must identify the official LiveSync upstream repository");
+}
+if (!/^[0-9a-f]{40}$/u.test(securityRelease.upstreamBase ?? "")) {
+    failures.push("security-release.json must pin one full upstream base commit");
+}
+try {
+    execFileSync("git", ["merge-base", "--is-ancestor", securityRelease.upstreamBase, "HEAD"], {
+        stdio: "ignore",
+    });
+} catch {
+    failures.push("the declared LiveSync upstream base is not an ancestor of HEAD");
+}
+
+for (const field of ["upstreamBase", "forkCommit"]) {
+    if (!/^[0-9a-f]{40}$/u.test(commonlibRelease[field] ?? "")) {
+        failures.push(`Commonlib release field ${field} must be a full commit SHA`);
+    }
+}
+for (const field of ["packageSha256", "packageLockSha256", "sourceReceiptSha256"]) {
+    if (!/^[0-9a-f]{64}$/u.test(commonlibRelease[field] ?? "")) {
+        failures.push(`Commonlib release field ${field} must be a SHA-256 digest`);
+    }
+}
+if (commonlibRelease.repositorySlug !== "kimjansheden/livesync-commonlib") {
+    failures.push("Commonlib release receipt must identify the public security fork");
+}
+if (commonlibRelease.repository !== `https://github.com/${commonlibRelease.repositorySlug}`) {
+    failures.push("Commonlib repository URL and slug do not agree");
+}
+if (commonlibRelease.upstreamRepository !== "https://github.com/vrtmrz/livesync-commonlib.git") {
+    failures.push("Commonlib release receipt must identify the official upstream repository");
+}
+if (!/^0\.1\.19-security\.[0-9]+$/u.test(commonlibRelease.tag ?? "")) {
+    failures.push("Commonlib release receipt must select an immutable 0.1.19 security tag");
+}
+if (commonlibRelease.releaseUrl !== `${commonlibRelease.repository}/releases/tag/${commonlibRelease.tag}`) {
+    failures.push("Commonlib release URL does not match its repository and tag");
+}
+if (commonlibRelease.packageUrl !== expectedCommonlibPackageUrl) {
+    failures.push("Commonlib package URL does not match its repository and tag");
+}
+if (commonlibRelease.sourceReceiptUrl !== expectedCommonlibSourceReceiptUrl) {
+    failures.push("Commonlib source-receipt URL does not match its repository and tag");
+}
+if (commonlibRelease.signerWorkflow !== `${commonlibRelease.repositorySlug}/.github/workflows/release.yml`) {
+    failures.push("Commonlib signer workflow does not match its public repository");
+}
+if (!/^\d+$/u.test(commonlibRelease.releaseWorkflowRun ?? "")) {
+    failures.push("Commonlib release workflow run must be an exact numeric identity");
+}
+if (packageJson.dependencies?.["@vrtmrz/livesync-commonlib"] !== commonlibRelease.packageUrl) {
+    failures.push("package.json must consume the exact attested Commonlib package URL");
+}
+if (packageLock.packages?.[""]?.dependencies?.["@vrtmrz/livesync-commonlib"] !== commonlibRelease.packageUrl) {
+    failures.push("package-lock.json root dependency must consume the exact Commonlib package URL");
+}
+if (commonlibPackage?.version !== commonlibRelease.tag) {
+    failures.push("the locked Commonlib version does not match the release receipt tag");
+}
+if (commonlibPackage?.resolved !== commonlibRelease.packageUrl) {
+    failures.push("the locked Commonlib URL does not match the release receipt");
+}
+if (commonlibPackage?.integrity !== commonlibRelease.packageIntegrity) {
+    failures.push("the locked Commonlib integrity does not match the release receipt");
+}
 if (packageJson.scripts?.["test:security-state-faults"] !== "vitest run --config vitest.config.security-mutation.ts") {
     failures.push(
         "security-state fault script is missing; restore test:security-state-faults so the zero-alert gate's negative paths run"
@@ -165,6 +239,9 @@ if (packageJson.scripts?.["test:security-state-mutations"] !== "stryker run") {
     failures.push(
         "security-state mutation script is missing; restore test:security-state-mutations so production gate mutants block CI"
     );
+}
+if (packageJson.scripts?.["test:release-workflow"] !== "node --test _tools/security-release-workflow.test.mjs") {
+    failures.push("release workflow contract tests must remain available through test:release-workflow");
 }
 
 const strykerConfig = JSON.parse(readFileSync("stryker.config.json", "utf8"));
@@ -207,6 +284,12 @@ for (const [label, workflow] of [
 ]) {
     if (!workflow.includes("npm run test:security-state-mutations")) {
         failures.push(`${label} workflow must run test:security-state-mutations before it can be green`);
+    }
+    if (!workflow.includes("npm run test:release-workflow")) {
+        failures.push(`${label} workflow must run test:release-workflow before it can be green`);
+    }
+    if (!workflow.includes("node scripts/security/verify-commonlib-source-receipt.mjs")) {
+        failures.push(`${label} workflow must compare every downloaded Commonlib source-receipt identity field`);
     }
 }
 if (!codeqlWorkflow.includes("name: Zero open CodeQL alerts")) {

@@ -45,13 +45,13 @@ jobs:
           [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "Invalid expected SHA" >&2; exit 1; }
 
       - name: Check out the signed tag
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           ref: ${{ inputs.tag }}
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Verify tag identity
+      - name: Verify tag, commit, version, and upstream base
         env:
           TAG: ${{ inputs.tag }}
           EXPECTED_SHA: ${{ inputs.expected_sha }}
@@ -59,11 +59,15 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
           test "$(git rev-parse "refs/tags/$TAG^{commit}")" = "$EXPECTED_SHA"
+          test "${TAG%%-security.*}" = "$(node -p "require('./package.json').version")"
+          test "$(git ls-remote --exit-code origin refs/heads/main | cut -f1)" = "$EXPECTED_SHA"
           git config gpg.ssh.allowedSignersFile docs/security/release-signers.allowed
           git verify-tag "$TAG"
+          upstream_base=$(node -p "require('./security-release.json').upstreamBase")
+          git merge-base --is-ancestor "$upstream_base" "$EXPECTED_SHA"
 
       - name: Set up Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: 24.7.0
           cache: npm
@@ -82,36 +86,67 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: node scripts/security/verify-published-zero-alert-status.mjs
 
+      - name: Verify the attested Commonlib dependency
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          dependency_dir=$(mktemp -d)
+          package_url=$(node -p "require('./docs/security/commonlib-release.json').packageUrl")
+          package_sha=$(node -p "require('./docs/security/commonlib-release.json').packageSha256")
+          receipt_url=$(node -p "require('./docs/security/commonlib-release.json').sourceReceiptUrl")
+          receipt_sha=$(node -p "require('./docs/security/commonlib-release.json').sourceReceiptSha256")
+          repository=$(node -p "require('./docs/security/commonlib-release.json').repositorySlug")
+          signer_workflow=$(node -p "require('./docs/security/commonlib-release.json').signerWorkflow")
+          source_commit=$(node -p "require('./docs/security/commonlib-release.json').forkCommit")
+          curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error "$package_url" --output "$dependency_dir/commonlib.tgz"
+          curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error "$receipt_url" --output "$dependency_dir/source-receipt.json"
+          printf '%s  %s\n' "$package_sha" "$dependency_dir/commonlib.tgz" | sha256sum --check
+          printf '%s  %s\n' "$receipt_sha" "$dependency_dir/source-receipt.json" | sha256sum --check
+          node scripts/security/verify-commonlib-source-receipt.mjs "$dependency_dir/source-receipt.json"
+          for artifact in "$dependency_dir/commonlib.tgz" "$dependency_dir/source-receipt.json"; do
+            gh attestation verify "$artifact" --repo "$repository" --signer-workflow "$signer_workflow" --source-ref refs/heads/main --source-digest "$source_commit"
+          done
+
       - name: Install locked dependencies without lifecycle scripts
         run: npm ci --ignore-scripts --no-audit --no-fund
 
       - name: Re-run the release gate
         run: |
           npm run security:policy
+          npm run test:release-workflow
           npm run test:security-state-mutations
           npm audit --audit-level=low
           npm run tsc-check
           npm run tsc-check:apps
           npm run test:unit
 
-      - name: Build release artifacts
+      - name: Build release artefacts
         run: npm run build
 
-      - name: Create SBOM and checksums
+      - name: Create SBOM, licence inventory, and source receipt
+        env:
+          TAG: ${{ inputs.tag }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
         run: |
-          npm run sbom -- --output-file sbom.cdx.json
-          sha256sum main.js manifest.json styles.css package-lock.json sbom.cdx.json > SHA256SUMS
+          set -euo pipefail
+          mkdir -p release-assets
+          npm run sbom -- --output-file release-assets/sbom.cdx.json
+          jq -r '["name","version","licences","purl"], (.components | sort_by(.name, .version)[] | [.name, .version, ([.licenses[]? | .license.id // .license.name // .expression] | join(" OR ")), (.purl // "")]) | @tsv' release-assets/sbom.cdx.json > release-assets/LICENSE-INVENTORY.tsv
+          cp main.js manifest.json styles.css package-lock.json docs/security/commonlib-release.json release-assets/
+          upstream_repository=$(node -p "require('./security-release.json').upstreamRepository")
+          upstream_base=$(node -p "require('./security-release.json').upstreamBase")
+          lockfile_sha=$(sha256sum package-lock.json | cut -d' ' -f1)
+          commonlib_receipt_sha=$(sha256sum docs/security/commonlib-release.json | cut -d' ' -f1)
+          jq -n --arg repository "$GITHUB_REPOSITORY" --arg upstreamRepository "$upstream_repository" --arg upstreamBase "$upstream_base" --arg commit "$EXPECTED_SHA" --arg tag "$TAG" --arg lockfileSha256 "$lockfile_sha" --arg commonlibReceiptSha256 "$commonlib_receipt_sha" --arg workflowRun "$GITHUB_RUN_ID" '{repository:$repository,upstreamRepository:$upstreamRepository,upstreamBase:$upstreamBase,commit:$commit,tag:$tag,lockfileSha256:$lockfileSha256,commonlibReceiptSha256:$commonlibReceiptSha256,workflowRun:$workflowRun}' > release-assets/source-receipt.json
+          cd release-assets
+          sha256sum LICENSE-INVENTORY.tsv commonlib-release.json main.js manifest.json package-lock.json sbom.cdx.json source-receipt.json styles.css > SHA256SUMS
+          sha256sum --check SHA256SUMS
 
-      - name: Attest release artifacts
+      - name: Attest every release artefact
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8
         with:
-          subject-path: |
-            main.js
-            manifest.json
-            styles.css
-            package-lock.json
-            sbom.cdx.json
-            SHA256SUMS
+          subject-path: release-assets/*
 
       - name: Publish immutable GitHub release
         env:
@@ -122,5 +157,4 @@ jobs:
           set -euo pipefail
           PRERELEASE_FLAG=""
           if [[ "$PRERELEASE" = "true" ]]; then PRERELEASE_FLAG="--prerelease"; fi
-          gh release create "$TAG" main.js manifest.json styles.css package-lock.json sbom.cdx.json SHA256SUMS \
-            --verify-tag --title "$TAG" --generate-notes $PRERELEASE_FLAG
+          gh release create "$TAG" release-assets/* --verify-tag --title "$TAG" --generate-notes $PRERELEASE_FLAG
