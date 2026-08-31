@@ -288,6 +288,9 @@ for (const [label, workflow] of [
     if (!workflow.includes("npm run test:release-workflow")) {
         failures.push(`${label} workflow must run test:release-workflow before it can be green`);
     }
+    if (!workflow.includes("node scripts/security/verify-commonlib-source-receipt.mjs")) {
+        failures.push(`${label} workflow must compare every downloaded Commonlib source-receipt identity field`);
+    }
 }
 if (!codeqlWorkflow.includes("name: Zero open CodeQL alerts")) {
     failures.push("CodeQL workflow must expose the Zero open CodeQL alerts status after all analyses");

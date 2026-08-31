@@ -103,6 +103,7 @@ jobs:
           curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error "$receipt_url" --output "$dependency_dir/source-receipt.json"
           printf '%s  %s\n' "$package_sha" "$dependency_dir/commonlib.tgz" | sha256sum --check
           printf '%s  %s\n' "$receipt_sha" "$dependency_dir/source-receipt.json" | sha256sum --check
+          node scripts/security/verify-commonlib-source-receipt.mjs "$dependency_dir/source-receipt.json"
           for artifact in "$dependency_dir/commonlib.tgz" "$dependency_dir/source-receipt.json"; do
             gh attestation verify "$artifact" --repo "$repository" --signer-workflow "$signer_workflow" --source-ref refs/heads/main --source-digest "$source_commit"
           done

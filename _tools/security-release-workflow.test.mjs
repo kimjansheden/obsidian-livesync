@@ -1,8 +1,22 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { describe, it } from "node:test";
+import { validateCommonlibSourceReceipt } from "../scripts/security/verify-commonlib-source-receipt.mjs";
 
 const releaseWorkflow = await readFile(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");
+const commonlibIdentity = JSON.parse(
+    await readFile(new URL("../docs/security/commonlib-release.json", import.meta.url), "utf8")
+);
+const validCommonlibReceipt = {
+    repository: commonlibIdentity.repositorySlug,
+    upstreamRepository: commonlibIdentity.upstreamRepository,
+    upstreamBase: commonlibIdentity.upstreamBase,
+    commit: commonlibIdentity.forkCommit,
+    tag: commonlibIdentity.tag,
+    lockfileSha256: commonlibIdentity.packageLockSha256,
+    packageSha256: commonlibIdentity.packageSha256,
+    workflowRun: commonlibIdentity.releaseWorkflowRun,
+};
 
 function sourceReceiptJqContract(workflow) {
     const command = workflow.split(/\r?\n/u).find((line) => line.includes("jq -n --arg repository"));
@@ -34,6 +48,29 @@ describe("attested security release workflow", () => {
         assert.ok(verification < installation, "Commonlib must be verified before npm installs it");
         assert.match(releaseWorkflow, /gh attestation verify/u);
         assert.match(releaseWorkflow, /sha256sum --check/u);
+        assert.match(releaseWorkflow, /verify-commonlib-source-receipt\.mjs/u);
+    });
+
+    it("accepts only a Commonlib receipt whose complete identity agrees", () => {
+        assert.doesNotThrow(() => validateCommonlibSourceReceipt(commonlibIdentity, validCommonlibReceipt));
+    });
+
+    it("rejects a stale Commonlib lock-file hash", () => {
+        assert.throws(
+            () =>
+                validateCommonlibSourceReceipt(commonlibIdentity, {
+                    ...validCommonlibReceipt,
+                    lockfileSha256: "0".repeat(64),
+                }),
+            /lockfileSha256 does not match packageLockSha256/u
+        );
+    });
+
+    it("rejects a Commonlib receipt from another workflow run", () => {
+        assert.throws(
+            () => validateCommonlibSourceReceipt(commonlibIdentity, { ...validCommonlibReceipt, workflowRun: "0" }),
+            /workflowRun does not match releaseWorkflowRun/u
+        );
     });
 
     it("runs release workflow tests before artefact creation and publication", () => {

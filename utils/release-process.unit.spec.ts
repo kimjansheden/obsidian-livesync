@@ -186,6 +186,7 @@ describe("release workflow", () => {
         expect(workflow).toContain("node scripts/security/verify-github-security-state.mjs");
         expect(workflow).toContain("name: Verify the attested Commonlib dependency");
         expect(workflow).toContain('gh attestation verify "$artifact"');
+        expect(workflow).toContain("node scripts/security/verify-commonlib-source-receipt.mjs");
         expect(workflow).toContain("npm run test:release-workflow");
         expect(workflow).toContain("npm run test:security-state-mutations");
         expect(workflow).toContain("npm ci --ignore-scripts");
