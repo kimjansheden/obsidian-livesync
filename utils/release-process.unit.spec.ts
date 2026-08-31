@@ -180,14 +180,21 @@ describe("release workflow", () => {
 
         expect(workflow).not.toMatch(/^\s+push:/m);
         expect(workflow).toContain("expected_sha:");
+        expect(workflow).toContain("environment: release");
         expect(workflow).toContain('git verify-tag "$TAG"');
         expect(workflow).toContain("security-events: read");
         expect(workflow).toContain("node scripts/security/verify-github-security-state.mjs");
+        expect(workflow).toContain("name: Verify the attested Commonlib dependency");
+        expect(workflow).toContain('gh attestation verify "$artifact"');
+        expect(workflow).toContain("npm run test:release-workflow");
         expect(workflow).toContain("npm run test:security-state-mutations");
         expect(workflow).toContain("npm ci --ignore-scripts");
         expect(workflow).toContain("npm audit --audit-level=low");
-        expect(workflow).toContain("npm run sbom -- --output-file sbom.cdx.json");
-        expect(workflow).toContain("sha256sum main.js manifest.json styles.css package-lock.json sbom.cdx.json");
+        expect(workflow).toContain("npm run sbom -- --output-file release-assets/sbom.cdx.json");
+        expect(workflow).toContain(
+            "sha256sum LICENSE-INVENTORY.tsv commonlib-release.json main.js manifest.json package-lock.json sbom.cdx.json source-receipt.json styles.css"
+        );
+        expect(workflow).toContain("subject-path: release-assets/*");
         expect(workflow).toContain("actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8");
         expect(workflow).not.toContain("secrets.");
         for (const match of workflow.matchAll(/uses:\s*[^\s#]+@([^\s#]+)/g)) {

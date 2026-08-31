@@ -7,6 +7,7 @@ on:
   workflow_dispatch:
 
 permissions:
+  attestations: read
   contents: read
 
 concurrency:
@@ -20,22 +21,43 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Check out exact revision
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           fetch-depth: 0
           persist-credentials: false
 
       - name: Set up Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: 24.7.0
           cache: npm
+
+      - name: Verify the attested Commonlib dependency
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          dependency_dir=$(mktemp -d)
+          package_url=$(node -p "require('./docs/security/commonlib-release.json').packageUrl")
+          package_sha=$(node -p "require('./docs/security/commonlib-release.json').packageSha256")
+          receipt_url=$(node -p "require('./docs/security/commonlib-release.json').sourceReceiptUrl")
+          receipt_sha=$(node -p "require('./docs/security/commonlib-release.json').sourceReceiptSha256")
+          repository=$(node -p "require('./docs/security/commonlib-release.json').repositorySlug")
+          signer_workflow=$(node -p "require('./docs/security/commonlib-release.json').signerWorkflow")
+          source_commit=$(node -p "require('./docs/security/commonlib-release.json').forkCommit")
+          curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error "$package_url" --output "$dependency_dir/commonlib.tgz"
+          curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error "$receipt_url" --output "$dependency_dir/source-receipt.json"
+          printf '%s  %s\n' "$package_sha" "$dependency_dir/commonlib.tgz" | sha256sum --check
+          printf '%s  %s\n' "$receipt_sha" "$dependency_dir/source-receipt.json" | sha256sum --check
+          for artifact in "$dependency_dir/commonlib.tgz" "$dependency_dir/source-receipt.json"; do
+            gh attestation verify "$artifact" --repo "$repository" --signer-workflow "$signer_workflow" --source-ref refs/heads/main --source-digest "$source_commit"
+          done
 
       - name: Install locked dependencies without lifecycle scripts
         run: npm ci --ignore-scripts --no-audit --no-fund
 
       - name: Verify repository security policy
-        run: npm run security:policy
+        run: npm run security:policy && npm run test:release-workflow
 
       - name: Prove the release gate rejects security-state faults
         run: npm run test:security-state-faults

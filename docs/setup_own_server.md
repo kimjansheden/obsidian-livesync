@@ -199,7 +199,7 @@ export passphrase=<INSERT A STRONG VAULT ENCRYPTION PASSPHRASE>
 export uri_passphrase=<INSERT A SEPARATE SETUP URI PASSPHRASE> # Optional
 export setup_uri_file=/secure/output/setup-uri.txt
 export uri_passphrase_file=/secure/output/setup-passphrase.txt # Required only when uri_passphrase is omitted
-deno run --minimum-dependency-age=0 --allow-env --allow-write=/secure/output https://raw.githubusercontent.com/kimjansheden/obsidian-livesync/1.0.21-security.3/utils/setup/generate_setup_uri.ts
+deno run --minimum-dependency-age=0 --allow-env --allow-write=/secure/output https://raw.githubusercontent.com/kimjansheden/obsidian-livesync/1.0.21-security.4/utils/setup/generate_setup_uri.ts
 ```
 
 > [!TIP]
