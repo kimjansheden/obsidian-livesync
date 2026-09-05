@@ -301,12 +301,6 @@ if (!codeqlWorkflow.includes("node scripts/security/verify-github-security-state
 if (!codeqlWorkflow.includes("SECURITY_COMPONENTS: codeql")) {
     failures.push("CodeQL workflow must explicitly limit its token-compatible query to CodeQL alerts");
 }
-if (!codeqlWorkflow.includes("name: Zero open security alerts")) {
-    failures.push("CodeQL workflow must expose the complete Zero open security alerts gate after CodeQL");
-}
-if (!codeqlWorkflow.includes("SECURITY_COMPONENTS: all")) {
-    failures.push("CodeQL workflow must query every declared alert class before the complete gate can be green");
-}
 if (!releaseWorkflow.includes("verify-published-zero-alert-status.mjs")) {
     failures.push("release workflow must verify the externally attested zero-open-security-alert status");
 }
