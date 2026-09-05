@@ -70,3 +70,31 @@ jobs:
           SECURITY_SCOPE: ${{ github.event_name == 'pull_request' && 'pull-request' || 'main' }}
           PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number }}
         run: node scripts/security/verify-github-security-state.mjs
+
+  zero-open-security-alerts:
+    name: Zero open security alerts
+    needs: zero-open-alerts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      security-events: read
+    steps:
+      - name: Check out exact revision
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24.7.0
+
+      - name: Require exact analyses and zero open security alerts
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
+          SECURITY_COMPONENTS: all
+          SECURITY_SCOPE: ${{ github.event_name == 'pull_request' && 'pull-request' || 'main' }}
+          PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number }}
+        run: node scripts/security/verify-github-security-state.mjs
