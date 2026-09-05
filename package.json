@@ -191,7 +191,7 @@
         "@vrtmrz/obsidian-plugin-kit": "0.1.4",
         "@vrtmrz/ui-interactions": "0.1.2",
         "diff-match-patch": "^1.0.5",
-        "fflate": "^0.8.2",
+        "fflate": "^0.8.3",
         "idb": "^8.0.3",
         "markdown-it": "^14.2.0",
         "minimatch": "^10.2.5",
@@ -207,7 +207,7 @@
             "picomatch": "4.0.7"
         },
         "typed-rest-client": {
-            "qs": "6.15.3"
+            "qs": "6.16.0"
         },
         "pouchdb-core": {
             "uuid": "11.1.1"
