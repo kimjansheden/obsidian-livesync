@@ -1,12 +1,10 @@
-import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
-import { describe, it } from "node:test";
+const assert = process.getBuiltinModule("node:assert/strict");
+const { readFile } = process.getBuiltinModule("node:fs/promises");
+const { describe, it } = process.getBuiltinModule("node:test");
+import commonlibIdentity from "../docs/security/commonlib-release.json" with { type: "json" };
 import { validateCommonlibSourceReceipt } from "../scripts/security/verify-commonlib-source-receipt.mjs";
 
 const releaseWorkflow = await readFile(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");
-const commonlibIdentity = JSON.parse(
-    await readFile(new URL("../docs/security/commonlib-release.json", import.meta.url), "utf8")
-);
 const validCommonlibReceipt = {
     repository: commonlibIdentity.repositorySlug,
     upstreamRepository: commonlibIdentity.upstreamRepository,
@@ -18,6 +16,7 @@ const validCommonlibReceipt = {
     workflowRun: commonlibIdentity.releaseWorkflowRun,
 };
 
+/** @param {string} workflow */
 function sourceReceiptJqContract(workflow) {
     const command = workflow.split(/\r?\n/u).find((line) => line.includes("jq -n --arg repository"));
     assert.ok(command, "source-receipt jq command is missing");
