@@ -166,12 +166,15 @@ describe("database compatibility evaluation", () => {
 
 describe("packaged Commonlib compatibility gate", () => {
     it("prevents replication while the compatibility review remains pending", async () => {
+        let replicationQueueState: unknown;
         const openReplication = vi.fn().mockResolvedValue(true);
         const runFiniteReplicationActivity = vi.fn(async (task: () => unknown) => await task());
         const dependencies = {
             APIService: { isOnline: true, addLog: vi.fn() },
             appLifecycleService: {
                 isReady: () => true,
+                onLoaded: { addHandler: vi.fn() },
+                onResumed: { addHandler: vi.fn() },
                 getUnresolvedMessages: Object.assign(vi.fn().mockResolvedValue([]), { addHandler: vi.fn() }),
             },
             databaseService: {},
@@ -182,6 +185,16 @@ describe("packaged Commonlib compatibility gate", () => {
             },
             settingService: {
                 currentSettings: () => ({ versionUpFlash: "Review the database compatibility change." }),
+            },
+            replicationQueueStore: {
+                get: vi.fn(async () => replicationQueueState),
+                atomicUpdate: vi.fn(
+                    async (_key: string, change: (current: unknown) => { value: unknown; result: unknown }) => {
+                        const next = change(structuredClone(replicationQueueState));
+                        replicationQueueState = structuredClone(next.value);
+                        return next.result;
+                    }
+                ),
             },
         };
         const service = new InjectableReplicationService(new ServiceContext(), dependencies as never);

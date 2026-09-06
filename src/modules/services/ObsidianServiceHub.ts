@@ -103,6 +103,7 @@ export class ObsidianServiceHub extends InjectableServiceHub<ObsidianServiceCont
             settingService: setting,
             fileProcessingService: fileProcessing,
             databaseService: database,
+            replicationQueueStore: keyValueDB.openSimpleStore("replication-queue"),
         });
 
         const control = new ObsidianControlService(context, {

@@ -124,6 +124,17 @@ export class IDBKeyValueDatabase implements KeyValueDatabase {
         await db.put(this.storeKey, value, key);
         return key;
     }
+    async atomicUpdate<T, R>(
+        key: IDBValidKey,
+        change: (current: T | undefined) => { value: T; result: R }
+    ): Promise<R> {
+        const transaction = (await this.DB).transaction(this.storeKey, "readwrite");
+        const current = (await transaction.store.get(key)) as T | undefined;
+        const { value, result } = change(current);
+        await transaction.store.put(value, key);
+        await transaction.done;
+        return result;
+    }
     async del(key: IDBValidKey): Promise<void> {
         const db = await this.DB;
         return await db.delete(this.storeKey, key);

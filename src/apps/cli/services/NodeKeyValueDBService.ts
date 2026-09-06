@@ -1,14 +1,17 @@
 import { LOG_LEVEL_NOTICE, LOG_LEVEL_VERBOSE } from "@vrtmrz/livesync-commonlib/compat/common/logger";
-import type { KeyValueDatabase } from "@vrtmrz/livesync-commonlib/compat/interfaces/KeyValueDatabase";
+import type {
+    AtomicSimpleStore,
+    KeyValueDatabase,
+} from "@vrtmrz/livesync-commonlib/compat/interfaces/KeyValueDatabase";
 import type { IKeyValueDBService } from "@vrtmrz/livesync-commonlib/compat/services/base/IService";
 import type { ServiceContext } from "@vrtmrz/livesync-commonlib/context";
 import { ServiceBase } from "@vrtmrz/livesync-commonlib/compat/services/base/ServiceBase";
 import type { InjectableAppLifecycleService } from "@vrtmrz/livesync-commonlib/compat/services/implements/injectable/InjectableAppLifecycleService";
 import type { InjectableDatabaseEventService } from "@vrtmrz/livesync-commonlib/compat/services/implements/injectable/InjectableDatabaseEventService";
 import type { IVaultService } from "@vrtmrz/livesync-commonlib/compat/services/base/IService";
-import type { SimpleStore } from "octagonal-wheels/databases/SimpleStoreBase";
 import { createInstanceLogFunction } from "@vrtmrz/livesync-commonlib/compat/services/lib/logUtils";
 import { fs as nodeFs, path as nodePath } from "@vrtmrz/livesync-commonlib/node";
+import { serialized } from "octagonal-wheels/concurrency/lock";
 
 const NODE_KV_TYPED_KEY = "__nodeKvType";
 const NODE_KV_VALUES_KEY = "values";
@@ -129,6 +132,20 @@ class NodeFileKeyValueDatabase implements KeyValueDatabase {
         return key;
     }
 
+    async atomicUpdate<T, R>(
+        key: IDBValidKey,
+        change: (current: T | undefined) => { value: T; result: R }
+    ): Promise<R> {
+        return await serialized(`NodeFileKeyValueDatabase-${this.filePath}`, async () => {
+            this.load();
+            const stringKey = asKeyString(key);
+            const { value, result } = change(this.data.get(stringKey) as T | undefined);
+            this.data.set(stringKey, value);
+            this.flush();
+            return result;
+        });
+    }
+
     async del(key: IDBValidKey): Promise<void> {
         this.data.delete(asKeyString(key));
         this.flush();
@@ -184,7 +201,7 @@ export class NodeKeyValueDBService<T extends ServiceContext = ServiceContext>
     implements IKeyValueDBService
 {
     private _kvDB: KeyValueDatabase | undefined;
-    private _simpleStore: SimpleStore<unknown> | undefined;
+    private _simpleStore: AtomicSimpleStore<unknown> | undefined;
     private filePath: string;
     private _log = createInstanceLogFunction("NodeKeyValueDBService");
 
@@ -258,7 +275,7 @@ export class NodeKeyValueDBService<T extends ServiceContext = ServiceContext>
         return true;
     }
 
-    openSimpleStore<T>(kind: string): SimpleStore<T> {
+    openSimpleStore<T>(kind: string): AtomicSimpleStore<T> {
         // Service modules are composed before onSettingLoaded opens the file-
         // backed database, so handle creation must not touch it. Actual store
         // operations are deliberately fail-fast: the sequential lifecycle opens
@@ -281,6 +298,10 @@ export class NodeKeyValueDBService<T extends ServiceContext = ServiceContext>
             set: async (key: string, value: unknown): Promise<void> => {
                 await getDB().set(`${prefix}${key}`, value);
             },
+            atomicUpdate: async <R>(
+                key: string,
+                change: (current: T | undefined) => { value: T; result: R }
+            ): Promise<R> => await getDB().atomicUpdate(`${prefix}${key}`, change),
             delete: async (key: string): Promise<void> => {
                 await getDB().del(`${prefix}${key}`);
             },
@@ -304,6 +325,6 @@ export class NodeKeyValueDBService<T extends ServiceContext = ServiceContext>
             get db() {
                 return Promise.resolve(getDB());
             },
-        } satisfies SimpleStore<T>;
+        } satisfies AtomicSimpleStore<T>;
     }
 }

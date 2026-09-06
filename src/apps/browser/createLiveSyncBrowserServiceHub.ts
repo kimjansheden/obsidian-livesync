@@ -148,6 +148,12 @@ export class LiveSyncBrowserServiceHub<T extends ServiceContext> extends Injecta
             appLifecycle,
             setting,
         });
+        const keyValueDB = new LiveSyncBrowserKeyValueDBService(context, {
+            openKeyValueDatabase: options.openKeyValueDatabase ?? createBrowserKeyValueDatabaseFactory(),
+            appLifecycle,
+            databaseEvents,
+            vault,
+        });
         const replication = new InjectableReplicationService(context, {
             APIService: API,
             appLifecycleService: appLifecycle,
@@ -155,12 +161,7 @@ export class LiveSyncBrowserServiceHub<T extends ServiceContext> extends Injecta
             settingService: setting,
             fileProcessingService: fileProcessing,
             databaseService: database,
-        });
-        const keyValueDB = new LiveSyncBrowserKeyValueDBService(context, {
-            openKeyValueDatabase: options.openKeyValueDatabase ?? createBrowserKeyValueDatabaseFactory(),
-            appLifecycle,
-            databaseEvents,
-            vault,
+            replicationQueueStore: keyValueDB.openSimpleStore("replication-queue"),
         });
         const control = new ControlService(context, {
             appLifecycleService: appLifecycle,
