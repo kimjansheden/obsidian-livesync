@@ -143,15 +143,6 @@ export class NodeServiceHub<T extends NodeServiceContext> extends InjectableServ
             databaseEventService: databaseEvents,
         });
 
-        const replication = new InjectableReplicationService(context, {
-            APIService: API,
-            appLifecycleService: appLifecycle,
-            replicatorService: replicator,
-            settingService: setting,
-            fileProcessingService: fileProcessing,
-            databaseService: database,
-        });
-
         const keyValueDB = new NodeKeyValueDBService(
             context,
             {
@@ -161,6 +152,16 @@ export class NodeServiceHub<T extends NodeServiceContext> extends InjectableServ
             },
             keyValueDBPath
         );
+
+        const replication = new InjectableReplicationService(context, {
+            APIService: API,
+            appLifecycleService: appLifecycle,
+            replicatorService: replicator,
+            settingService: setting,
+            fileProcessingService: fileProcessing,
+            databaseService: database,
+            replicationQueueStore: keyValueDB.openSimpleStore("replication-queue"),
+        });
 
         const control = new ControlService(context, {
             appLifecycleService: appLifecycle,

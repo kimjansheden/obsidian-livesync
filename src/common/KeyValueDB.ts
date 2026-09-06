@@ -62,6 +62,21 @@ export const _OpenKeyValueDatabase = async (dbKey: string): Promise<KeyValueData
             }
             return await db.put(storeKey, value, key);
         },
+        async atomicUpdate<T, R>(
+            key: IDBValidKey,
+            change: (current: T | undefined) => { value: T; result: R }
+        ): Promise<R> {
+            if (!db) {
+                db = await _openDB();
+                databaseCache[dbKey] = db;
+            }
+            const transaction = db.transaction(storeKey, "readwrite");
+            const current = (await transaction.store.get(key)) as T | undefined;
+            const { value, result } = change(current);
+            await transaction.store.put(value, key);
+            await transaction.done;
+            return result;
+        },
         async del(key: IDBValidKey) {
             if (!db) {
                 db = await _openDB();
