@@ -18,6 +18,7 @@ Earlier releases remain available in the 1.0 release history, the 1.0 preview hi
 
 - Object Storage connection settings are now encrypted before the host persistence boundary, scrubbed from the plaintext settings record, and restored after restarting the plug-in. Saving a pure S3-compatible profile no longer fails the plaintext-credential guard before the encrypted connection has been created.
 - Finite Object Storage synchronisation now persists queued generations, resumes them after startup, serialises lease changes atomically across browser contexts, and advances remote journal cursors only after local application succeeds.
+- Locked Object Storage remotes now reject unaccepted nodes before they can refresh milestone heartbeats, while accepted nodes retain read-only compatibility checks.
 
 ## 1.0.21
 
