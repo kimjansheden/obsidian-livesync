@@ -4,6 +4,7 @@
     import { decodeBinary, readString } from "@vrtmrz/livesync-commonlib/compat/string_and_binary/convert";
     import { getDocData, isObjectDifferent, mergeObject } from "@vrtmrz/livesync-commonlib/compat/common/utils";
     import { $msg as translateMessage } from "@/common/translation";
+    import { isMergeableJsonValue, parseSelectableJsonDocument } from "./jsonConflictPolicy.ts";
 
     interface Props {
         docs?: LoadedEntry[];
@@ -48,18 +49,27 @@
 
     function parseJson(json: string | false) {
         if (json === false) return false;
-        try {
-            return JSON.parse(json) as JSONData;
-        } catch (ex) {
-            return false;
-        }
+        return parseSelectableJsonDocument(json) as JSONData | false;
     }
-    const objA = $derived(parseJson(docAContent) || {});
-    const objB = $derived(parseJson(docBContent) || {});
-    const objAB = $derived(mergeObject(objA, objB));
-    const objBAw = $derived(mergeObject(objB, objA));
-    const objBA = $derived(isObjectDifferent(objBAw, objAB) ? objBAw : false);
-    let diffs: Diff[] = $derived.by(() => (objA && selectedObj ? getJsonDiff(objA, selectedObj) : []));
+    // Any valid object or array revision can be kept as a whole; only objects are merged.
+    const objA = $derived(parseJson(docAContent));
+    const objB = $derived(parseJson(docBContent));
+    const objAB = $derived(
+        objA !== false && objB !== false && isMergeableJsonValue(objA) && isMergeableJsonValue(objB)
+            ? mergeObject(objA, objB)
+            : false
+    );
+    const objBAw = $derived(
+        objA !== false && objB !== false && isMergeableJsonValue(objA) && isMergeableJsonValue(objB)
+            ? mergeObject(objB, objA)
+            : false
+    );
+    const objBA = $derived(
+        objBAw !== false && objAB !== false && isObjectDifferent(objBAw, objAB) ? objBAw : false
+    );
+    let diffs: Diff[] = $derived.by(() =>
+        objA !== false && selectedObj !== false ? getJsonDiff(objA, selectedObj) : []
+    );
     type SelectModes = "" | "A" | "B" | "AB" | "BA";
     let mode: SelectModes = $state(defaultSelect as SelectModes);
 
@@ -83,6 +93,10 @@
     }
     function apply() {
         if (!docA || !docB) return;
+        if ((mode == "A" && objA === false) || (mode == "B" && objB === false)) {
+            callback(undefined, undefined);
+            return;
+        }
         if (docA._id == docB._id) {
             if (mode == "A") return callback(docA._rev!, undefined);
             if (mode == "B") return callback(docB._rev!, undefined);
@@ -90,8 +104,8 @@
             if (mode == "A") return callback(undefined, docToString(docA));
             if (mode == "B") return callback(undefined, docToString(docB));
         }
-        if (mode == "BA") return callback(undefined, JSON.stringify(objBA, null, 2));
-        if (mode == "AB") return callback(undefined, JSON.stringify(objAB, null, 2));
+        if (mode == "BA" && objBA !== false) return callback(undefined, JSON.stringify(objBA, null, 2));
+        if (mode == "AB" && objAB !== false) return callback(undefined, JSON.stringify(objAB, null, 2));
         callback(undefined, undefined);
     }
     function cancel() {
@@ -117,11 +131,11 @@
 
         if (!hideLocal) {
             newModes.push(["", translateMessage("Not now")]);
-            newModes.push(["A", nameA || "A"]);
+            if (objA !== false) newModes.push(["A", nameA || "A"]);
         }
-        newModes.push(["B", nameB || "B"]);
-        newModes.push(["AB", `${nameA || "A"} + ${nameB || "B"}`]);
-        newModes.push(["BA", `${nameB || "B"} + ${nameA || "A"}`]);
+        if (objB !== false) newModes.push(["B", nameB || "B"]);
+        if (objAB !== false) newModes.push(["AB", `${nameA || "A"} + ${nameB || "B"}`]);
+        if (objBA !== false) newModes.push(["BA", `${nameB || "B"} + ${nameA || "A"}`]);
         return newModes;
     });
 </script>
