@@ -1,7 +1,7 @@
 import { AbstractObsidianModule } from "@/modules/AbstractObsidianModule.ts";
 import { EVENT_FILE_RENAMED, EVENT_LEAF_ACTIVE_CHANGED, eventHub } from "@/common/events.js";
-import { LOG_LEVEL_NOTICE, LOG_LEVEL_VERBOSE } from "octagonal-wheels/common/logger";
-import { scheduleTask } from "octagonal-wheels/concurrency/task";
+import { LOG_LEVEL_INFO, LOG_LEVEL_NOTICE, LOG_LEVEL_VERBOSE } from "octagonal-wheels/common/logger";
+import { cancelTask, scheduleTask } from "octagonal-wheels/concurrency/task";
 import type { TFile } from "@/deps.ts";
 import { fireAndForget } from "octagonal-wheels/promises";
 import { type FilePathWithPrefix } from "@vrtmrz/livesync-commonlib/compat/common/types";
@@ -31,6 +31,14 @@ type AppWithInternalCommands = {
 type CodeMirrorAdapter = {
     commands: { save: () => void };
 };
+
+// A mobile WebView freezes network requests while the app is hidden. A request which was already in flight may
+// not settle until long after the app returns, and it keeps the replication queue busy until then. Requests which
+// started before the app became visible again get this long to finish on their own before they are aborted.
+const STALE_REMOTE_REQUEST_GRACE_MS = 10_000;
+const STALE_REMOTE_REQUEST_TASK = "abort-stale-remote-requests";
+// How long to wait for the interrupted cycle to unwind before giving up on running it again straight away.
+const ABORTED_REPLICATION_UNWIND_TIMEOUT_MS = 60_000;
 
 export class ModuleObsidianEvents extends AbstractObsidianModule {
     _everyOnloadStart(): Promise<boolean> {
@@ -172,6 +180,50 @@ export class ModuleObsidianEvents extends AbstractObsidianModule {
         for (const count of counts) count.onChanged(handler);
     }
 
+    private scheduleStaleRemoteRequestCheck(visibleSince: number) {
+        if (!this.services.API.isMobile()) return;
+        scheduleTask(STALE_REMOTE_REQUEST_TASK, STALE_REMOTE_REQUEST_GRACE_MS, () =>
+            fireAndForget(() => this.abortStaleRemoteRequests(visibleSince))
+        );
+    }
+
+    private async abortStaleRemoteRequests(visibleSince: number) {
+        if (activeWindow.document.hidden) return;
+        const replicator = this.services.replicator;
+        const remoteActivities = replicator.boundedRemoteActivityCount.value;
+        // Only finite replication cycles can be interrupted and run again safely. Leave a rebuild or any other
+        // remote work alone, even when a replication cycle is running beside it.
+        if (remoteActivities === 0 || remoteActivities !== replicator.finiteReplicationActivityCount.value) return;
+        const aborted = replicator.getActiveReplicator()?.abortStaleRemoteRequests(visibleSince) ?? 0;
+        if (aborted === 0) return;
+        this._log(
+            `Aborted ${aborted} remote request(s) which were still waiting after the app returned from the background`,
+            LOG_LEVEL_INFO
+        );
+        // The interrupted cycle leaves its work pending; run it again once that cycle has unwound.
+        if (!(await this.waitForBoundedRemoteActivityToEnd(ABORTED_REPLICATION_UNWIND_TIMEOUT_MS))) return;
+        if (activeWindow.document.hidden || this.services.appLifecycle.isSuspended()) return;
+        await this.services.replication.replicate();
+    }
+
+    private waitForBoundedRemoteActivityToEnd(timeoutMs: number): Promise<boolean> {
+        const count = this.services.replicator.boundedRemoteActivityCount;
+        if (count.value === 0) return Promise.resolve(true);
+        return new Promise((resolve) => {
+            let timer: number | undefined = undefined;
+            const finish = (ended: boolean) => {
+                compatGlobal.clearTimeout(timer);
+                count.offChanged(handler);
+                resolve(ended);
+            };
+            const handler = () => {
+                if (count.value === 0) finish(true);
+            };
+            timer = compatGlobal.setTimeout(() => finish(false), timeoutMs);
+            count.onChanged(handler);
+        });
+    }
+
     setHasFocus(hasFocus: boolean) {
         this.hasFocus = hasFocus;
         this.watchWindowVisibility();
@@ -194,6 +246,8 @@ export class ModuleObsidianEvents extends AbstractObsidianModule {
     }
 
     async watchWindowVisibilityAsync() {
+        // Taken before any awaited work, so requests started while the visible app handles this are never stale.
+        const observedAt = Date.now();
         if (this.settings.suspendFileWatching) {
             if (
                 this.settings.isConfigured &&
@@ -224,6 +278,7 @@ export class ModuleObsidianEvents extends AbstractObsidianModule {
         if (!isHidden && boundedActivityInProgress && this.deferredBoundedLifecycle === "suspend-if-hidden") {
             this.isLastHidden = false;
             this.deferredBoundedLifecycle = undefined;
+            this.scheduleStaleRemoteRequestCheck(observedAt);
             return;
         }
         this.isLastHidden = isHidden;
@@ -238,6 +293,7 @@ export class ModuleObsidianEvents extends AbstractObsidianModule {
         const keepActiveInBackground = this.keepReplicationActiveInBackground();
 
         if (isHidden) {
+            cancelTask(STALE_REMOTE_REQUEST_TASK);
             if (boundedActivityInProgress && !keepActiveInBackground) {
                 this.deferredBoundedLifecycle = "suspend-if-hidden";
                 this.deferLifecycleUntilBoundedActivityEnds();
@@ -266,6 +322,8 @@ export class ModuleObsidianEvents extends AbstractObsidianModule {
             if (keepActiveInBackground && this.settings.liveSync) {
                 await this.services.appLifecycle.onSuspending();
             }
+            // Requests started by the resume below are newer than the observation and are never aborted as stale.
+            this.scheduleStaleRemoteRequestCheck(observedAt);
             // Resume is not gated on focus in this branch, but note the top-of-handler check
             // (isLastHidden && !hasFocus) still defers the whole handler when the window becomes
             // visible again while unfocused; in that case recovery happens on the next focus.

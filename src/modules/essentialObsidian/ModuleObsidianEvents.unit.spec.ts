@@ -12,6 +12,7 @@ type SetupOptions = {
     isSuspended?: boolean;
     // Platform is read via services.API.isMobile(); default desktop (false) so the feature applies.
     isMobile?: boolean;
+    abortedStaleRequests?: number;
 };
 
 function setup(opts: SetupOptions) {
@@ -25,6 +26,9 @@ function setup(opts: SetupOptions) {
     const fileProcessing = { commitPendingFileEvents: vi.fn(async () => true) };
     const boundedRemoteActivityCount = reactiveSource(0);
     const boundedLocalApplicationActivityCount = reactiveSource(0);
+    const finiteReplicationActivityCount = reactiveSource(0);
+    const abortStaleRemoteRequests = vi.fn((_startedBefore: number) => opts.abortedStaleRequests ?? 0);
+    const replicate = vi.fn(async () => true);
 
     const core = {
         _services: {
@@ -39,7 +43,13 @@ function setup(opts: SetupOptions) {
             setting: { saveSettingData: vi.fn(async () => undefined) },
             appLifecycle,
             fileProcessing,
-            replicator: { boundedRemoteActivityCount, boundedLocalApplicationActivityCount },
+            replicator: {
+                boundedRemoteActivityCount,
+                boundedLocalApplicationActivityCount,
+                finiteReplicationActivityCount,
+                getActiveReplicator: () => ({ abortStaleRemoteRequests }),
+            },
+            replication: { replicate },
         },
         settings: {
             ...DEFAULT_SETTINGS,
@@ -63,6 +73,9 @@ function setup(opts: SetupOptions) {
         fileProcessing,
         boundedRemoteActivityCount,
         boundedLocalApplicationActivityCount,
+        finiteReplicationActivityCount,
+        abortStaleRemoteRequests,
+        replicate,
     };
 }
 
@@ -311,5 +324,165 @@ describe("watchWindowVisibilityAsync — keepReplicationActiveInBackground", () 
         });
         await module.watchWindowVisibilityAsync();
         expect(appLifecycle.onSuspending).toHaveBeenCalledTimes(1);
+    });
+});
+
+describe("watchWindowVisibilityAsync — remote requests left waiting from the background", () => {
+    const periodicSettings = { keepReplicationActiveInBackground: false, liveSync: false, periodicReplication: true };
+
+    afterEach(() => {
+        vi.useRealTimers();
+        delete (globalThis as any).activeWindow;
+    });
+
+    async function returnWhileRemoteActivityIsRunning(opts: {
+        isMobile: boolean;
+        abortedStaleRequests?: number;
+        replicationCycle?: boolean;
+    }) {
+        vi.useFakeTimers();
+        const { replicationCycle = true, ...setupOptions } = opts;
+        const context = setup({ settings: periodicSettings, hidden: true, ...setupOptions });
+        context.boundedRemoteActivityCount.value = 1;
+        context.finiteReplicationActivityCount.value = replicationCycle ? 1 : 0;
+        await context.module.watchWindowVisibilityAsync();
+
+        (globalThis as any).activeWindow.document.hidden = false;
+        const visibleAt = Date.now();
+        await context.module.watchWindowVisibilityAsync();
+        return { ...context, visibleAt };
+    }
+
+    it("aborts requests still waiting after the grace period and runs the pending replication again", async () => {
+        const { abortStaleRemoteRequests, replicate, boundedRemoteActivityCount, visibleAt } =
+            await returnWhileRemoteActivityIsRunning({ isMobile: true, abortedStaleRequests: 1 });
+
+        await vi.advanceTimersByTimeAsync(9_999);
+        expect(abortStaleRemoteRequests).not.toHaveBeenCalled();
+
+        await vi.advanceTimersByTimeAsync(1);
+        expect(abortStaleRemoteRequests).toHaveBeenCalledExactlyOnceWith(visibleAt);
+        expect(replicate).not.toHaveBeenCalled();
+
+        boundedRemoteActivityCount.value = 0;
+        await vi.waitFor(() => expect(replicate).toHaveBeenCalledTimes(1));
+    });
+
+    it("does not abort a rebuild or other remote work which is not a replication cycle", async () => {
+        const { abortStaleRemoteRequests, replicate } = await returnWhileRemoteActivityIsRunning({
+            isMobile: true,
+            abortedStaleRequests: 1,
+            replicationCycle: false,
+        });
+
+        await vi.advanceTimersByTimeAsync(10_000);
+
+        expect(abortStaleRemoteRequests).not.toHaveBeenCalled();
+        expect(replicate).not.toHaveBeenCalled();
+    });
+
+    it("does not run the replication again when the app is hidden before the aborted cycle unwinds", async () => {
+        const { module, abortStaleRemoteRequests, replicate, boundedRemoteActivityCount } =
+            await returnWhileRemoteActivityIsRunning({ isMobile: true, abortedStaleRequests: 1 });
+
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(abortStaleRemoteRequests).toHaveBeenCalledTimes(1);
+
+        (globalThis as any).activeWindow.document.hidden = true;
+        await module.watchWindowVisibilityAsync();
+        boundedRemoteActivityCount.value = 0;
+        await vi.advanceTimersByTimeAsync(1_000);
+
+        expect(replicate).not.toHaveBeenCalled();
+    });
+
+    it("stops waiting for an aborted cycle which does not unwind", async () => {
+        const { abortStaleRemoteRequests, replicate, boundedRemoteActivityCount } =
+            await returnWhileRemoteActivityIsRunning({ isMobile: true, abortedStaleRequests: 1 });
+
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(abortStaleRemoteRequests).toHaveBeenCalledTimes(1);
+
+        await vi.advanceTimersByTimeAsync(60_000);
+        boundedRemoteActivityCount.value = 0;
+        await vi.advanceTimersByTimeAsync(1_000);
+
+        expect(replicate).not.toHaveBeenCalled();
+    });
+
+    it("leaves a request which settles during the grace period alone", async () => {
+        const { abortStaleRemoteRequests, replicate, boundedRemoteActivityCount } =
+            await returnWhileRemoteActivityIsRunning({ isMobile: true, abortedStaleRequests: 1 });
+
+        boundedRemoteActivityCount.value = 0;
+        await vi.advanceTimersByTimeAsync(10_000);
+
+        expect(abortStaleRemoteRequests).not.toHaveBeenCalled();
+        expect(replicate).not.toHaveBeenCalled();
+    });
+
+    it("does not start another replication when nothing was aborted", async () => {
+        const { abortStaleRemoteRequests, replicate, boundedRemoteActivityCount } =
+            await returnWhileRemoteActivityIsRunning({ isMobile: true, abortedStaleRequests: 0 });
+
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(abortStaleRemoteRequests).toHaveBeenCalledTimes(1);
+
+        boundedRemoteActivityCount.value = 0;
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(replicate).not.toHaveBeenCalled();
+    });
+
+    it("does not abort when the app is hidden again before the grace period ends", async () => {
+        const { module, abortStaleRemoteRequests } = await returnWhileRemoteActivityIsRunning({
+            isMobile: true,
+            abortedStaleRequests: 1,
+        });
+
+        (globalThis as any).activeWindow.document.hidden = true;
+        await module.watchWindowVisibilityAsync();
+        await vi.advanceTimersByTimeAsync(10_000);
+
+        expect(abortStaleRemoteRequests).not.toHaveBeenCalled();
+    });
+
+    it("does not abort requests on the desktop app", async () => {
+        const { abortStaleRemoteRequests, replicate } = await returnWhileRemoteActivityIsRunning({
+            isMobile: false,
+            abortedStaleRequests: 1,
+        });
+
+        await vi.advanceTimersByTimeAsync(10_000);
+
+        expect(abortStaleRemoteRequests).not.toHaveBeenCalled();
+        expect(replicate).not.toHaveBeenCalled();
+    });
+
+    it("also checks after a regular resume, using the time the app became visible", async () => {
+        vi.useFakeTimers();
+        const {
+            module,
+            appLifecycle,
+            abortStaleRemoteRequests,
+            boundedRemoteActivityCount,
+            finiteReplicationActivityCount,
+        } = setup({
+            settings: periodicSettings,
+            hidden: true,
+            isMobile: true,
+        });
+        await module.watchWindowVisibilityAsync();
+        expect(appLifecycle.onSuspending).toHaveBeenCalledTimes(1);
+
+        (globalThis as any).activeWindow.document.hidden = false;
+        const visibleAt = Date.now();
+        await module.watchWindowVisibilityAsync();
+        expect(appLifecycle.onResumed).toHaveBeenCalledTimes(1);
+
+        boundedRemoteActivityCount.value = 1;
+        finiteReplicationActivityCount.value = 1;
+        await vi.advanceTimersByTimeAsync(10_000);
+
+        expect(abortStaleRemoteRequests).toHaveBeenCalledExactlyOnceWith(visibleAt);
     });
 });
