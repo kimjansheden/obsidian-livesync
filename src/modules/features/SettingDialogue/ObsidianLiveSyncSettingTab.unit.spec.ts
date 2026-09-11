@@ -215,6 +215,14 @@ describe("ObsidianLiveSyncSettingTab pending-setting initialisation", () => {
 describe("ObsidianLiveSyncSettingTab declarative settings boundary", () => {
     function createSettingsTab() {
         const saveSettingData = vi.fn(async () => undefined);
+        const clearUsedPassphrase = vi.fn();
+        const askString = vi.fn(async (..._args: unknown[]): Promise<string | false> => false);
+        const setting = {
+            saveSettingData,
+            clearUsedPassphrase,
+            getPassphrase: vi.fn(async (..._args: unknown[]): Promise<string | false> => "*"),
+            getDeviceAndVaultName: vi.fn(() => ""),
+        };
         const plugin = {
             app: {},
             core: {
@@ -223,11 +231,9 @@ describe("ObsidianLiveSyncSettingTab declarative settings boundary", () => {
                     hashCacheMaxCount: 300,
                     displayLanguage: "",
                 },
+                confirm: { askString },
                 services: {
-                    setting: {
-                        saveSettingData,
-                        getDeviceAndVaultName: vi.fn(() => ""),
-                    },
+                    setting,
                 },
             },
         };
@@ -249,8 +255,109 @@ describe("ObsidianLiveSyncSettingTab declarative settings boundary", () => {
                 displayLanguage: "",
             },
         });
-        return { tab, saveSettingData };
+        return { tab, saveSettingData, clearUsedPassphrase, askString, setting, core: plugin.core };
     }
+
+    it("asks for a launch passphrase twice and saves with the confirmed answer", async () => {
+        const { tab, saveSettingData, clearUsedPassphrase, askString, setting } = createSettingsTab();
+        askString
+            .mockResolvedValueOnce("synthetic-launch-passphrase")
+            .mockResolvedValueOnce("synthetic-launch-passphrase");
+        const askAtSave = setting.getPassphrase;
+        let passphraseDuringSave: string | false | undefined;
+        saveSettingData.mockImplementationOnce(async () => {
+            passphraseDuringSave = await setting.getPassphrase();
+            return undefined;
+        });
+        tab.editingSettings.configPassphraseStore = "ASK_AT_LAUNCH";
+
+        await tab.saveSettings(["configPassphraseStore"]);
+
+        expect(askString).toHaveBeenCalledTimes(2);
+        expect(clearUsedPassphrase).toHaveBeenCalledOnce();
+        expect(saveSettingData).toHaveBeenCalledOnce();
+        expect(passphraseDuringSave).toBe("synthetic-launch-passphrase");
+        expect(setting.getPassphrase).toBe(askAtSave);
+    });
+
+    it("keeps the previous passphrase mode when the launch passphrase is not confirmed", async () => {
+        const { tab, saveSettingData, clearUsedPassphrase, askString, core } = createSettingsTab();
+        askString
+            .mockResolvedValueOnce("synthetic-launch-passphrase")
+            .mockResolvedValueOnce("synthetic-launch-passphrasf");
+        tab.editingSettings.configPassphraseStore = "ASK_AT_LAUNCH";
+
+        await tab.saveSettings(["configPassphraseStore"]);
+
+        expect(saveSettingData).not.toHaveBeenCalled();
+        expect(clearUsedPassphrase).not.toHaveBeenCalled();
+        expect(core.settings.configPassphraseStore).toBe("");
+        expect(tab.editingSettings.configPassphraseStore).toBe("");
+    });
+
+    it("does not apply the launch passphrase mode while the passphrase is being confirmed", async () => {
+        const { tab, askString, core } = createSettingsTab();
+        const modesDuringPrompt: string[] = [];
+        askString.mockImplementation(async () => {
+            modesDuringPrompt.push(core.settings.configPassphraseStore);
+            return "synthetic-launch-passphrase";
+        });
+        tab.editingSettings.configPassphraseStore = "ASK_AT_LAUNCH";
+
+        await tab.saveSettings(["configPassphraseStore"]);
+
+        expect(modesDuringPrompt).toEqual(["", ""]);
+        expect(core.settings.configPassphraseStore).toBe("ASK_AT_LAUNCH");
+    });
+
+    it("still saves other settings when the launch passphrase is cancelled", async () => {
+        const { tab, saveSettingData, clearUsedPassphrase, askString, core } = createSettingsTab();
+        askString.mockResolvedValueOnce(false);
+        tab.editingSettings.configPassphraseStore = "ASK_AT_LAUNCH";
+        tab.editingSettings.hashCacheMaxCount = 321;
+
+        await tab.saveSettings(["configPassphraseStore", "hashCacheMaxCount"]);
+
+        expect(saveSettingData).toHaveBeenCalledOnce();
+        expect(clearUsedPassphrase).not.toHaveBeenCalled();
+        expect(core.settings.hashCacheMaxCount).toBe(321);
+        expect(core.settings.configPassphraseStore).toBe("");
+        expect(tab.editingSettings.configPassphraseStore).toBe("");
+    });
+
+    it("re-encrypts data.json with the new store when the configuration passphrase mode changes", async () => {
+        const { tab, saveSettingData, clearUsedPassphrase } = createSettingsTab();
+        tab.editingSettings.configPassphraseStore = "LOCALSTORAGE";
+        tab.editingSettings.configPassphrase = "synthetic-device-passphrase";
+
+        await tab.saveSettings(["configPassphrase", "configPassphraseStore"]);
+
+        expect(clearUsedPassphrase).toHaveBeenCalledOnce();
+        expect(saveSettingData).toHaveBeenCalledOnce();
+        expect(clearUsedPassphrase.mock.invocationCallOrder[0]).toBeLessThan(
+            saveSettingData.mock.invocationCallOrder[0]
+        );
+    });
+
+    it("re-encrypts data.json when only the device-local configuration passphrase changes", async () => {
+        const { tab, saveSettingData, clearUsedPassphrase } = createSettingsTab();
+        tab.editingSettings.configPassphrase = "synthetic-new-device-passphrase";
+
+        await tab.saveSettings(["configPassphrase"]);
+
+        expect(clearUsedPassphrase).toHaveBeenCalledOnce();
+        expect(saveSettingData).toHaveBeenCalledOnce();
+    });
+
+    it("keeps the used passphrase when other settings are saved", async () => {
+        const { tab, saveSettingData, clearUsedPassphrase } = createSettingsTab();
+        tab.editingSettings.hashCacheMaxCount = 321;
+
+        await tab.saveSettings(["hashCacheMaxCount"]);
+
+        expect(saveSettingData).toHaveBeenCalledOnce();
+        expect(clearUsedPassphrase).not.toHaveBeenCalled();
+    });
 
     it("loads the imperative fallback without a SettingPage runtime export", () => {
         const { tab } = createSettingsTab();

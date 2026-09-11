@@ -163,6 +163,47 @@ describe("SetupManager", () => {
         expect(setting.currentSettings().activeConfigurationId).toBe("legacy-couchdb");
     });
 
+    it("keeps the receiving device's identity when a Setup URI carries another device's identity", async () => {
+        const { manager, setting, dialogManager } = createSetupManager();
+        setting.settings = { ...setting.settings, additionalSuffixOfDatabaseName: "receiving-app-id" };
+        dialogManager.openWithExplicitCancel
+            .mockResolvedValueOnce({
+                ...createLegacyRemoteSetting(),
+                additionalSuffixOfDatabaseName: "source-app-id",
+                P2P_DevicePeerName: "source-peer",
+            })
+            .mockResolvedValueOnce("compatible-existing-user");
+
+        await expect(manager.onUseSetupURI(UserMode.Unknown, "mock-config://settings")).resolves.toBe(true);
+
+        expect(setting.currentSettings().additionalSuffixOfDatabaseName).toBe("receiving-app-id");
+        expect(setting.currentSettings().P2P_DevicePeerName).not.toBe("source-peer");
+    });
+
+    it("keeps the receiving device's local settings when QR data carries another device's", async () => {
+        const { manager, setting, dialogManager } = createSetupManager();
+        setting.settings = {
+            ...setting.settings,
+            additionalSuffixOfDatabaseName: "receiving-app-id",
+            configPassphraseStore: "LOCALSTORAGE",
+        };
+        vi.mocked(decodeSettingsFromQRCodeData).mockReturnValue({
+            ...createLegacyRemoteSetting(),
+            additionalSuffixOfDatabaseName: "source-app-id",
+            deviceAndVaultName: "source-device",
+            configPassphraseStore: "",
+        });
+        dialogManager.openWithExplicitCancel.mockResolvedValueOnce("compatible-existing-user");
+
+        await expect(manager.decodeQR("qr-data")).resolves.toBe(true);
+
+        expect(setting.currentSettings()).toMatchObject({
+            additionalSuffixOfDatabaseName: "receiving-app-id",
+            configPassphraseStore: "LOCALSTORAGE",
+        });
+        expect(setting.currentSettings().deviceAndVaultName).not.toBe("source-device");
+    });
+
     it("compatibility: normalises imported flat remote settings from QR data before applying", async () => {
         const { manager, setting, dialogManager } = createSetupManager();
         vi.mocked(decodeSettingsFromQRCodeData).mockReturnValue(createLegacyRemoteSetting());

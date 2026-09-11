@@ -193,18 +193,24 @@ export function createFetchAllFlagHandler(
             log("Fetch initialisation cancelled by user.", LOG_LEVEL_NOTICE);
             return await cancelScheduledInitialisation(host, cleanupFlag);
         }
-        return await processVaultInitialisation(host, log, async () => {
-            const vaultStateToAction = mapVaultStateToAction[vault];
-            const { makeLocalChunkBeforeSync, makeLocalFilesBeforeSync } = vaultStateToAction;
-            log(
-                `Fetching everything with settings: makeLocalChunkBeforeSync=${makeLocalChunkBeforeSync}, makeLocalFilesBeforeSync=${makeLocalFilesBeforeSync}`,
-                LOG_LEVEL_INFO
-            );
-            await host.serviceModules.rebuilder.$fetchLocal(makeLocalChunkBeforeSync, !makeLocalFilesBeforeSync);
-            await cleanupFlag();
-            log("Fetch everything operation completed. Vault files will be gradually synced.", LOG_LEVEL_NOTICE);
-            return true;
-        });
+        return await processVaultInitialisation(
+            host,
+            log,
+            async () => {
+                const vaultStateToAction = mapVaultStateToAction[vault];
+                const { makeLocalChunkBeforeSync, makeLocalFilesBeforeSync } = vaultStateToAction;
+                log(
+                    `Fetching everything with settings: makeLocalChunkBeforeSync=${makeLocalChunkBeforeSync}, makeLocalFilesBeforeSync=${makeLocalFilesBeforeSync}`,
+                    LOG_LEVEL_INFO
+                );
+                await host.serviceModules.rebuilder.$fetchLocal(makeLocalChunkBeforeSync, !makeLocalFilesBeforeSync);
+                await cleanupFlag();
+                log("Fetch everything operation completed. Vault files will be gradually synced.", LOG_LEVEL_NOTICE);
+                return true;
+            },
+            "resume",
+            { restoreAutomaticSyncForVault: host.services.vault.vaultName() }
+        );
     };
 
     return {
@@ -374,20 +380,91 @@ export async function cancelScheduledInitialisation(
 
 type InitialisationSuspensionPolicy = "resume" | "keep" | "keep-on-failure";
 
+/** Automatic synchronisation choices that `suspendAllSync` switches off and persists during initialisation. */
+const AUTOMATIC_SYNC_SETTING_KEYS = [
+    "liveSync",
+    "periodicReplication",
+    "syncOnSave",
+    "syncOnEditorSave",
+    "syncOnStart",
+    "syncOnFileOpen",
+    "syncAfterMerge",
+] as const satisfies readonly (keyof ObsidianLiveSyncSettings)[];
+type AutomaticSyncChoices = Pick<ObsidianLiveSyncSettings, (typeof AUTOMATIC_SYNC_SETTING_KEYS)[number]>;
+
+/** Device-local record of the choices, so a retry after an interrupted initialisation still restores them. */
+export const PENDING_AUTOMATIC_SYNC_CHOICES_KEY = "vault-initialisation-automatic-sync";
+
+// Small config is namespaced by the database suffix, which Fetch replaces while
+// it runs, so the record is keyed by the Vault name alone.
+function pendingAutomaticSyncChoicesKey(vaultName: string) {
+    return `${vaultName}-${PENDING_AUTOMATIC_SYNC_CHOICES_KEY}`;
+}
+
+function pickAutomaticSyncChoices(values: Partial<Record<keyof AutomaticSyncChoices, unknown>>): AutomaticSyncChoices {
+    return Object.fromEntries(
+        AUTOMATIC_SYNC_SETTING_KEYS.map((key) => [key, values[key] === true])
+    ) as AutomaticSyncChoices;
+}
+
+function parsePendingAutomaticSyncChoices(value: string | null): AutomaticSyncChoices | undefined {
+    if (!value) return undefined;
+    try {
+        const parsed: unknown = JSON.parse(value);
+        if (parsed === null || typeof parsed !== "object") return undefined;
+        const record = parsed as Record<string, unknown>;
+        if (!AUTOMATIC_SYNC_SETTING_KEYS.every((key) => typeof record[key] === "boolean")) return undefined;
+        return pickAutomaticSyncChoices(record);
+    } catch {
+        return undefined;
+    }
+}
+
+function captureAutomaticSyncChoices(
+    host: NecessaryServices<"setting", never>,
+    recordKey: string
+): AutomaticSyncChoices {
+    const current = pickAutomaticSyncChoices(host.services.setting.currentSettings());
+    const pending = parsePendingAutomaticSyncChoices(host.services.setting.getDeviceLocalConfig(recordKey));
+    // An interrupted attempt leaves every choice switched off. A choice the user
+    // has enabled since then takes precedence over the remembered ones.
+    const choices = pending && !Object.values(current).some(Boolean) ? pending : current;
+    host.services.setting.setDeviceLocalConfig(recordKey, JSON.stringify(choices));
+    return choices;
+}
+
+type VaultInitialisationOptions = {
+    /**
+     * Name of the Vault whose automatic synchronisation choices are restored once the process
+     * completes, as fetching joins an existing remote.
+     */
+    restoreAutomaticSyncForVault?: string;
+};
+
 /**
  * Process Vault initialisation with file watching and synchronisation suspended.
  * @param proc Process to execute during initialisation. It returns true only when normal operation may resume.
  * @param suspensionPolicy Final file-reflection state. `keep-on-failure` controls both reflection directions so a partly completed Fast Setup remains isolated.
+ * @param options.restoreAutomaticSyncForVault Restore this Vault's automatic synchronisation choices after success. They stay off after a failure.
  * @returns The result of the process, or false if an error occurs.
  */
 export async function processVaultInitialisation(
     host: NecessaryServices<"setting", never>,
     log: LogFunction,
     proc: () => Promise<boolean>,
-    suspensionPolicy: InitialisationSuspensionPolicy = "resume"
+    suspensionPolicy: InitialisationSuspensionPolicy = "resume",
+    options: VaultInitialisationOptions = {}
 ) {
     let completed = false;
+    let automaticSyncChoices: AutomaticSyncChoices | undefined;
+    const automaticSyncRecordKey =
+        options.restoreAutomaticSyncForVault === undefined
+            ? undefined
+            : pendingAutomaticSyncChoicesKey(options.restoreAutomaticSyncForVault);
     try {
+        if (automaticSyncRecordKey !== undefined) {
+            automaticSyncChoices = captureAutomaticSyncChoices(host, automaticSyncRecordKey);
+        }
         // Disable batch saving and file watching during initialisation.
         await host.services.setting.applyPartial({ batchSave: false }, false);
         await host.services.setting.suspendAllSync();
@@ -427,6 +504,15 @@ export async function processVaultInitialisation(
                 },
                 true
             );
+        }
+        if (completed && automaticSyncChoices && automaticSyncRecordKey !== undefined) {
+            try {
+                await host.services.setting.applyPartial(automaticSyncChoices, true);
+                host.services.setting.deleteDeviceLocalConfig(automaticSyncRecordKey);
+            } catch (ex) {
+                log("Could not restore the automatic synchronisation settings.", LOG_LEVEL_NOTICE);
+                log(ex, LOG_LEVEL_VERBOSE);
+            }
         }
     }
 }

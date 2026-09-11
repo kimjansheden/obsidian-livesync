@@ -250,5 +250,7 @@ export async function askAndPerformFastSetupOnScheduledFetchAll(
         log("Simple fetch and scan operation completed.", LOG_LEVEL_NOTICE);
         return true;
     };
-    return await processVaultInitialisation(host, log, performFastSetup, "keep-on-failure");
+    return await processVaultInitialisation(host, log, performFastSetup, "keep-on-failure", {
+        restoreAutomaticSyncForVault: host.services.vault.vaultName(),
+    });
 }

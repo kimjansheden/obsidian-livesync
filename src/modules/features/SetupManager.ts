@@ -48,6 +48,10 @@ import {
     type SetupInitialisationMode,
 } from "@/serviceFeatures/setupObsidian/setupActivationLifecycle.ts";
 import { isP2PMainRemote } from "@/common/remoteConfiguration.ts";
+import {
+    withoutDeviceLocalSettings,
+    type SettingsWithoutDeviceLocal,
+} from "@/serviceFeatures/setupObsidian/setupUriPayload.ts";
 
 function copySettingsForRemoteProfileUpdate(settings: ObsidianLiveSyncSettings): ObsidianLiveSyncSettings {
     return {
@@ -195,7 +199,7 @@ export class SetupManager extends AbstractModule {
             return false;
         }
         this._log("Setup URI dialog closed.", LOG_LEVEL_VERBOSE);
-        return await this.onConfirmApplySettingsFromWizard(newSetting, userMode);
+        return await this.onConfirmApplySettingsFromWizard(withoutDeviceLocalSettings(newSetting), userMode);
     }
 
     /**
@@ -369,21 +373,22 @@ export class SetupManager extends AbstractModule {
     }
     /**
      * Confirms and applies settings obtained from the wizard
-     * @param newConf
+     * @param wizardConf Settings to merge over the current ones; keys left out keep this device's values
      * @param _userMode
      * @param activate Whether to activate the remote type in the new settings
      * @param extra  Extra function to run before applying settings
      * @returns Promise that resolves to true if settings applied successfully, false otherwise
      */
     async onConfirmApplySettingsFromWizard(
-        newConf: ObsidianLiveSyncSettings,
+        wizardConf: ObsidianLiveSyncSettings | SettingsWithoutDeviceLocal,
         _userMode: UserMode,
         activate: boolean = true,
         extra: () => void = () => {}
     ): Promise<boolean> {
-        newConf = await this.services.setting.adjustSettings({
+        // Settings from another device leave out its device-local values, so this device keeps its own.
+        const newConf = await this.services.setting.adjustSettings({
             ...this.settings,
-            ...newConf,
+            ...wizardConf,
         });
         let userMode = _userMode;
         if (userMode === UserMode.Unknown) {
@@ -475,7 +480,7 @@ export class SetupManager extends AbstractModule {
      * @returns Promise that resolves to true if settings applied successfully, false otherwise
      */
     async decodeQR(qr: string) {
-        const newSettings = decodeSettingsFromQRCodeData(qr);
+        const newSettings = withoutDeviceLocalSettings(decodeSettingsFromQRCodeData(qr));
         return await this.onConfirmApplySettingsFromWizard(newSettings, UserMode.Unknown);
     }
 

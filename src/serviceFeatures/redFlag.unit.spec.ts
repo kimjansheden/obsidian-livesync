@@ -64,6 +64,8 @@ vi.mock("@vrtmrz/livesync-commonlib/compat/serviceFeatures/remoteConfig", () => 
 });
 
 // Mock types and functions
+const PILOT_VAULT = "pilot-vault";
+
 const createLoggerMock = (): LogFunction => {
     return vi.fn();
 };
@@ -92,6 +94,9 @@ const createSettingServiceMock = () => {
         remoteType: "CouchDB",
     };
     const smallConfig = new Map<string, string>();
+    const deviceLocalConfig = new Map<string, string>();
+    // Like the setting service, small config is namespaced by the database suffix.
+    const smallConfigKey = (key: string) => `${settings.additionalSuffixOfDatabaseName ?? ""}-${key}`;
     return {
         settings,
         currentSettings: vi.fn(() => settings),
@@ -105,12 +110,19 @@ const createSettingServiceMock = () => {
         }),
         suspendAllSync: vi.fn(() => Promise.resolve()),
         suspendExtraSync: vi.fn(() => Promise.resolve()),
-        getSmallConfig: vi.fn((key: string) => smallConfig.get(key) ?? ""),
+        getSmallConfig: vi.fn((key: string) => smallConfig.get(smallConfigKey(key)) ?? ""),
         setSmallConfig: vi.fn((key: string, value: string) => {
-            smallConfig.set(key, value);
+            smallConfig.set(smallConfigKey(key), value);
         }),
         deleteSmallConfig: vi.fn((key: string) => {
-            smallConfig.delete(key);
+            smallConfig.delete(smallConfigKey(key));
+        }),
+        getDeviceLocalConfig: vi.fn((key: string) => deviceLocalConfig.get(key) ?? null),
+        setDeviceLocalConfig: vi.fn((key: string, value: string) => {
+            deviceLocalConfig.set(key, value);
+        }),
+        deleteDeviceLocalConfig: vi.fn((key: string) => {
+            deviceLocalConfig.delete(key);
         }),
     };
 };
@@ -169,6 +181,7 @@ const createHostMock = () => {
         services: {
             context: createServiceContext(),
             setting: settingMock,
+            vault: { vaultName: vi.fn(() => PILOT_VAULT) },
             appLifecycle: appLifecycleMock,
             UI: uiMock,
             tweakValue: tweakValueMock,
@@ -186,6 +199,36 @@ const createHostMock = () => {
             tweakValue: tweakValueMock,
         },
     };
+};
+
+const AUTOMATIC_SYNC_CHOICES = {
+    liveSync: false,
+    periodicReplication: true,
+    syncOnSave: true,
+    syncOnEditorSave: false,
+    syncOnStart: true,
+    syncOnFileOpen: false,
+    syncAfterMerge: true,
+};
+const AUTOMATIC_SYNC_OFF = {
+    liveSync: false,
+    periodicReplication: false,
+    syncOnSave: false,
+    syncOnEditorSave: false,
+    syncOnStart: false,
+    syncOnFileOpen: false,
+    syncAfterMerge: false,
+};
+const PENDING_AUTOMATIC_SYNC_RECORD = "pilot-vault-vault-initialisation-automatic-sync";
+
+/** A host whose suspendAllSync switches the automatic choices off, as the setting service does. */
+const createHostWithAutomaticSync = () => {
+    const host = createHostMock();
+    Object.assign(host.mocks.setting.settings, AUTOMATIC_SYNC_CHOICES);
+    host.mocks.setting.suspendAllSync.mockImplementation(async () => {
+        Object.assign(host.mocks.setting.settings, AUTOMATIC_SYNC_OFF);
+    });
+    return host;
 };
 
 describe("Red Flag Feature", () => {
@@ -363,6 +406,139 @@ describe("Red Flag Feature", () => {
             expect(result).toBe(false);
             expect(log).toHaveBeenCalled();
         });
+
+        it("restores the automatic synchronisation choices after a successful fetch", async () => {
+            const host = createHostWithAutomaticSync();
+
+            const result = await processVaultInitialisation(
+                host as any,
+                createLoggerMock(),
+                () => {
+                    expect(host.mocks.setting.currentSettings()).toMatchObject(AUTOMATIC_SYNC_OFF);
+                    return Promise.resolve(true);
+                },
+                "resume",
+                { restoreAutomaticSyncForVault: PILOT_VAULT }
+            );
+
+            expect(result).toBe(true);
+            expect(host.mocks.setting.currentSettings()).toMatchObject(AUTOMATIC_SYNC_CHOICES);
+            expect(host.mocks.setting.getDeviceLocalConfig(PENDING_AUTOMATIC_SYNC_RECORD)).toBeNull();
+        });
+
+        it("keeps synchronisation off after a failed fetch and restores the original choices on retry", async () => {
+            const host = createHostWithAutomaticSync();
+
+            await expect(
+                processVaultInitialisation(
+                    host as any,
+                    createLoggerMock(),
+                    () => Promise.reject(new Error("remote unavailable")),
+                    "keep-on-failure",
+                    { restoreAutomaticSyncForVault: PILOT_VAULT }
+                )
+            ).resolves.toBe(false);
+            expect(host.mocks.setting.currentSettings()).toMatchObject(AUTOMATIC_SYNC_OFF);
+
+            await expect(
+                processVaultInitialisation(
+                    host as any,
+                    createLoggerMock(),
+                    () => Promise.resolve(true),
+                    "keep-on-failure",
+                    { restoreAutomaticSyncForVault: PILOT_VAULT }
+                )
+            ).resolves.toBe(true);
+            expect(host.mocks.setting.currentSettings()).toMatchObject(AUTOMATIC_SYNC_CHOICES);
+        });
+
+        it("prefers choices the user enabled after an interrupted fetch over the remembered ones", async () => {
+            const host = createHostWithAutomaticSync();
+            host.mocks.setting.setDeviceLocalConfig(
+                PENDING_AUTOMATIC_SYNC_RECORD,
+                JSON.stringify({ ...AUTOMATIC_SYNC_OFF, liveSync: true })
+            );
+
+            await processVaultInitialisation(host as any, createLoggerMock(), () => Promise.resolve(true), "resume", {
+                restoreAutomaticSyncForVault: PILOT_VAULT,
+            });
+
+            expect(host.mocks.setting.currentSettings()).toMatchObject(AUTOMATIC_SYNC_CHOICES);
+        });
+
+        it("leaves synchronisation off when the caller does not restore it", async () => {
+            const host = createHostWithAutomaticSync();
+
+            await processVaultInitialisation(host as any, createLoggerMock(), () => Promise.resolve(true), "resume");
+
+            expect(host.mocks.setting.currentSettings()).toMatchObject(AUTOMATIC_SYNC_OFF);
+            expect(host.mocks.setting.getDeviceLocalConfig(PENDING_AUTOMATIC_SYNC_RECORD)).toBeNull();
+        });
+
+        it("keeps the remembered choices when Fetch replaces the database suffix before failing", async () => {
+            const host = createHostWithAutomaticSync();
+            host.mocks.setting.settings.additionalSuffixOfDatabaseName = "imported-suffix";
+            const failAfterSuffixChange = async () => {
+                await host.mocks.setting.applyPartial({ additionalSuffixOfDatabaseName: "app-id" });
+                throw new Error("replication failed");
+            };
+
+            await expect(
+                processVaultInitialisation(host as any, createLoggerMock(), failAfterSuffixChange, "keep-on-failure", {
+                    restoreAutomaticSyncForVault: PILOT_VAULT,
+                })
+            ).resolves.toBe(false);
+            await expect(
+                processVaultInitialisation(
+                    host as any,
+                    createLoggerMock(),
+                    () => Promise.resolve(true),
+                    "keep-on-failure",
+                    { restoreAutomaticSyncForVault: PILOT_VAULT }
+                )
+            ).resolves.toBe(true);
+
+            expect(host.mocks.setting.currentSettings()).toMatchObject(AUTOMATIC_SYNC_CHOICES);
+        });
+
+        it("replaces a malformed remembered record with the current choices", async () => {
+            const host = createHostWithAutomaticSync();
+            Object.assign(host.mocks.setting.settings, AUTOMATIC_SYNC_OFF);
+            host.mocks.setting.setDeviceLocalConfig(PENDING_AUTOMATIC_SYNC_RECORD, "{not json");
+
+            await processVaultInitialisation(
+                host as any,
+                createLoggerMock(),
+                () => {
+                    const record = host.mocks.setting.getDeviceLocalConfig(PENDING_AUTOMATIC_SYNC_RECORD) ?? "";
+                    expect(JSON.parse(record)).toEqual(AUTOMATIC_SYNC_OFF);
+                    return Promise.resolve(true);
+                },
+                "resume",
+                { restoreAutomaticSyncForVault: PILOT_VAULT }
+            );
+
+            expect(host.mocks.setting.currentSettings()).toMatchObject(AUTOMATIC_SYNC_OFF);
+        });
+
+        it("keeps the result and the remembered choices when restoring them fails", async () => {
+            const host = createHostWithAutomaticSync();
+            const applyPartial = host.mocks.setting.applyPartial.getMockImplementation()!;
+            host.mocks.setting.applyPartial.mockImplementation((partial: any, feedback?: boolean) =>
+                "periodicReplication" in partial
+                    ? Promise.reject(new Error("settings could not be saved"))
+                    : applyPartial(partial, feedback)
+            );
+
+            await expect(
+                processVaultInitialisation(host as any, createLoggerMock(), () => Promise.resolve(true), "resume", {
+                    restoreAutomaticSyncForVault: PILOT_VAULT,
+                })
+            ).resolves.toBe(true);
+
+            const record = host.mocks.setting.getDeviceLocalConfig(PENDING_AUTOMATIC_SYNC_RECORD) ?? "";
+            expect(JSON.parse(record)).toEqual(AUTOMATIC_SYNC_CHOICES);
+        });
     });
 
     describe("Suspend Flag Handler", () => {
@@ -500,6 +676,28 @@ describe("Red Flag Feature", () => {
             expect(result).toBe(true);
             expect(host.mocks.ui.dialogManager.openWithExplicitCancel).toHaveBeenCalled();
             expect(host.mocks.rebuilder.$fetchLocal).toHaveBeenCalled();
+        });
+
+        it("restores the automatic synchronisation choices after the detailed Fetch flow", async () => {
+            const host = createHostWithAutomaticSync();
+
+            host.mocks.storageAccess.files.add(FlagFilesOriginal.FETCH_ALL);
+            host.mocks.ui.confirm.confirmWithMessage.mockResolvedValueOnce(SIMPLE_FETCH_STAGE1_DETAILED);
+            host.mocks.ui.dialogManager.openWithExplicitCancel.mockResolvedValueOnce({
+                vault: "identical",
+                backup: "backup_skipped",
+                extra: { preventFetchingConfig: false },
+            });
+            host.mocks.tweakValue.fetchRemotePreferred.mockResolvedValueOnce(
+                availableRemoteTweaks({ batchSave: false })
+            );
+            host.mocks.rebuilder.$fetchLocal.mockImplementationOnce(async () => {
+                expect(host.mocks.setting.currentSettings()).toMatchObject(AUTOMATIC_SYNC_OFF);
+            });
+
+            await expect(createFetchAllFlagHandler(host as any, createLoggerMock()).handle()).resolves.toBe(true);
+
+            expect(host.mocks.setting.currentSettings()).toMatchObject(AUTOMATIC_SYNC_CHOICES);
         });
 
         it("should cancel fetch flow when first quick step is cancelled", async () => {
@@ -789,6 +987,42 @@ describe("Red Flag Feature", () => {
                 suspendFileWatching: false,
                 suspendParseReplicationResult: false,
             });
+        });
+
+        it("restores the automatic synchronisation choices once Fast Setup succeeds", async () => {
+            const host = createHostWithAutomaticSync();
+            const cleanupFlag = vi.fn().mockResolvedValue(undefined);
+
+            host.mocks.ui.confirm.confirmWithMessage
+                .mockResolvedValueOnce(SIMPLE_FETCH_STAGE1_NEWER_WINS)
+                .mockResolvedValueOnce(SIMPLE_FETCH_STAGE2_NEWER_CLEANUP);
+            host.mocks.tweakValue.fetchRemotePreferred.mockResolvedValue(availableRemoteTweaks({ batchSave: false }));
+            host.mocks.rebuilder.$fetchLocalDBFast.mockImplementationOnce(async () => {
+                expect(host.mocks.setting.currentSettings()).toMatchObject(AUTOMATIC_SYNC_OFF);
+            });
+
+            await expect(
+                askAndPerformFastSetupOnScheduledFetchAll(host as any, createLoggerMock(), cleanupFlag)
+            ).resolves.toBe(true);
+
+            expect(host.mocks.setting.currentSettings()).toMatchObject(AUTOMATIC_SYNC_CHOICES);
+        });
+
+        it("keeps automatic synchronisation off when Fast Fetch fails", async () => {
+            const host = createHostWithAutomaticSync();
+            const cleanupFlag = vi.fn().mockResolvedValue(undefined);
+
+            host.mocks.ui.confirm.confirmWithMessage
+                .mockResolvedValueOnce(SIMPLE_FETCH_STAGE1_NEWER_WINS)
+                .mockResolvedValueOnce(SIMPLE_FETCH_STAGE2_NEWER_CLEANUP);
+            host.mocks.tweakValue.fetchRemotePreferred.mockResolvedValue(availableRemoteTweaks({ batchSave: false }));
+            host.mocks.rebuilder.$fetchLocalDBFast.mockRejectedValueOnce(new Error("cannot decrypt remote document"));
+
+            await expect(
+                askAndPerformFastSetupOnScheduledFetchAll(host as any, createLoggerMock(), cleanupFlag)
+            ).resolves.toBe(false);
+
+            expect(host.mocks.setting.currentSettings()).toMatchObject(AUTOMATIC_SYNC_OFF);
         });
 
         it("keeps Vault reflection suspended and preserves recovery state when Fast Fetch fails", async () => {

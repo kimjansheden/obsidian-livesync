@@ -9,6 +9,7 @@ import { Logger } from "@vrtmrz/livesync-commonlib/compat/common/logger";
 import type { PeerStatus } from "@vrtmrz/livesync-commonlib/compat/replication/trystero/P2PReplicatorPaneCommon";
 import type { LiveSyncBaseCore } from "@/LiveSyncBaseCore.ts";
 import type { P2PPaneParams } from "@vrtmrz/livesync-commonlib/compat/replication/trystero/UseP2PReplicatorResult";
+import { withoutDeviceLocalSettings } from "@/serviceFeatures/setupObsidian/setupUriPayload.ts";
 export const VIEW_TYPE_P2P = "p2p-replicator";
 
 function addToList(item: string, list: string) {
@@ -69,8 +70,10 @@ And you can also drop the local database to rebuild from the remote device.`,
                 }
             );
             if (yn === DROP || yn === KEEP) {
+                // The peer's settings must not replace this device's identity or how it protects its settings.
+                const receivedConfig = withoutDeviceLocalSettings(remoteConfig);
                 if (yn === DROP) {
-                    if (remoteConfig.remoteType !== REMOTE_P2P) {
+                    if (receivedConfig.remoteType !== REMOTE_P2P) {
                         const yn2 = await this.core.confirm.askYesNoDialog(
                             `Do you want to set the remote type to "P2P Sync" to rebuild by "P2P replication"?`,
                             {
@@ -78,15 +81,15 @@ And you can also drop the local database to rebuild from the remote device.`,
                             }
                         );
                         if (yn2 === "yes") {
-                            remoteConfig.remoteType = REMOTE_P2P;
-                            remoteConfig.P2P_RebuildFrom = peer.name;
+                            receivedConfig.remoteType = REMOTE_P2P;
+                            receivedConfig.P2P_RebuildFrom = peer.name;
                         }
                     }
                 }
 
                 // this.plugin.settings = remoteConfig;
                 // await this.plugin.saveSettings();
-                await this.core.services.setting.applyExternalSettings(remoteConfig);
+                await this.core.services.setting.applyExternalSettings(receivedConfig);
                 if (yn === DROP) {
                     await this.core.rebuilder.scheduleFetch();
                 } else {
