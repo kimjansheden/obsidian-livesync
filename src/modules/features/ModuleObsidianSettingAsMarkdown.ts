@@ -2,18 +2,19 @@
 import { isObjectDifferent } from "octagonal-wheels/object";
 import { EVENT_SETTING_SAVED, eventHub } from "@/common/events";
 import { fireAndForget } from "octagonal-wheels/promises";
-import {
-    DEFAULT_SETTINGS,
-    type FilePathWithPrefix,
-    type ObsidianLiveSyncSettings,
-} from "@vrtmrz/livesync-commonlib/compat/common/types";
+import { type FilePathWithPrefix, type ObsidianLiveSyncSettings } from "@vrtmrz/livesync-commonlib/compat/common/types";
 import { parseYaml, stringifyYaml, type Editor, type MarkdownView } from "@/deps";
 import { LOG_LEVEL_DEBUG, LOG_LEVEL_INFO, LOG_LEVEL_NOTICE, LOG_LEVEL_VERBOSE } from "octagonal-wheels/common/logger";
 import { AbstractModule } from "@/modules/AbstractModule.ts";
 import type { ServiceContext } from "@vrtmrz/livesync-commonlib/context";
 import type { InjectableServiceHub } from "@vrtmrz/livesync-commonlib/compat/services/implements/injectable/InjectableServiceHub";
 import type { LiveSyncCore } from "@/main.ts";
-import { sanitizeSettingsForMarkdown } from "@/common/security/settingsPersistence";
+import {
+    buildSettingsFromMarkdown,
+    isSafeSettingsDocument,
+    isSafeSettingSyncFilePath,
+    sanitizeSettingsForMarkdown,
+} from "@/common/security/settingsPersistence";
 const SETTING_HEADER = "````yaml:livesync-setting\n";
 const SETTING_FOOTER = "\n````";
 export class ModuleObsidianSettingsAsMarkdown extends AbstractModule {
@@ -106,12 +107,23 @@ export class ModuleObsidianSettingsAsMarkdown extends AbstractModule {
                 return;
             }
         }
+        if (!isSafeSettingSyncFilePath(filename)) {
+            this._log(
+                `Setting file (${filename}) is not a visible Markdown note. skipped.`,
+                automated ? LOG_LEVEL_DEBUG : LOG_LEVEL_NOTICE
+            );
+            return;
+        }
         const { body } = await this.parseSettingFromMarkdown(filename);
         let newSetting = {} as Partial<ObsidianLiveSyncSettings>;
         try {
             const parsed: unknown = parseYaml(body);
-            if (typeof parsed !== "object" || parsed === null) {
+            if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
                 throw new TypeError("The YAML settings must contain an object");
+            }
+            if (!isSafeSettingsDocument(parsed)) {
+                this._log("YAML settings contain credential-bearing fields; skipped.", LOG_LEVEL_NOTICE);
+                return;
             }
             newSetting = parsed;
         } catch (ex) {
@@ -128,14 +140,7 @@ export class ModuleObsidianSettingsAsMarkdown extends AbstractModule {
             return;
         }
 
-        let settingToApply = { ...DEFAULT_SETTINGS } as ObsidianLiveSyncSettings;
-        settingToApply = { ...settingToApply, ...newSetting };
-        if (!settingToApply?.writeCredentialsForSettingSync) {
-            //New setting does not contains credentials.
-            settingToApply.couchDB_USER = this.settings.couchDB_USER;
-            settingToApply.couchDB_PASSWORD = this.settings.couchDB_PASSWORD;
-            settingToApply.passphrase = this.settings.passphrase;
-        }
+        const settingToApply = buildSettingsFromMarkdown(this.settings, newSetting);
         const oldSetting = this.generateSettingForMarkdown(
             this.settings,
             settingToApply.writeCredentialsForSettingSync
@@ -171,7 +176,12 @@ export class ModuleObsidianSettingsAsMarkdown extends AbstractModule {
                             result == APPLY_AND_REBUILD ||
                             result == APPLY_AND_FETCH
                         ) {
-                            await this.services.setting.applyExternalSettings(settingToApply, true);
+                            // Rebuild from the current local settings: they may have changed
+                            // while the confirmation was open.
+                            await this.services.setting.applyExternalSettings(
+                                buildSettingsFromMarkdown(this.settings, newSetting),
+                                true
+                            );
                             this.services.setting.clearUsedPassphrase();
                             if (result == APPLY_ONLY) {
                                 this._log("Loaded settings have been applied!", LOG_LEVEL_NOTICE);
@@ -203,6 +213,10 @@ export class ModuleObsidianSettingsAsMarkdown extends AbstractModule {
     }
 
     async saveSettingToMarkdown(filename: string) {
+        if (!isSafeSettingSyncFilePath(filename)) {
+            this._log(`Markdown setting: ${filename} is not a visible Markdown note. skipped.`, LOG_LEVEL_NOTICE);
+            return;
+        }
         const saveData = this.generateSettingForMarkdown();
         const file = await this.core.storageAccess.isExists(filename);
 
