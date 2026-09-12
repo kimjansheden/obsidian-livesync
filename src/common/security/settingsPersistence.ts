@@ -133,7 +133,7 @@ function pickReceivingDeviceSettings(local: ObsidianLiveSyncSettings): Partial<O
         Object.entries(local).filter(
             ([key]) => isMarkdownExcludedField(key) || MARKDOWN_LOCAL_REFERENCE_FIELDS.has(key)
         )
-    ) as Partial<ObsidianLiveSyncSettings>;
+    );
 }
 
 /**

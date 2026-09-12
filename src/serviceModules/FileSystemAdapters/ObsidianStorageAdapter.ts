@@ -1,3 +1,5 @@
+import { StagedBinaryPublication } from "./stagedBinaryPublication";
+import type { BinaryPublication } from "@vrtmrz/livesync-commonlib/compat/interfaces/StorageAccess";
 import type { UXDataWriteOptions } from "@vrtmrz/livesync-commonlib/compat/common/types";
 import type { IStorageAdapter } from "@vrtmrz/livesync-commonlib/compat/serviceModules/adapters";
 import { toArrayBuffer } from "@vrtmrz/livesync-commonlib/compat/serviceModules/FileAccessBase";
@@ -22,7 +24,21 @@ function assertVaultRelativePath(path: string, allowRoot = false): void {
  */
 
 export class ObsidianStorageAdapter implements IStorageAdapter<Stat> {
-    constructor(private app: App) {}
+    private readonly staged: StagedBinaryPublication;
+    constructor(private app: App) {
+        this.staged = new StagedBinaryPublication(app.vault.adapter);
+    }
+
+    async writeBinaryInParts(
+        path: string,
+        parts: AsyncIterable<Uint8Array>,
+        publication: BinaryPublication,
+        options?: UXDataWriteOptions
+    ): Promise<boolean> {
+        assertVaultRelativePath(path);
+        if (path === ".trash" || path.startsWith(".trash/")) throw new Error("A staging path cannot be a sync target");
+        return this.staged.write(path, parts, publication, options);
+    }
 
     async exists(path: string): Promise<boolean> {
         assertVaultRelativePath(path, true);

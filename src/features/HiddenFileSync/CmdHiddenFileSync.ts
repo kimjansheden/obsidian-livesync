@@ -103,7 +103,7 @@ export class HiddenFileSync extends LiveSyncCommands {
     }
 
     async canSafelyAutoMergeJson(path: FilePathWithPrefix, revisions: readonly string[]): Promise<boolean> {
-        if (!(await this.isTargetFile(stripAllPrefixes(path) as FilePath))) return false;
+        if (!(await this.isTargetFile(stripAllPrefixes(path)))) return false;
         if (revisions.length === 0) return false;
         try {
             const leaves = await Promise.all(revisions.map((revision) => this.getConflictedDoc(path, revision)));
