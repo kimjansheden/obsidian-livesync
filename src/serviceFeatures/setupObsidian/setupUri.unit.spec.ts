@@ -4,6 +4,13 @@ import { createServiceContext } from "@vrtmrz/livesync-commonlib/context";
 import { askEncryptingPassphrase, copySetupURI, copySetupURIFull, useSetupURIFeature } from "./setupUri";
 import { encodeSettingsToSetupURI } from "@vrtmrz/livesync-commonlib/compat/API/processSetting";
 
+const deviceLocalKeys = [
+    "additionalSuffixOfDatabaseName",
+    "deviceAndVaultName",
+    "P2P_DevicePeerName",
+    "configPassphraseStore",
+];
+
 vi.mock("@vrtmrz/livesync-commonlib/compat/API/processSetting", () => {
     return {
         encodeSettingsToSetupURI: vi.fn(),
@@ -81,7 +88,7 @@ describe("setupObsidian/setupUri", () => {
         expect(encodeSettingsToSetupURI).toHaveBeenCalledWith(
             currentSettings,
             "pass",
-            ["pluginSyncExtendedSetting"],
+            ["pluginSyncExtendedSetting", ...deviceLocalKeys],
             true
         );
         expect(promptCopyToClipboard).toHaveBeenCalledWith("Setup URI", "uri://value");
@@ -109,7 +116,7 @@ describe("setupObsidian/setupUri", () => {
 
         await copySetupURIFull(host, log);
 
-        expect(encodeSettingsToSetupURI).toHaveBeenCalledWith(currentSettings, "pass-full", [], false);
+        expect(encodeSettingsToSetupURI).toHaveBeenCalledWith(currentSettings, "pass-full", deviceLocalKeys, false);
         expect(promptCopyToClipboard).toHaveBeenCalledWith("Setup URI", "uri://full");
         expect(log).toHaveBeenCalled();
     });

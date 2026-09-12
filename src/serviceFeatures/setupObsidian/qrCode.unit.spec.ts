@@ -45,6 +45,35 @@ describe("setupObsidian/qrCode", () => {
         expect(confirmWithMessage).not.toHaveBeenCalled();
     });
 
+    it("encodeSetupSettingsAsQR leaves this device's local settings out of the QR code", async () => {
+        const host = {
+            services: {
+                context: createServiceContext(),
+                setting: {
+                    currentSettings: vi.fn(() => ({
+                        remoteType: "MINIO",
+                        additionalSuffixOfDatabaseName: "source-app-id",
+                        deviceAndVaultName: "source-device",
+                        P2P_DevicePeerName: "source-peer",
+                        configPassphraseStore: "LOCALSTORAGE",
+                    })),
+                },
+                UI: {
+                    confirm: {
+                        confirmWithMessage: vi.fn(),
+                    },
+                },
+            },
+        } as any;
+
+        vi.mocked(encodeSettingsToQRCodeData).mockReturnValue("encoded-settings");
+        vi.mocked(encodeQR).mockReturnValue("");
+
+        await encodeSetupSettingsAsQR(host);
+
+        expect(encodeSettingsToQRCodeData).toHaveBeenCalledWith({ remoteType: "MINIO" });
+    });
+
     it("encodeSetupSettingsAsQR should show confirm dialog when QR is generated", async () => {
         const confirmWithMessage = vi.fn(() => true);
         const translate = vi.fn(() => "qr-message");

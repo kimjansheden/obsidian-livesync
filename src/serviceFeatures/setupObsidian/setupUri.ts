@@ -6,6 +6,7 @@ import { EVENT_REQUEST_COPY_SETUP_URI } from "@vrtmrz/livesync-commonlib/compat/
 import { fireAndForget } from "@vrtmrz/livesync-commonlib/compat/common/utils";
 import type { NecessaryServices } from "@vrtmrz/livesync-commonlib/compat/interfaces/ServiceModule";
 import type { SetupFeatureHost } from "./types";
+import { DEVICE_LOCAL_SETUP_SETTING_KEYS } from "./setupUriPayload";
 
 export async function askEncryptingPassphrase(host: SetupFeatureHost): Promise<string | false> {
     return await host.services.UI.confirm.askString(
@@ -22,7 +23,10 @@ export async function copySetupURI(host: SetupFeatureHost, log: LogFunction, str
     const encryptedURI = await encodeSettingsToSetupURI(
         host.services.setting.currentSettings(),
         encryptingPassphrase,
-        [...((stripExtra ? ["pluginSyncExtendedSetting"] : []) as (keyof ObsidianLiveSyncSettings)[])],
+        [
+            ...((stripExtra ? ["pluginSyncExtendedSetting"] : []) as (keyof ObsidianLiveSyncSettings)[]),
+            ...DEVICE_LOCAL_SETUP_SETTING_KEYS,
+        ],
         true
     );
     if (await host.services.UI.promptCopyToClipboard("Setup URI", encryptedURI)) {
@@ -36,7 +40,7 @@ export async function copySetupURIFull(host: SetupFeatureHost, log: LogFunction)
     const encryptedURI = await encodeSettingsToSetupURI(
         host.services.setting.currentSettings(),
         encryptingPassphrase,
-        [],
+        [...DEVICE_LOCAL_SETUP_SETTING_KEYS],
         false
     );
     if (await host.services.UI.promptCopyToClipboard("Setup URI", encryptedURI)) {

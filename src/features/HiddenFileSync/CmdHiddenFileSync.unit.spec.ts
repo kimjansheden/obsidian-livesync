@@ -40,7 +40,7 @@ function createHiddenRevisionOperation() {
         path,
         name: "data.json",
         isInternal: true,
-        body: new Blob(["{\"value\":\"vault\"}"]),
+        body: new Blob(['{"value":"vault"}']),
         stat: {
             ctime: 1,
             mtime: 2,
@@ -66,12 +66,11 @@ function createHiddenRevisionOperation() {
         _rev: "3-winner",
     } as MetaEntry;
     const databaseFileAccess = {
-        fetchEntryMeta: vi.fn(
-            async (_path: unknown, revision?: string) =>
-                revision === selected._rev ? selected : winner
+        fetchEntryMeta: vi.fn(async (_path: unknown, revision?: string) =>
+            revision === selected._rev ? selected : winner
         ),
         getConflictedRevs: vi.fn(async () => [selected._rev]),
-        fetchEntryFromMeta: vi.fn(async () => ({ ...selected, data: "{\"value\":\"database\"}" })),
+        fetchEntryFromMeta: vi.fn(async () => ({ ...selected, data: '{"value":"database"}' })),
         storeWithBaseRevision: vi.fn(async () => "3-vault-child"),
     };
     const hiddenFileSync = Object.create(HiddenFileSync.prototype) as HiddenFileSync;
@@ -342,18 +341,159 @@ describe("HiddenFileSync configuration-change notices", () => {
     });
 });
 
-describe("HiddenFileSync exact revision repair operations", () => {
-    it("stores the current hidden Vault file as a child of the selected live revision", async () => {
-        const {
-            hiddenFileSync,
-            file,
-            selected,
-            databaseFileAccess,
-        } = createHiddenRevisionOperation();
+describe("HiddenFileSync JSON auto-merge guard", () => {
+    it("rejects invalid or deleted revisions before merge and accepts only live JSON revisions", async () => {
+        const hiddenFileSync = Object.create(HiddenFileSync.prototype) as HiddenFileSync;
+        Object.assign(hiddenFileSync, {
+            isTargetFile: vi.fn(async () => true),
+            getConflictedDoc: vi.fn(async (_path: FilePathWithPrefix, revision: string) => {
+                if (revision === "invalid") return { deleted: false, data: '{"enabled":' };
+                if (revision === "deleted") return { deleted: true, data: '{"enabled":true}' };
+                return { deleted: false, data: '{"enabled":true}' };
+            }),
+        });
 
         await expect(
-            hiddenFileSync.storeInternalFileToDatabaseWithBaseRevision(file, selected._rev!)
+            hiddenFileSync.canSafelyAutoMergeJson("i:.obsidian/app.json" as FilePathWithPrefix, ["base", "invalid"])
+        ).resolves.toBe(false);
+        await expect(
+            hiddenFileSync.canSafelyAutoMergeJson("i:.obsidian/app.json" as FilePathWithPrefix, ["base", "deleted"])
+        ).resolves.toBe(false);
+        await expect(
+            hiddenFileSync.canSafelyAutoMergeJson("i:.obsidian/app.json" as FilePathWithPrefix, ["base", "current"])
         ).resolves.toBe(true);
+
+        hiddenFileSync.isTargetFile = vi.fn(async () => false);
+        await expect(
+            hiddenFileSync.canSafelyAutoMergeJson("i:.obsidian/workspace.json" as FilePathWithPrefix, [
+                "base",
+                "current",
+            ])
+        ).resolves.toBe(false);
+
+        await expect(
+            hiddenFileSync.canSafelyAutoMergeJson("i:.obsidian/app.json" as FilePathWithPrefix, [])
+        ).resolves.toBe(false);
+
+        Object.assign(hiddenFileSync, {
+            getConflictedDoc: vi.fn(async () => {
+                throw new Error("synthetic-conflict-read-failure");
+            }),
+        });
+        await expect(
+            hiddenFileSync.canSafelyAutoMergeJson("i:.obsidian/app.json" as FilePathWithPrefix, ["base", "current"])
+        ).resolves.toBe(false);
+    });
+});
+
+describe("HiddenFileSync JSON conflict dialog", () => {
+    const path = "i:.obsidian/app.json" as FilePathWithPrefix;
+
+    function createConflictDialogSync(readableRevisions: readonly string[]) {
+        const hiddenFileSync = Object.create(HiddenFileSync.prototype) as HiddenFileSync;
+        const mocks = {
+            getDBEntry: vi.fn(async (_path: FilePathWithPrefix, options: { rev: string }) =>
+                readableRevisions.includes(options.rev) ? { _rev: options.rev, data: "{}" } : false
+            ),
+            showJSONMergeDialogAndMerge: vi.fn(async () => true),
+            resolveByNewerEntry: vi.fn(async () => undefined),
+            finishConflictCheck: vi.fn(),
+            requeueConflictCheck: vi.fn(),
+            _log: vi.fn(),
+        };
+        Object.defineProperty(hiddenFileSync, "localDatabase", { value: { getDBEntry: mocks.getDBEntry } });
+        Object.assign(hiddenFileSync, {
+            showJSONMergeDialogAndMerge: mocks.showJSONMergeDialogAndMerge,
+            resolveByNewerEntry: mocks.resolveByNewerEntry,
+            finishConflictCheck: mocks.finishConflictCheck,
+            requeueConflictCheck: mocks.requeueConflictCheck,
+            _log: mocks._log,
+        });
+        return { hiddenFileSync, mocks };
+    }
+
+    it("preserves every live revision when one revision cannot be read", async () => {
+        const { hiddenFileSync, mocks } = createConflictDialogSync(["1-local"]);
+
+        await hiddenFileSync.resolveJsonConflictInDialog(path, "1-local", "1-remote");
+
+        expect(mocks.resolveByNewerEntry).not.toHaveBeenCalled();
+        expect(mocks.showJSONMergeDialogAndMerge).not.toHaveBeenCalled();
+        expect(mocks.finishConflictCheck).toHaveBeenCalledWith(path);
+        expect(mocks._log).toHaveBeenCalledWith(
+            expect.stringContaining("preserving all live revisions"),
+            LOG_LEVEL_NOTICE
+        );
+    });
+
+    it("opens the merge dialog when both revisions are readable", async () => {
+        const { hiddenFileSync, mocks } = createConflictDialogSync(["1-local", "1-remote"]);
+
+        await hiddenFileSync.resolveJsonConflictInDialog(path, "1-local", "1-remote");
+
+        expect(mocks.showJSONMergeDialogAndMerge).toHaveBeenCalledTimes(1);
+        expect(mocks.requeueConflictCheck).toHaveBeenCalledWith(path);
+        expect(mocks.resolveByNewerEntry).not.toHaveBeenCalled();
+    });
+});
+
+describe("HiddenFileSync invalid JSON extraction guard", () => {
+    function createWriteSync(localContent: string) {
+        const hiddenFileSync = Object.create(HiddenFileSync.prototype) as HiddenFileSync;
+        const storageAccess = {
+            statHidden: vi.fn(async () => ({ ctime: 1, mtime: 1, size: localContent.length })),
+            readHiddenFileAuto: vi.fn(async () => localContent),
+        };
+        const writeFile = vi.fn(async () => ({ ctime: 1, mtime: 2, size: 1 }));
+        Object.defineProperty(hiddenFileSync, "core", { value: { storageAccess } });
+        Object.assign(hiddenFileSync, { ensureDir: vi.fn(async () => undefined), writeFile, _log: vi.fn() });
+        return { hiddenFileSync, writeFile };
+    }
+    const entry = (content: string) =>
+        ({ data: [content], datatype: "plain", ctime: 1, mtime: 2 }) as unknown as Parameters<
+            HiddenFileSync["__writeFile"]
+        >[1];
+
+    it("does not let an invalid incoming JSON revision replace a valid local file", async () => {
+        const { hiddenFileSync, writeFile } = createWriteSync('{"livePreview":true}');
+
+        await expect(
+            hiddenFileSync.__writeFile(".obsidian/app.json" as FilePath, entry('{"livePreview":'), false)
+        ).resolves.toBe(false);
+
+        expect(writeFile).not.toHaveBeenCalled();
+    });
+
+    it("still writes an explicitly forced revision", async () => {
+        const { hiddenFileSync, writeFile } = createWriteSync('{"livePreview":true}');
+
+        await hiddenFileSync.__writeFile(".obsidian/app.json" as FilePath, entry('{"livePreview":'), true);
+
+        expect(writeFile).toHaveBeenCalledTimes(1);
+    });
+
+    it("checks only JSON files and accepts valid incoming JSON", async () => {
+        const { hiddenFileSync } = createWriteSync('{"livePreview":true}');
+
+        await expect(
+            hiddenFileSync.isInvalidJsonReplacingValidLocal(
+                ".obsidian/app.json" as FilePath,
+                new TextEncoder().encode('{"livePreview":false}').buffer
+            )
+        ).resolves.toBe(false);
+        await expect(
+            hiddenFileSync.isInvalidJsonReplacingValidLocal(".obsidian/snippets/custom.css" as FilePath, "{")
+        ).resolves.toBe(false);
+    });
+});
+
+describe("HiddenFileSync exact revision repair operations", () => {
+    it("stores the current hidden Vault file as a child of the selected live revision", async () => {
+        const { hiddenFileSync, file, selected, databaseFileAccess } = createHiddenRevisionOperation();
+
+        await expect(hiddenFileSync.storeInternalFileToDatabaseWithBaseRevision(file, selected._rev!)).resolves.toBe(
+            true
+        );
 
         expect(databaseFileAccess.storeWithBaseRevision).toHaveBeenCalledWith(
             expect.objectContaining({
@@ -372,36 +512,22 @@ describe("HiddenFileSync exact revision repair operations", () => {
     });
 
     it("refuses to extend a hidden-file revision which is no longer live", async () => {
-        const {
-            hiddenFileSync,
-            file,
-            selected,
-            databaseFileAccess,
-        } = createHiddenRevisionOperation();
+        const { hiddenFileSync, file, selected, databaseFileAccess } = createHiddenRevisionOperation();
         databaseFileAccess.getConflictedRevs.mockResolvedValue([]);
 
-        await expect(
-            hiddenFileSync.storeInternalFileToDatabaseWithBaseRevision(file, selected._rev!)
-        ).resolves.toBe(false);
+        await expect(hiddenFileSync.storeInternalFileToDatabaseWithBaseRevision(file, selected._rev!)).resolves.toBe(
+            false
+        );
 
         expect(databaseFileAccess.storeWithBaseRevision).not.toHaveBeenCalled();
         expect(hiddenFileSync.updateLastProcessed).not.toHaveBeenCalled();
     });
 
     it("does not create a hidden-file child when asked only to mark a revision which differs from the Vault", async () => {
-        const {
-            hiddenFileSync,
-            file,
-            selected,
-            databaseFileAccess,
-        } = createHiddenRevisionOperation();
+        const { hiddenFileSync, file, selected, databaseFileAccess } = createHiddenRevisionOperation();
 
         await expect(
-            hiddenFileSync.storeInternalFileToDatabaseWithBaseRevision(
-                file,
-                selected._rev!,
-                false
-            )
+            hiddenFileSync.storeInternalFileToDatabaseWithBaseRevision(file, selected._rev!, false)
         ).resolves.toBe(false);
 
         expect(databaseFileAccess.storeWithBaseRevision).not.toHaveBeenCalled();
@@ -409,61 +535,39 @@ describe("HiddenFileSync exact revision repair operations", () => {
     });
 
     it("marks a matching hidden-file revision without creating a child", async () => {
-        const {
-            hiddenFileSync,
-            file,
-            selected,
-            databaseFileAccess,
-        } = createHiddenRevisionOperation();
+        const { hiddenFileSync, file, selected, databaseFileAccess } = createHiddenRevisionOperation();
         databaseFileAccess.fetchEntryFromMeta.mockResolvedValue({
             ...selected,
-            data: "{\"value\":\"vault\"}",
+            data: '{"value":"vault"}',
         });
 
         await expect(
-            hiddenFileSync.storeInternalFileToDatabaseWithBaseRevision(
-                file,
-                selected._rev!,
-                false
-            )
+            hiddenFileSync.storeInternalFileToDatabaseWithBaseRevision(file, selected._rev!, false)
         ).resolves.toBe(true);
 
         expect(databaseFileAccess.storeWithBaseRevision).not.toHaveBeenCalled();
-        expect(hiddenFileSync.updateLastProcessed).toHaveBeenCalledWith(
-            file.path,
-            selected,
-            file.stat
-        );
+        expect(hiddenFileSync.updateLastProcessed).toHaveBeenCalledWith(file.path, selected, file.stat);
     });
 
     it("applies the selected live hidden-file revision through the existing extraction path", async () => {
-        const {
-            hiddenFileSync,
-            path,
-            selected,
-        } = createHiddenRevisionOperation();
+        const { hiddenFileSync, path, selected } = createHiddenRevisionOperation();
         const extract = vi.fn(async () => true);
         hiddenFileSync.extractInternalFileFromDatabase = extract;
 
-        await expect(
-            hiddenFileSync.extractInternalFileRevisionFromDatabase(path, selected._rev!, true)
-        ).resolves.toBe(true);
+        await expect(hiddenFileSync.extractInternalFileRevisionFromDatabase(path, selected._rev!, true)).resolves.toBe(
+            true
+        );
 
         expect(extract).toHaveBeenCalledWith(path, true, undefined, true, false, true, selected._rev);
     });
 
     it("does not apply a hidden-file revision which ceased to be live", async () => {
-        const {
-            hiddenFileSync,
-            path,
-            selected,
-            databaseFileAccess,
-        } = createHiddenRevisionOperation();
+        const { hiddenFileSync, path, selected, databaseFileAccess } = createHiddenRevisionOperation();
         databaseFileAccess.getConflictedRevs.mockResolvedValue([]);
 
-        await expect(
-            hiddenFileSync.extractInternalFileRevisionFromDatabase(path, selected._rev!, true)
-        ).resolves.toBe(false);
+        await expect(hiddenFileSync.extractInternalFileRevisionFromDatabase(path, selected._rev!, true)).resolves.toBe(
+            false
+        );
 
         expect(databaseFileAccess.fetchEntryFromMeta).not.toHaveBeenCalled();
     });

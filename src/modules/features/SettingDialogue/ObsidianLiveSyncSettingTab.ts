@@ -167,10 +167,17 @@ export class ObsidianLiveSyncSettingTab extends PluginSettingTab {
      * @param keys setting keys for applying
      */
     async saveSettings(keys: AllSettingItemKey[]) {
+        // Confirm a new "ask at every launch" passphrase before the mode reaches the plug-in settings,
+        // so no other save in the meantime can store the new mode with the old key.
+        const launchPassphrase = await this.confirmLaunchPassphraseIfRequested(keys);
+        const passphraseKeysPending = launchPassphrase === false;
         let hasChanged = false;
         const appliedKeys = [] as AllSettingItemKey[];
         for (const k of keys) {
             if (!this.isDirty(k)) continue;
+            // An unconfirmed passphrase change is not applied and the editor shows the current mode again;
+            // the other settings are still applied.
+            if (passphraseKeysPending && (k === "configPassphrase" || k === "configPassphraseStore")) continue;
             appliedKeys.push(k);
             if (k in OnDialogSettingsDefault) {
                 await this.saveLocalSetting(k as keyof OnDialogSettings);
@@ -182,8 +189,19 @@ export class ObsidianLiveSyncSettingTab extends PluginSettingTab {
             hasChanged = true;
         }
 
-        if (hasChanged) {
-            await this.services.setting.saveSettingData();
+        // The setting service keeps encrypting with the passphrase it last used. When the
+        // passphrase or its store changes, drop it so data.json is re-encrypted with the new one.
+        const passphraseChanged = appliedKeys.some((k) => k === "configPassphrase" || k === "configPassphraseStore");
+        if (typeof launchPassphrase === "string") {
+            await this.saveWithLaunchPassphrase(launchPassphrase);
+        } else {
+            // The key of "ask at every launch" mode does not depend on the device-local passphrase field.
+            if (passphraseChanged && this.core.settings.configPassphraseStore !== "ASK_AT_LAUNCH") {
+                this.services.setting.clearUsedPassphrase();
+            }
+            if (hasChanged || passphraseChanged) {
+                await this.services.setting.saveSettingData();
+            }
         }
 
         // if (runOnSaved) {
@@ -193,6 +211,44 @@ export class ObsidianLiveSyncSettingTab extends PluginSettingTab {
         await Promise.all(handlers);
         // }
         keys.forEach((e) => this.refreshSetting(e));
+    }
+
+    /**
+     * In "ask at every launch" mode the setting service would ask for the passphrase twice while
+     * saving and encrypt with the second answer, so a mistyped answer locks the settings at the next
+     * launch. When that mode is being applied, ask twice here instead.
+     * @returns undefined when no new launch passphrase is being applied, false when it was cancelled
+     * or not confirmed, otherwise the confirmed passphrase.
+     */
+    private async confirmLaunchPassphraseIfRequested(keys: AllSettingItemKey[]): Promise<string | false | undefined> {
+        if (!keys.includes("configPassphraseStore") || !this.isDirty("configPassphraseStore")) return undefined;
+        if (this.editingSettings.configPassphraseStore !== "ASK_AT_LAUNCH") return undefined;
+        const confirm = this.core.confirm;
+        const passphrase = await confirm.askString("Passphrase", "New passphrase for your settings", "", true);
+        if (passphrase === false || passphrase === "") {
+            Logger("No passphrase was entered. The passphrase mode was not changed.", LOG_LEVEL_NOTICE);
+            return false;
+        }
+        const repeated = await confirm.askString("Passphrase", "Enter the same passphrase again", "", true);
+        if (repeated !== passphrase) {
+            Logger("The passphrases did not match. The passphrase mode was not changed.", LOG_LEVEL_NOTICE);
+            return false;
+        }
+        return passphrase;
+    }
+
+    /** Save with a confirmed launch passphrase instead of letting the setting service ask for it again. */
+    private async saveWithLaunchPassphrase(passphrase: string): Promise<void> {
+        const setting = this.services.setting;
+        // eslint-disable-next-line @typescript-eslint/unbound-method -- kept only to be put back unchanged after the save; never called unbound
+        const askAtSave = setting.getPassphrase;
+        setting.clearUsedPassphrase();
+        setting.getPassphrase = () => Promise.resolve(passphrase);
+        try {
+            await setting.saveSettingData();
+        } finally {
+            setting.getPassphrase = askAtSave;
+        }
     }
 
     /**

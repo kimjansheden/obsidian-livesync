@@ -6,10 +6,15 @@ import {
 } from "@vrtmrz/livesync-commonlib/compat/API/processSetting";
 import { EVENT_REQUEST_SHOW_SETUP_QR } from "@vrtmrz/livesync-commonlib/compat/events/coreEvents";
 import { fireAndForget } from "@vrtmrz/livesync-commonlib/compat/common/utils";
+import type { ObsidianLiveSyncSettings } from "@vrtmrz/livesync-commonlib/compat/common/types";
 import type { SetupFeatureHost } from "./types";
+import { withoutDeviceLocalSettings } from "./setupUriPayload";
 
 export async function encodeSetupSettingsAsQR(host: SetupFeatureHost) {
-    const settingString = encodeSettingsToQRCodeData(host.services.setting.currentSettings());
+    // The QR code configures another device, so it must not carry this installation's identity.
+    const settingString = encodeSettingsToQRCodeData(
+        withoutDeviceLocalSettings(host.services.setting.currentSettings()) as ObsidianLiveSyncSettings
+    );
     const result = encodeQR(settingString, OutputFormat.SVG);
     if (result === "") {
         return "";

@@ -1,4 +1,3 @@
-import { decodeSettingsFromSetupURI } from "@vrtmrz/livesync-commonlib/compat/API/processSetting";
 import { configURIBase } from "@vrtmrz/livesync-commonlib/compat/common/models/shared.const";
 import {
     DEFAULT_SETTINGS,
@@ -26,6 +25,8 @@ import { fsPromises as fs, path } from "@vrtmrz/livesync-commonlib/node";
 import type { LiveSyncCouchDBReplicator } from "@vrtmrz/livesync-commonlib/compat/replication/couchdb/LiveSyncReplicator";
 import type { LiveSyncJournalReplicator } from "@vrtmrz/livesync-commonlib/compat/replication/journal/LiveSyncJournalReplicator";
 import { writeStderrLine, writeStdoutLine } from "@/apps/cli/cliOutput";
+import { decryptSetupURISettings, withoutDeviceLocalSettings } from "@/serviceFeatures/setupObsidian/setupUriPayload";
+import { ensureDeviceSynchronisationIdentity } from "@/serviceFeatures/deviceSynchronisationIdentity";
 
 function redactConnectionString(uri: string): string {
     return uri.replace(/\/\/([^@/]+)@/u, "//***@");
@@ -342,19 +343,22 @@ export async function runCommand(options: CLIOptions, context: CLICommandContext
         if (!passphrase) {
             throw new Error("Passphrase is required");
         }
-        const decoded = await decodeSettingsFromSetupURI(setupURI, passphrase);
-        if (!decoded) {
-            throw new Error("Failed to decode settings from setup URI");
-        }
-        const nextSettings = {
+        // Rejects a wrong passphrase, tampered ciphertext and a payload that is not a settings object.
+        const decoded = await decryptSetupURISettings(setupURI, passphrase);
+        // A Setup URI configures this installation; its identity and settings protection stay local.
+        const nextSettings = withoutDeviceLocalSettings({
             ...DEFAULT_SETTINGS,
             ...decoded,
             useIndexedDBAdapter: false,
             isConfigured: true,
-        } as ObsidianLiveSyncSettings;
+        });
 
         writeStdoutLine(standardIo, `[Command] setup -> ${settingsPath}`);
         await core.services.setting.applyExternalSettings(nextSettings, true);
+        // Journal upload needs a device-local name, and a Setup URI deliberately carries none.
+        ensureDeviceSynchronisationIdentity(core, (message) =>
+            writeStdoutLine(standardIo, `[Setup] ${String(message)}`)
+        );
         await core.services.control.applySettings();
         return true;
     }

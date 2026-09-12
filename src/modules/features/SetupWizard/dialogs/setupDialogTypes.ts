@@ -2,9 +2,9 @@ import type {
     BucketSyncSetting,
     CouchDBConnection,
     EncryptionSettings,
-    ObsidianLiveSyncSettings,
     P2PConnectionInfo,
 } from "@vrtmrz/livesync-commonlib/compat/common/models/setting.type";
+import type { SettingsWithoutDeviceLocal } from "@/serviceFeatures/setupObsidian/setupUriPayload";
 
 export const TYPE_IDENTICAL = "identical";
 export const TYPE_INDEPENDENT = "independent";
@@ -105,7 +105,7 @@ export type SelectMethodExistingResultType =
 
 export type SetupRemoteResultType = typeof TYPE_COUCHDB | typeof TYPE_BUCKET | typeof TYPE_P2P | typeof TYPE_CANCELLED;
 
-export type UseSetupURIResultType = typeof TYPE_CANCELLED | ObsidianLiveSyncSettings;
+export type UseSetupURIResultType = typeof TYPE_CANCELLED | SettingsWithoutDeviceLocal;
 
 export type SetupRemoteE2EEResultType = typeof TYPE_CANCELLED | EncryptionSettings;
 

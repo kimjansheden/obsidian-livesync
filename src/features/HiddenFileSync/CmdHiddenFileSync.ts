@@ -58,6 +58,7 @@ import { configureHiddenFileSyncMode, type ConfigureHiddenFileSyncResult } from 
 import type { OptionalSyncFeatureMode } from "@/features/optionalSyncFeatures.ts";
 import { getObsidianCommunityPluginManager } from "@/common/obsidianCommunityPlugins.ts";
 import { $msg } from "@/common/translation";
+import { isMergeableJsonDocument, shouldKeepValidLocalJson } from "@/features/HiddenFileCommon/jsonConflictPolicy.ts";
 type SyncDirection = "push" | "pull" | "safe" | "pullForce" | "pushForce";
 
 type HiddenFileInitialisationProgress = {
@@ -99,6 +100,17 @@ export class HiddenFileSync extends LiveSyncCommands {
     }
     getConflictedDoc(path: FilePathWithPrefix, rev: string) {
         return this.core.localDatabase.managers.conflictManager.getConflictedDoc(path, rev);
+    }
+
+    async canSafelyAutoMergeJson(path: FilePathWithPrefix, revisions: readonly string[]): Promise<boolean> {
+        if (!(await this.isTargetFile(stripAllPrefixes(path)))) return false;
+        if (revisions.length === 0) return false;
+        try {
+            const leaves = await Promise.all(revisions.map((revision) => this.getConflictedDoc(path, revision)));
+            return leaves.every((leaf) => leaf !== false && !leaf.deleted && isMergeableJsonDocument(leaf.data));
+        } catch {
+            return false;
+        }
     }
     onunload() {
         this.periodicInternalFileScanProcessor?.disable();
@@ -745,12 +757,25 @@ Offline Changed files: ${processFiles.length}`;
                         revFrom._revs_info
                             ?.filter((e) => e.status == "available" && Number(e.rev.split("-")[0]) < conflictedRevNo)
                             .first()?.rev ?? "";
-                    const result = await this.localDatabase.managers.conflictManager.mergeObject(
-                        doc.path,
+                    const canSafelyAutoMerge = await this.canSafelyAutoMergeJson(doc.path, [
                         commonBase,
                         doc._rev,
-                        conflictedRev
-                    );
+                        conflictedRev,
+                    ]);
+                    const result = canSafelyAutoMerge
+                        ? await this.localDatabase.managers.conflictManager.mergeObject(
+                              doc.path,
+                              commonBase,
+                              doc._rev,
+                              conflictedRev
+                          )
+                        : false;
+                    if (!canSafelyAutoMerge) {
+                        this._log(
+                            `JSON conflict contains an invalid or non-object revision; preserving all live revisions.`,
+                            LOG_LEVEL_NOTICE
+                        );
+                    }
                     if (result) {
                         this._log(`Object merge:${path}`, LOG_LEVEL_INFO);
                         const filename = stripAllPrefixes(path);
@@ -769,7 +794,7 @@ Offline Changed files: ${processFiles.length}`;
                     }
                     // const pat = this.settings.syncInternalFileOverwritePatterns;
                     const regExp = getFileRegExp(this.settings, "syncInternalFileOverwritePatterns");
-                    if (regExp.some((r) => r.test(stripAllPrefixes(path)))) {
+                    if (canSafelyAutoMerge && regExp.some((r) => r.test(stripAllPrefixes(path)))) {
                         this._log(`Overwrite rule applied for conflicted hidden file: ${path}`, LOG_LEVEL_INFO);
                         await this.resolveByNewerEntry(id, path, doc, revA, revB);
                         return [];
@@ -795,27 +820,8 @@ Offline Changed files: ${processFiles.length}`;
             yieldThreshold: 10,
             pipeTo: new QueueProcessor(
                 async (results) => {
-                    const { id, doc, path, revA, revB } = results[0];
-                    const prefixedPath = addPrefix(path, ICHeader);
-                    const docAMerge = await this.localDatabase.getDBEntry(prefixedPath, { rev: revA });
-                    const docBMerge = await this.localDatabase.getDBEntry(prefixedPath, { rev: revB });
-                    try {
-                        if (docAMerge != false && docBMerge != false) {
-                            if (await this.showJSONMergeDialogAndMerge(docAMerge, docBMerge)) {
-                                // Again for other conflicted revisions.
-                                this.requeueConflictCheck(path);
-                            } else {
-                                this.finishConflictCheck(path);
-                            }
-                            return;
-                        } else {
-                            // If either revision could not read, force resolving by the newer one.
-                            await this.resolveByNewerEntry(id, path, doc, revA, revB);
-                        }
-                    } catch (ex) {
-                        this.finishConflictCheck(path);
-                        throw ex;
-                    }
+                    const { path, revA, revB } = results[0];
+                    await this.resolveJsonConflictInDialog(path, revA, revB);
                 },
                 {
                     suspended: false,
@@ -828,6 +834,33 @@ Offline Changed files: ${processFiles.length}`;
             ),
         }
     );
+
+    async resolveJsonConflictInDialog(path: FilePathWithPrefix, revA: string, revB: string): Promise<void> {
+        const prefixedPath = addPrefix(path, ICHeader);
+        const docAMerge = await this.localDatabase.getDBEntry(prefixedPath, { rev: revA });
+        const docBMerge = await this.localDatabase.getDBEntry(prefixedPath, { rev: revB });
+        try {
+            if (docAMerge === false || docBMerge === false) {
+                // An unreadable revision cannot be compared. Keep every live revision for
+                // revision repair instead of discarding one by modification time.
+                this._log(
+                    `Hidden file conflict has an unreadable revision; preserving all live revisions: ${path}`,
+                    LOG_LEVEL_NOTICE
+                );
+                this.finishConflictCheck(path);
+                return;
+            }
+            if (await this.showJSONMergeDialogAndMerge(docAMerge, docBMerge)) {
+                // Again for other conflicted revisions.
+                this.requeueConflictCheck(path);
+            } else {
+                this.finishConflictCheck(path);
+            }
+        } catch (ex) {
+            this.finishConflictCheck(path);
+            throw ex;
+        }
+    }
 
     showJSONMergeDialogAndMerge(docA: LoadedEntry, docB: LoadedEntry): Promise<boolean> {
         return new Promise((res) => {
@@ -1848,11 +1881,34 @@ Offline Changed files: ${files.length}`;
         }
     }
 
+    async isInvalidJsonReplacingValidLocal(
+        storageFilePath: FilePath,
+        incoming: string | ArrayBuffer
+    ): Promise<boolean> {
+        if (!storageFilePath.endsWith(".json")) return false;
+        const toText = (content: string | ArrayBuffer) =>
+            typeof content === "string" ? content : new TextDecoder().decode(content);
+        try {
+            const local = await this.core.storageAccess.readHiddenFileAuto(storageFilePath);
+            return shouldKeepValidLocalJson(storageFilePath, toText(incoming), toText(local));
+        } catch {
+            return false;
+        }
+    }
+
     async __writeFile(storageFilePath: FilePath, fileOnDB: LoadedEntry, force: boolean): Promise<false | UXStat> {
         try {
             const statBefore = await this.core.storageAccess.statHidden(storageFilePath);
             const isExist = statBefore != null;
             const writeContent = readContent(fileOnDB);
+            // An explicit force, such as applying a selected revision, may still restore it.
+            if (!force && isExist && (await this.isInvalidJsonReplacingValidLocal(storageFilePath, writeContent))) {
+                this._log(
+                    `STORAGE <-- DB: ${storageFilePath}: skipped (hidden) The incoming revision is not valid JSON; keeping the valid local file`,
+                    LOG_LEVEL_NOTICE
+                );
+                return false;
+            }
             await this.ensureDir(storageFilePath);
             // We have to compare the content, so read it once.
             const needWrite =

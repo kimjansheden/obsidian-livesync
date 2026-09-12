@@ -38,6 +38,7 @@ import { useRedFlagFeatures } from "./serviceFeatures/redFlag.ts";
 import { useSetupProtocolFeature } from "./serviceFeatures/setupObsidian/setupProtocol.ts";
 import { useSetupQRCodeFeature } from "@/serviceFeatures/setupObsidian/qrCode";
 import { useSetupURIFeature } from "@/serviceFeatures/setupObsidian/setupUri";
+import { useDeviceSynchronisationIdentity } from "@/serviceFeatures/deviceSynchronisationIdentity";
 import { useSetupManagerHandlersFeature } from "./serviceFeatures/setupObsidian/setupManagerHandlers.ts";
 import { useP2PReplicatorFeature } from "@vrtmrz/livesync-commonlib/compat/replication/trystero/useP2PReplicatorFeature";
 import { useP2PReplicatorCommands } from "@vrtmrz/livesync-commonlib/compat/replication/trystero/useP2PReplicatorCommands";
@@ -191,6 +192,7 @@ export default class ObsidianLiveSyncPlugin extends Plugin {
                 useSetupProtocolFeature(core, setupManager);
                 useSetupQRCodeFeature(core);
                 useSetupURIFeature(core);
+                useDeviceSynchronisationIdentity(core);
                 useSetupManagerHandlersFeature(core, setupManager);
                 useOfflineScanner(core);
                 useRedFlagFeatures(core);

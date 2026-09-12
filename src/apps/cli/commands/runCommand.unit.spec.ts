@@ -2,7 +2,12 @@ import { fsPromises as fs, os, path } from "@vrtmrz/livesync-commonlib/node";
 import * as processSetting from "@vrtmrz/livesync-commonlib/compat/API/processSetting";
 import { ConnectionStringParser } from "@vrtmrz/livesync-commonlib/compat/common/ConnectionString";
 import { configURIBase } from "@vrtmrz/livesync-commonlib/compat/common/models/shared.const";
-import { DEFAULT_SETTINGS, REMOTE_COUCHDB, REMOTE_MINIO, REMOTE_P2P } from "@vrtmrz/livesync-commonlib/compat/common/types";
+import {
+    DEFAULT_SETTINGS,
+    REMOTE_COUCHDB,
+    REMOTE_MINIO,
+    REMOTE_P2P,
+} from "@vrtmrz/livesync-commonlib/compat/common/types";
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { runCommand } from "./runCommand";
 import type { CLIOptions } from "./types";
@@ -346,6 +351,59 @@ describe("runCommand abnormal cases", () => {
         expect(appliedSettings.couchDB_DBNAME).toBe("livesync-test-db");
         expect(appliedSettings.isConfigured).toBe(true);
         expect(appliedSettings.useIndexedDBAdapter).toBe(false);
+    });
+
+    it("setup keeps this installation's device-local settings", async () => {
+        const core = createCoreMock();
+        const passphrase = "correct-passphrase";
+        const setupURI = await processSetting.encodeSettingsToSetupURI(
+            {
+                ...DEFAULT_SETTINGS,
+                couchDB_URI: "http://127.0.0.1:5984",
+                isConfigured: true,
+                additionalSuffixOfDatabaseName: "source-app-id",
+                deviceAndVaultName: "source-device",
+                P2P_DevicePeerName: "source-peer",
+            } as any,
+            passphrase,
+            []
+        );
+        core.services.context.standardIo.prompt.mockResolvedValue(passphrase);
+
+        await expect(runCommand(makeOptions("setup", [setupURI]), { ...context, core })).resolves.toBe(true);
+
+        const [appliedSettings] = core.services.setting.applyExternalSettings.mock.calls[0];
+        expect(appliedSettings.couchDB_URI).toBe("http://127.0.0.1:5984");
+        for (const key of [
+            "additionalSuffixOfDatabaseName",
+            "deviceAndVaultName",
+            "P2P_DevicePeerName",
+            "configPassphraseStore",
+        ]) {
+            expect(appliedSettings).not.toHaveProperty(key);
+        }
+    });
+
+    it("setup gives this installation a device-local name so it can upload", async () => {
+        const core = createCoreMock();
+        const passphrase = "correct-passphrase";
+        const setupURI = await createSetupURI(passphrase);
+        core.services.context.standardIo.prompt.mockResolvedValue(passphrase);
+        let deviceName = "";
+        core.services.setting.applyExternalSettings.mockImplementation(async (next: any) => {
+            Object.assign(core.services.setting.currentSettings(), next);
+        });
+        core.services.setting.getDeviceAndVaultName = vi.fn(() => deviceName);
+        core.services.setting.setDeviceAndVaultName = vi.fn((value: string) => {
+            deviceName = value;
+        });
+        core.services.setting.saveDeviceAndVaultName = vi.fn();
+        core.services.API = { getPlatform: vi.fn(() => "linux"), addLog: vi.fn() };
+
+        await expect(runCommand(makeOptions("setup", [setupURI]), { ...context, core })).resolves.toBe(true);
+
+        expect(deviceName).toMatch(/^linux-[a-z0-9]{4}$/);
+        expect(core.services.setting.saveDeviceAndVaultName).toHaveBeenCalledOnce();
     });
 
     it("setup rejects encoded URI when passphrase is wrong", async () => {

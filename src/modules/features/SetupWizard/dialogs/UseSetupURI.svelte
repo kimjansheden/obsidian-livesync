@@ -1,6 +1,4 @@
 <script lang="ts">
-    import { configURIBase } from "@/common/types";
-    import type { ObsidianLiveSyncSettings } from "@vrtmrz/livesync-commonlib/compat/common/types";
     import DialogHeader from "@/modules/services/LiveSyncUI/components/DialogHeader.svelte";
     import Guidance from "@/modules/services/LiveSyncUI/components/Guidance.svelte";
     import Decision from "@/modules/services/LiveSyncUI/components/Decision.svelte";
@@ -10,7 +8,7 @@
     import Password from "@/modules/services/LiveSyncUI/components/Password.svelte";
 
     import { onMount } from "svelte";
-    import { decryptString } from "@vrtmrz/livesync-commonlib/compat/encryption/stringEncryption";
+    import { decryptSetupURISettings, isSetupURI } from "@/serviceFeatures/setupObsidian/setupUriPayload";
     import type { GuestDialogProps } from "@/modules/services/LiveSyncUI/svelteDialog";
     import { TYPE_CANCELLED, type UseSetupURIResultType } from "./setupDialogTypes";
     import { $msg as translateMessage } from "@/common/translation";
@@ -30,7 +28,7 @@
         }
     });
 
-    const seemsValid = $derived.by(() => setupURI.startsWith(configURIBase));
+    const seemsValid = $derived.by(() => isSetupURI(setupURI));
     async function processSetupURI() {
         error = "";
         if (!seemsValid) return;
@@ -39,12 +37,7 @@
             return;
         }
         try {
-            const settingPieces = setupURI.substring(configURIBase.length);
-            const encodedConfig = decodeURIComponent(settingPieces);
-            const newConf = (await JSON.parse(
-                await decryptString(encodedConfig, passphrase)
-            )) as ObsidianLiveSyncSettings;
-            setResult(newConf);
+            setResult(await decryptSetupURISettings(setupURI, passphrase));
             // Logger("Settings imported successfully", LOG_LEVEL_NOTICE);
             return;
         } catch (e) {
