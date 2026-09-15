@@ -21,6 +21,7 @@ Earlier releases remain available in the 1.0 release history, the 1.0 preview hi
 - Locked Object Storage remotes now reject unaccepted nodes before they can refresh milestone heartbeats, while accepted nodes retain read-only compatibility checks.
 - A device restored by fetching an Object Storage remote no longer reads its whole local database again on every synchronisation cycle before receiving new changes. The first send after the restore still scans the received entries once.
 - A file created, changed, deleted or renamed while the plug-in was starting, after the start-up scan had listed the vault but before the vault watcher began, no longer stays unsynchronised until the next start. A rename which only changes letter case, when file names are not case-sensitive, is still left to a later scan. These changes, and storage operations restored after a restart, now leave a file which still holds the revision this device last wrote or stored, so a newer edit received in the meantime is not replaced. A deletion received during start-up may still be undone to keep local work.
+- Received changes are no longer applied to the Vault before the plug-in is ready, such as during start-up or while fetching from the remote. Changes held back meanwhile, including those restored after a restart, are applied as soon as the plug-in becomes ready, without waiting for another change to arrive.
 
 ## 1.0.21
 

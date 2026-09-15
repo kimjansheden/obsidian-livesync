@@ -78,8 +78,15 @@ export class ReplicateResultProcessor {
     }
     public resume() {
         this._suspended = false;
+        this.resumeAfterApplicationReady();
+    }
+    /**
+     * Continue processing which was held back while the application was not ready.
+     * An explicit suspension remains in effect.
+     */
+    public resumeAfterApplicationReady() {
         this.updateProcessingActivity();
-        fireAndForget(() => this.runProcessQueue());
+        this.triggerProcessQueue();
     }
 
     // Whether the processing is suspended
@@ -89,7 +96,7 @@ export class ReplicateResultProcessor {
     public get isSuspended() {
         return (
             this._suspended ||
-            !this.core.services.appLifecycle.isReady ||
+            !this.core.services.appLifecycle.isReady() ||
             this.replicator.settings.suspendParseReplicationResult ||
             this.core.services.appLifecycle.isSuspended()
         );
