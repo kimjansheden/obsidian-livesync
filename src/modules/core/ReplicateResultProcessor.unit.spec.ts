@@ -20,6 +20,7 @@ function note(id: string): PouchDB.Core.ExistingDocument<EntryDoc> {
 }
 
 type SetupOptions = {
+    applicationReady?: boolean;
     processSynchroniseResult?: (entry: unknown) => Promise<void>;
     setSnapshot?: (key: string, value: unknown) => Promise<unknown>;
 };
@@ -28,9 +29,11 @@ function setup(options: SetupOptions = {}) {
     const processSynchroniseResult = vi.fn(options.processSynchroniseResult ?? (async () => undefined));
     const setSnapshot = vi.fn(options.setSnapshot ?? (async () => undefined));
     const runBoundedLocalApplicationActivity = vi.fn(async (task: () => Promise<void>) => await task());
+    const lifecycle = { ready: options.applicationReady ?? true };
+    const isReady = vi.fn(() => lifecycle.ready);
     const core = {
         services: {
-            appLifecycle: { isReady: true, isSuspended: () => false },
+            appLifecycle: { isReady, isSuspended: () => false },
             path: { getPath: (entry: { path: string }) => entry.path },
             replication: {
                 databaseQueueCount: reactiveSource(0),
@@ -58,10 +61,38 @@ function setup(options: SetupOptions = {}) {
         core,
         settings: { maxMTimeForReflectEvents: 0, suspendParseReplicationResult: false },
     } as never);
-    return { processor, processSynchroniseResult, runBoundedLocalApplicationActivity };
+    return { isReady, lifecycle, processor, processSynchroniseResult, runBoundedLocalApplicationActivity };
 }
 
 describe("ReplicateResultProcessor", () => {
+    it("holds replicated documents while the application is not ready", async () => {
+        const { isReady, processor, processSynchroniseResult, runBoundedLocalApplicationActivity } = setup({
+            applicationReady: false,
+        });
+
+        processor.enqueueAll([note("one")]);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        expect(processSynchroniseResult).not.toHaveBeenCalled();
+        expect(runBoundedLocalApplicationActivity).not.toHaveBeenCalled();
+        expect(processor.isSuspended).toBe(true);
+        expect(isReady).toHaveBeenCalled();
+    });
+
+    it("continues held documents after readiness without lifting an explicit suspension", async () => {
+        const { lifecycle, processor, processSynchroniseResult } = setup({ applicationReady: false });
+        processor.enqueueAll([note("one")]);
+        processor.suspend();
+
+        lifecycle.ready = true;
+        processor.resumeAfterApplicationReady();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(processSynchroniseResult).not.toHaveBeenCalled();
+
+        processor.resume();
+        await vi.waitFor(() => expect(processSynchroniseResult).toHaveBeenCalledOnce());
+    });
+
     it("scans normal-file metadata without loading chunk documents and requeues it", async () => {
         const documents = [
             { _id: "first", _rev: "1-a", type: "plain", path: "first.md" },

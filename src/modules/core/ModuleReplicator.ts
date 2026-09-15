@@ -323,6 +323,12 @@ Even if you choose to clean up, you will see this option again if you exit Obsid
     // }
 
     override onBindFunction(core: LiveSyncCore, services: typeof core.services): void {
+        // Readiness is recorded without an event, so resume replication results which were held back until then.
+        const markIsReady = services.appLifecycle.markIsReady.bind(services.appLifecycle);
+        services.appLifecycle.markIsReady = () => {
+            markIsReady();
+            this.processor.resumeAfterApplicationReady();
+        };
         services.replicator.onReplicatorInitialised.addHandler(this._onReplicatorInitialised.bind(this));
         services.databaseEvents.onDatabaseInitialised.addHandler(this._everyOnDatabaseInitialized.bind(this));
         services.appLifecycle.onSettingLoaded.addHandler(this._everyOnloadAfterLoadSettings.bind(this));
