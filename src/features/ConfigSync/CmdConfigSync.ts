@@ -1199,7 +1199,7 @@ export class ConfigSync extends LiveSyncCommands {
     }
     async _everyRealizeSettingSyncMode(): Promise<boolean> {
         this.periodicPluginSweepProcessor?.disable();
-        if (!this._isMainReady) return true;
+        if (!this._isMainReady()) return true;
         if (!this._isMainSuspended()) return true;
         if (!this.isThisModuleEnabled()) return true;
         if (this.settings.autoSweepPlugins) {
@@ -1487,7 +1487,7 @@ export class ConfigSync extends LiveSyncCommands {
     }
 
     async watchVaultRawEventsAsync(path: FilePath) {
-        if (!this._isMainReady) return false;
+        if (!this._isMainReady()) return false;
         if (this._isMainSuspended()) return false;
         if (!this.isThisModuleEnabled()) return false;
         // if (!this.isTargetPath(path)) return false;
