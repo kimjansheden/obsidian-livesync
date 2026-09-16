@@ -29,10 +29,7 @@ import { promiseWithResolvers, type PromiseWithResolvers } from "octagonal-wheel
 const KV_KEY_REPLICATION_RESULT_PROCESSOR_SNAPSHOT = "replicationResultProcessorSnapshot";
 const REPROCESS_BATCH_SIZE = 100;
 type LocalApplicationActivityOwner = {
-    runBoundedLocalApplicationActivity<T>(
-        task: () => T | PromiseLike<T>,
-        options?: { label?: string }
-    ): Promise<T>;
+    runBoundedLocalApplicationActivity<T>(task: () => T | PromiseLike<T>, options?: { label?: string }): Promise<T>;
 };
 type ReplicateResultProcessorState = {
     queued: PouchDB.Core.ExistingDocument<EntryDoc>[];
@@ -93,10 +90,27 @@ export class ReplicateResultProcessor {
     // If true, the processing queue processor bails the loop.
     private _suspended: boolean = false;
 
+    /**
+     * Whether the application accepts replicated documents being applied to storage.
+     *
+     * Remediation mode prevents the reconciliation scan which readiness depends upon, so the
+     * application stays unready for as long as the limit is configured. Applying the received
+     * documents is what that mode exists for, and `parseDocumentChange` keeps each one within
+     * the configured modification-time limit. Application still waits for a usable database.
+     */
+    private get acceptsResultApplication() {
+        if (this.core.services.appLifecycle.isReady()) return true;
+        if (!(this.replicator.settings.maxMTimeForReflectEvents > 0)) return false;
+        // A fetch resets the local database, and a remote which reflects while fetching leaves
+        // this processor unsuspended throughout. Documents applied then cannot gather their
+        // chunks and are dropped, so the database itself must be usable.
+        return this.core.services.database.isDatabaseReady();
+    }
+
     public get isSuspended() {
         return (
             this._suspended ||
-            !this.core.services.appLifecycle.isReady() ||
+            !this.acceptsResultApplication ||
             this.replicator.settings.suspendParseReplicationResult ||
             this.core.services.appLifecycle.isSuspended()
         );
