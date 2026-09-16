@@ -21,6 +21,8 @@ function note(id: string): PouchDB.Core.ExistingDocument<EntryDoc> {
 
 type SetupOptions = {
     applicationReady?: boolean;
+    databaseReady?: boolean;
+    maxMTimeForReflectEvents?: number;
     processSynchroniseResult?: (entry: unknown) => Promise<void>;
     setSnapshot?: (key: string, value: unknown) => Promise<unknown>;
 };
@@ -29,11 +31,13 @@ function setup(options: SetupOptions = {}) {
     const processSynchroniseResult = vi.fn(options.processSynchroniseResult ?? (async () => undefined));
     const setSnapshot = vi.fn(options.setSnapshot ?? (async () => undefined));
     const runBoundedLocalApplicationActivity = vi.fn(async (task: () => Promise<void>) => await task());
-    const lifecycle = { ready: options.applicationReady ?? true };
+    const lifecycle = { ready: options.applicationReady ?? true, databaseReady: options.databaseReady ?? true };
     const isReady = vi.fn(() => lifecycle.ready);
+    const isDatabaseReady = vi.fn(() => lifecycle.databaseReady);
     const core = {
         services: {
             appLifecycle: { isReady, isSuspended: () => false },
+            database: { isDatabaseReady },
             path: { getPath: (entry: { path: string }) => entry.path },
             replication: {
                 databaseQueueCount: reactiveSource(0),
@@ -59,7 +63,10 @@ function setup(options: SetupOptions = {}) {
     };
     const processor = new ReplicateResultProcessor({
         core,
-        settings: { maxMTimeForReflectEvents: 0, suspendParseReplicationResult: false },
+        settings: {
+            maxMTimeForReflectEvents: options.maxMTimeForReflectEvents ?? 0,
+            suspendParseReplicationResult: false,
+        },
     } as never);
     return { isReady, lifecycle, processor, processSynchroniseResult, runBoundedLocalApplicationActivity };
 }
@@ -77,6 +84,37 @@ describe("ReplicateResultProcessor", () => {
         expect(runBoundedLocalApplicationActivity).not.toHaveBeenCalled();
         expect(processor.isSuspended).toBe(true);
         expect(isReady).toHaveBeenCalled();
+    });
+
+    it("applies documents in remediation mode, which never reports readiness", async () => {
+        // The limit keeps the application unready by preventing its reconciliation scan.
+        const { processor, processSynchroniseResult } = setup({
+            applicationReady: false,
+            maxMTimeForReflectEvents: Date.parse("2026-09-01T00:00:00Z"),
+        });
+
+        expect(processor.isSuspended).toBe(false);
+        processor.enqueueAll([note("one")]);
+
+        await vi.waitFor(() => expect(processSynchroniseResult).toHaveBeenCalledOnce());
+    });
+
+    it("holds documents in remediation mode while the local database is being rebuilt", async () => {
+        const { lifecycle, processor, processSynchroniseResult } = setup({
+            applicationReady: false,
+            databaseReady: false,
+            maxMTimeForReflectEvents: Date.parse("2026-09-01T00:00:00Z"),
+        });
+
+        expect(processor.isSuspended).toBe(true);
+        processor.enqueueAll([note("one")]);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(processSynchroniseResult).not.toHaveBeenCalled();
+
+        lifecycle.databaseReady = true;
+        processor.resumeAfterApplicationReady();
+
+        await vi.waitFor(() => expect(processSynchroniseResult).toHaveBeenCalledOnce());
     });
 
     it("continues held documents after readiness without lifting an explicit suspension", async () => {
