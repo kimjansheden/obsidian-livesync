@@ -17,7 +17,12 @@ import {
     Logger,
     type LOG_LEVEL,
 } from "@vrtmrz/livesync-commonlib/compat/common/logger";
-import { fireAndForget, isAnyNote, throttle } from "@vrtmrz/livesync-commonlib/compat/common/utils";
+import {
+    fireAndForget,
+    isAnyNote,
+    isRemediationModeActive,
+    throttle,
+} from "@vrtmrz/livesync-commonlib/compat/common/utils";
 import { Semaphore } from "octagonal-wheels/concurrency/semaphore_v2";
 import { serialized } from "octagonal-wheels/concurrency/lock";
 import type { ReactiveSource } from "octagonal-wheels/dataobject/reactive_v2";
@@ -100,7 +105,7 @@ export class ReplicateResultProcessor {
      */
     private get acceptsResultApplication() {
         if (this.core.services.appLifecycle.isReady()) return true;
-        if (!(this.replicator.settings.maxMTimeForReflectEvents > 0)) return false;
+        if (!isRemediationModeActive(this.replicator.settings)) return false;
         // A fetch resets the local database, and a remote which reflects while fetching leaves
         // this processor unsuspended throughout. Documents applied then cannot gather their
         // chunks and are dropped, so the database itself must be usable.
