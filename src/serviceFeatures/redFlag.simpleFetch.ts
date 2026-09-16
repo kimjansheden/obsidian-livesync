@@ -2,6 +2,7 @@ import { LOG_LEVEL_NOTICE } from "octagonal-wheels/common/logger";
 import type { NecessaryServices } from "@vrtmrz/livesync-commonlib/compat/interfaces/ServiceModule";
 import { type LogFunction } from "@vrtmrz/livesync-commonlib/compat/services/lib/logUtils";
 import { UnresolvedErrorManager } from "@vrtmrz/livesync-commonlib/compat/services/base/UnresolvedErrorManager";
+import { isRemediationModeActive } from "@vrtmrz/livesync-commonlib/compat/common/utils";
 import {
     ExtraOnLocal,
     ExtraOnRemote,
@@ -190,6 +191,19 @@ export async function askAndPerformFastSetupOnScheduledFetchAll(
     log: LogFunction,
     cleanupFlag: () => Promise<void>
 ): Promise<boolean | undefined> {
+    if (isRemediationModeActive(host.services.setting.currentSettings())) {
+        // Simple Fetch reconciles storage with the local database after fetching, past the check which prevents
+        // that scan in remediation mode. Skipping only the scan would restore nothing from most remotes: reflection
+        // of received documents stays suspended while Simple Fetch fetches, so Object Storage and P2P remotes
+        // discard them, and CouchDB Fast Fetch writes them straight into the database. The detailed flow skips the
+        // scan in this mode and applies what it receives from CouchDB and Object Storage remotes within the limit.
+        log(
+            "Remediation mode is active, so the detailed fetch flow is used instead of Simple Fetch.",
+            LOG_LEVEL_NOTICE
+        );
+        clearRememberedSimpleFetchMode(host);
+        return undefined;
+    }
     const result = await askSimpleFetchMode(host);
     if (result === "cancelled") {
         log("Fetch cancelled by user.", LOG_LEVEL_NOTICE);
