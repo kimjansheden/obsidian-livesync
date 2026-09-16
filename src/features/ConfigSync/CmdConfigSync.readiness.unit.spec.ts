@@ -63,8 +63,6 @@ function setup(state: LifecycleState) {
         isReady: vi.fn(() => state.ready),
         isSuspended: vi.fn(() => state.suspended),
     };
-    const periodicPluginSweepProcessor = { disable: vi.fn(), enable: vi.fn() };
-    const scanAllConfigFiles = vi.fn(async () => undefined);
     const statHidden = vi.fn(async () => ({ type: "file", ctime: 0, mtime: 1_000, size: 1 }));
     const storeCustomizationFiles = vi.fn(async () => undefined);
     // Obsidian adds Array.prototype.contains, which is not available under Node.
@@ -76,9 +74,6 @@ function setup(state: LifecycleState) {
         core: {
             settings: {
                 usePluginSync: true,
-                autoSweepPlugins: true,
-                autoSweepPluginsPeriodic: true,
-                watchInternalFileChanges: false,
                 pluginSyncExtendedSetting: {},
             },
             services: {
@@ -87,17 +82,13 @@ function setup(state: LifecycleState) {
             },
             storageAccess: { statHidden },
         },
-        periodicPluginSweepProcessor,
         recentProcessedInternalFiles,
-        scanAllConfigFiles,
         storeCustomizationFiles,
         filenameToUnifiedKey: (path: string) => `ix:${path}`,
     });
     return {
         appLifecycle,
         configSync,
-        periodicPluginSweepProcessor,
-        scanAllConfigFiles,
         statHidden,
     };
 }
@@ -106,23 +97,6 @@ describe("ConfigSync readiness", () => {
     beforeEach(() => {
         vi.mocked(scheduleTask).mockClear();
     });
-
-    it.each([false, true])(
-        "does not sweep configuration files when settings are realised before the plug-in is ready (suspended: %s)",
-        async (suspended) => {
-            const { appLifecycle, configSync, periodicPluginSweepProcessor, scanAllConfigFiles } = setup({
-                ready: false,
-                suspended,
-            });
-
-            await expect(configSync._everyRealizeSettingSyncMode()).resolves.toBe(true);
-
-            expect(periodicPluginSweepProcessor.disable).toHaveBeenCalledOnce();
-            expect(scanAllConfigFiles).not.toHaveBeenCalled();
-            expect(periodicPluginSweepProcessor.enable).not.toHaveBeenCalled();
-            expect(appLifecycle.isReady).toHaveBeenCalled();
-        }
-    );
 
     it("leaves a configuration file event unhandled before the plug-in is ready", async () => {
         const { appLifecycle, configSync, statHidden } = setup({ ready: false, suspended: false });

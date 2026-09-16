@@ -1197,20 +1197,12 @@ export class ConfigSync extends LiveSyncCommands {
         }
         return true;
     }
-    async _everyRealizeSettingSyncMode(): Promise<boolean> {
+    _everyRealizeSettingSyncMode(): Promise<boolean> {
+        // With no onSuspending handler, this is what stops the periodic sweep when the plug-in is suspended.
+        // applySettings resumes the plug-in after this unless it is suspended, and _everyOnResumeProcess then
+        // sweeps and restarts the periodic sweep. Sweeping here as well would scan the configuration files twice.
         this.periodicPluginSweepProcessor?.disable();
-        if (!this._isMainReady()) return true;
-        if (!this._isMainSuspended()) return true;
-        if (!this.isThisModuleEnabled()) return true;
-        if (this.settings.autoSweepPlugins) {
-            await this.scanAllConfigFiles(false);
-        }
-        this.periodicPluginSweepProcessor.enable(
-            this.settings.autoSweepPluginsPeriodic && !this.settings.watchInternalFileChanges
-                ? PERIODIC_PLUGIN_SWEEP * 1000
-                : 0
-        );
-        return true;
+        return Promise.resolve(true);
     }
 
     recentProcessedInternalFiles = [] as string[];
