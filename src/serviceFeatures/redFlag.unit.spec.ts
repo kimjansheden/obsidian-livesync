@@ -678,6 +678,28 @@ describe("Red Flag Feature", () => {
             expect(host.mocks.rebuilder.$fetchLocal).toHaveBeenCalled();
         });
 
+        it("opens the detailed Fetch flow without asking for Simple Fetch while remediation mode is active", async () => {
+            const host = createHostMock();
+
+            host.mocks.storageAccess.files.add(FlagFilesOriginal.FETCH_ALL);
+            host.mocks.setting.settings.maxMTimeForReflectEvents = Date.parse("2026-09-01T00:00:00Z");
+            host.mocks.ui.dialogManager.openWithExplicitCancel.mockResolvedValueOnce({
+                vault: "independent",
+                backup: "backup_skipped",
+                extra: { preventFetchingConfig: false },
+            });
+            host.mocks.tweakValue.fetchRemotePreferred.mockResolvedValueOnce(
+                availableRemoteTweaks({ batchSave: false })
+            );
+
+            await expect(createFetchAllFlagHandler(host as any, createLoggerMock()).handle()).resolves.toBe(true);
+
+            expect(host.mocks.ui.confirm.confirmWithMessage).not.toHaveBeenCalled();
+            expect(host.mocks.rebuilder.$fetchLocalDBFast).not.toHaveBeenCalled();
+            expect(host.mocks.ui.dialogManager.openWithExplicitCancel).toHaveBeenCalledOnce();
+            expect(host.mocks.rebuilder.$fetchLocal).toHaveBeenCalledOnce();
+        });
+
         it("restores the automatic synchronisation choices after the detailed Fetch flow", async () => {
             const host = createHostWithAutomaticSync();
 
@@ -1254,6 +1276,121 @@ describe("Red Flag Feature", () => {
             expect(result).toBe(true);
             expect(host.mocks.rebuilder.finishRebuild).toHaveBeenCalled();
             expect(cleanupFlag).toHaveBeenCalled();
+        });
+
+        describe("in remediation mode", () => {
+            const LIMIT = Date.parse("2026-09-01T00:00:00Z");
+            const AFTER_LIMIT = Date.parse("2026-09-10T00:00:00Z");
+
+            /** A host whose Vault and local database the actual Offline Scanner can reconcile. */
+            const createScannableHost = (maxMTimeForReflectEvents: number) => {
+                const host = createHostMock();
+                const storeFileToDB = vi.fn(async () => true);
+                const dbToStorage = vi.fn(async () => true);
+                const receivedAfterLimit = {
+                    _id: "changed-after-limit.md",
+                    path: "changed-after-limit.md",
+                    size: 5,
+                    mtime: AFTER_LIMIT,
+                    ctime: AFTER_LIMIT,
+                    type: "newnote",
+                    children: [],
+                };
+                Object.assign(host.services.vault, {
+                    isTargetFile: vi.fn(async () => true),
+                    isValidPath: vi.fn(() => true),
+                    isFileSizeTooLarge: vi.fn(() => false),
+                });
+                Object.assign(host.services, {
+                    path: {
+                        getPath: vi.fn((doc: { path: string }) => doc.path),
+                        path2id: vi.fn(async (path: string) => path),
+                    },
+                    database: {
+                        localDatabase: {
+                            findAllNormalDocs: vi.fn(async function* () {
+                                yield receivedAfterLimit;
+                            }),
+                        },
+                    },
+                    keyValueDB: {},
+                });
+                Object.assign(host.serviceModules.storageAccess, {
+                    getFiles: vi.fn(async () => [
+                        {
+                            path: "created-locally.md",
+                            stat: { size: 7, mtime: AFTER_LIMIT, ctime: AFTER_LIMIT, type: "file" },
+                        },
+                    ]),
+                });
+                Object.assign(host.serviceModules, { fileHandler: { storeFileToDB, dbToStorage } });
+                host.mocks.setting.settings.maxMTimeForReflectEvents = maxMTimeForReflectEvents;
+                host.mocks.tweakValue.fetchRemotePreferred.mockResolvedValue(
+                    availableRemoteTweaks({ batchSave: false })
+                );
+                return { host, storeFileToDB, dbToStorage };
+            };
+
+            /** Run the actual Offline Scanner instead of the module mock while `task` runs. */
+            const withActualScanner = async (task: () => Promise<void>) => {
+                const actual = await vi.importActual<
+                    typeof import("@vrtmrz/livesync-commonlib/compat/serviceFeatures/offlineScanner")
+                >("@vrtmrz/livesync-commonlib/compat/serviceFeatures/offlineScanner");
+                const scanner = vi.mocked(synchroniseAllFilesBetweenDBandStorage);
+                scanner.mockImplementation(actual.synchroniseAllFilesBetweenDBandStorage);
+                try {
+                    await task();
+                } finally {
+                    scanner.mockImplementation(() => Promise.resolve(true));
+                }
+            };
+
+            it("leaves the fetch to the detailed flow without fetching or reconciling", async () => {
+                const { host, storeFileToDB, dbToStorage } = createScannableHost(LIMIT);
+                const cleanupFlag = vi.fn().mockResolvedValue(undefined);
+                // A choice remembered from an earlier attempt would otherwise start Simple Fetch without asking.
+                host.mocks.setting.setSmallConfig(
+                    "simple-fetch-mode",
+                    JSON.stringify({
+                        stage1: SIMPLE_FETCH_STAGE1_NEWER_WINS,
+                        stage2: SIMPLE_FETCH_STAGE2_NEWER_SYNC_ALL,
+                    })
+                );
+
+                await withActualScanner(async () => {
+                    await expect(
+                        askAndPerformFastSetupOnScheduledFetchAll(host as any, createLoggerMock(), cleanupFlag)
+                    ).resolves.toBeUndefined();
+                });
+
+                // Simple Fetch would store the local file in the database, and write the document
+                // modified after the limit to storage, if it ran in this mode.
+                expect(storeFileToDB).not.toHaveBeenCalled();
+                expect(dbToStorage).not.toHaveBeenCalled();
+                expect(host.mocks.rebuilder.$fetchLocalDBFast).not.toHaveBeenCalled();
+                expect(host.mocks.ui.confirm.confirmWithMessage).not.toHaveBeenCalled();
+                expect(host.mocks.rebuilder.finishRebuild).not.toHaveBeenCalled();
+                expect(cleanupFlag).not.toHaveBeenCalled();
+                expect(host.mocks.setting.getSmallConfig("simple-fetch-mode")).toBe("");
+            });
+
+            it("reconciles both directions when remediation mode is inactive", async () => {
+                const { host, storeFileToDB, dbToStorage } = createScannableHost(0);
+                const cleanupFlag = vi.fn().mockResolvedValue(undefined);
+                host.mocks.ui.confirm.confirmWithMessage
+                    .mockResolvedValueOnce(SIMPLE_FETCH_STAGE1_NEWER_WINS)
+                    .mockResolvedValueOnce(SIMPLE_FETCH_STAGE2_NEWER_SYNC_ALL);
+
+                await withActualScanner(async () => {
+                    await expect(
+                        askAndPerformFastSetupOnScheduledFetchAll(host as any, createLoggerMock(), cleanupFlag)
+                    ).resolves.toBe(true);
+                });
+
+                expect(storeFileToDB).toHaveBeenCalledOnce();
+                expect(dbToStorage).toHaveBeenCalledOnce();
+                expect(cleanupFlag).toHaveBeenCalledOnce();
+            });
         });
     });
 
