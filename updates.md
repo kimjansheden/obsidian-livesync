@@ -12,6 +12,13 @@ Earlier releases remain available in the 1.0 release history, the 1.0 preview hi
 
 ## Unreleased
 
+### Synchronisation
+
+#### Fixed
+
+- Received changes are applied again while remediation mode is active. That mode prevents the scan which readiness depends upon, so nothing had been applied since the plug-in began waiting for readiness, not even changes older than the configured modification-time limit. The limit itself is still enforced for every change, and application waits for a usable local database so that a change arriving during a fetch is not dropped.
+- A scheduled fetch no longer offers Simple Fetch while remediation mode is active. Simple Fetch reconciles the Vault with the local database past the restriction, which could store the current files or apply changes newer than the limit; the detailed flow states the restriction and offers to clear it first (#1202).
+
 ## 1.0.30
 
 18th September, 2026
