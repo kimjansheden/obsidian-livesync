@@ -12,6 +12,13 @@ Earlier releases remain available in the 1.0 release history, the 1.0 preview hi
 
 ## Unreleased
 
+### Synchronisation and storage
+
+#### Fixed
+
+- Files with colons in their names now retain their full paths in synchronisation data instead of appearing as incorrectly named copies at the Vault root. (#1206)
+    - Obsidian may refuse to create a missing file with such a name. LiveSync also treats these names as invalid on Windows and Android, so the file may not appear in those devices' Vaults. Existing misplaced copies are left for you to review; this change does not remove them automatically.
+
 ## 1.0.30
 
 18th September, 2026
