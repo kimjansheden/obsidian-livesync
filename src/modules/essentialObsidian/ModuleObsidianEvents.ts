@@ -3,8 +3,8 @@ import { EVENT_FILE_RENAMED, EVENT_LEAF_ACTIVE_CHANGED, eventHub } from "@/commo
 import { LOG_LEVEL_INFO, LOG_LEVEL_NOTICE, LOG_LEVEL_VERBOSE } from "octagonal-wheels/common/logger";
 import { cancelTask, scheduleTask } from "octagonal-wheels/concurrency/task";
 import type { TFile } from "@/deps.ts";
-import { fireAndForget } from "octagonal-wheels/promises";
-import { type FilePathWithPrefix } from "@vrtmrz/livesync-commonlib/compat/common/types";
+import { delay, fireAndForget } from "octagonal-wheels/promises";
+import { REMOTE_MINIO, type FilePathWithPrefix } from "@vrtmrz/livesync-commonlib/compat/common/types";
 import { reactive, reactiveSource, type ReactiveSource } from "octagonal-wheels/dataobject/reactive";
 import {
     collectingChunks,
@@ -14,6 +14,7 @@ import {
 } from "@vrtmrz/livesync-commonlib/compat/mock_and_interop/stores";
 import type { LiveSyncCore } from "@/main.ts";
 import { compatGlobal } from "@vrtmrz/livesync-commonlib/compat/common/coreEnvFunctions";
+import type { ObsidianReplicatorService } from "@/modules/services/ObsidianServices";
 
 type MutableCommandDefinition = {
     callback?: () => void;
@@ -31,6 +32,19 @@ type AppWithInternalCommands = {
 type CodeMirrorAdapter = {
     commands: { save: () => void };
 };
+
+/** A view which writes its unsaved content to its file, as the Markdown editor does. */
+type SavableView = { save(): Promise<void>; file?: TFile | null };
+
+function isSavableView(view: unknown): view is SavableView {
+    return typeof view === "object" && view !== null && typeof (view as { save?: unknown }).save === "function";
+}
+
+// A storage event reaches the queue a moment after its file is written, so what was saved when the app was hidden
+// counts as stored once the queue has stayed empty, without a new event, for this long.
+const HIDDEN_STORE_QUIET_MS = 200;
+// Sending does not wait longer than this for the storage events; the synchronisation stores what is still queued.
+const HIDDEN_STORE_TIMEOUT_MS = 3_000;
 
 // A mobile WebView freezes network requests while the app is hidden. A request which was already in flight may
 // not settle until long after the app returns, and it keeps the replication queue busy until then. Requests which
@@ -143,6 +157,98 @@ export class ModuleObsidianEvents extends AbstractObsidianModule {
         );
     }
 
+    /**
+     * Whether hiding the app sends what was written: on the mobile app, which the system may freeze soon after, with
+     * an Object Storage remote. Other remotes and the desktop app keep their behaviour.
+     */
+    private sendsWhenHidden() {
+        return (
+            this.services.API.isMobile() &&
+            this.settings.remoteType == REMOTE_MINIO &&
+            !this.services.appLifecycle.isSuspended()
+        );
+    }
+
+    /** Save every open Markdown editor, so what was typed last reaches storage before the app is frozen. */
+    private async saveOpenEditors(): Promise<FilePathWithPrefix[]> {
+        const views = this.app.workspace.getLeavesOfType("markdown").map((leaf) => leaf.view as unknown);
+        const saved = await Promise.all(
+            views.filter(isSavableView).map(async (view) => {
+                try {
+                    const path = view.file?.path as FilePathWithPrefix | undefined;
+                    await view.save();
+                    return path;
+                } catch (ex) {
+                    this._log("Could not save an open editor while the app was hidden", LOG_LEVEL_VERBOSE);
+                    this._log(ex, LOG_LEVEL_VERBOSE);
+                    return undefined;
+                }
+            })
+        );
+        return [...new Set(saved.filter((path): path is FilePathWithPrefix => path !== undefined))];
+    }
+
+    /**
+     * Wait, for a few seconds at most, until queued storage events have been stored.
+     *
+     * Saved editor files are stored explicitly before this wait, so a late storage event cannot hide their content.
+     */
+    private async waitForStorageEventsToBeStored() {
+        const fileProcessing = this.services.fileProcessing;
+        const deadline = Date.now() + HIDDEN_STORE_TIMEOUT_MS;
+        let arrived = fileProcessing.totalStorageFileEventCount;
+        do {
+            await delay(HIDDEN_STORE_QUIET_MS);
+            await fileProcessing.commitPendingFileEvents();
+            const arrivedNow = fileProcessing.totalStorageFileEventCount;
+            if (arrivedNow === arrived && fileProcessing.totalQueued.value === 0) return;
+            arrived = arrivedNow;
+        } while (Date.now() < deadline);
+    }
+
+    /** Whether a storage change still waits to be stored, or the local database holds changes not sent yet. */
+    private async hasChangesToSend() {
+        if (this.services.fileProcessing.totalQueued.value > 0) return true;
+        return (await this.services.replicator.getActiveReplicator()?.hasUnsentLocalChanges()) ?? false;
+    }
+
+    /**
+     * Send what was written before the hidden mobile app is frozen.
+     *
+     * Hold local application activity across storing and sending so suspension waits for it. The replication service
+     * marks its own cycle as remote and finite; marking this outer operation remote would prevent stale-request
+     * recovery, while marking it finite would make pending chunk delivery wait for this operation itself.
+     * What cannot be sent now stays pending in the local database.
+     */
+    private sendChangesBeforeFrozen(savedEditorFiles: FilePathWithPrefix[]) {
+        fireAndForget(() =>
+            (this.services.replicator as ObsidianReplicatorService).runBoundedLocalApplicationActivity(
+                async () => {
+                    for (const path of savedEditorFiles) {
+                        try {
+                            if (!(await this.core.serviceModules.fileHandler.storeFileToDBUnderFileEventLock(path))) {
+                                this._log(
+                                    `Could not store saved editor ${path} before the app was hidden`,
+                                    LOG_LEVEL_NOTICE
+                                );
+                            }
+                        } catch (ex) {
+                            this._log(
+                                `Could not store saved editor ${path} before the app was hidden`,
+                                LOG_LEVEL_NOTICE
+                            );
+                            this._log(ex, LOG_LEVEL_VERBOSE);
+                        }
+                    }
+                    await this.waitForStorageEventsToBeStored();
+                    if (!(await this.hasChangesToSend())) return;
+                    await this.services.replication.replicate();
+                },
+                { label: "send-when-hidden" }
+            )
+        );
+    }
+
     private async applyDeferredBoundedActivityLifecycle() {
         if (this.hasBoundedActivity()) {
             this.deferLifecycleUntilBoundedActivityEnds();
@@ -249,11 +355,7 @@ export class ModuleObsidianEvents extends AbstractObsidianModule {
         // Taken before any awaited work, so requests started while the visible app handles this are never stale.
         const observedAt = Date.now();
         if (this.settings.suspendFileWatching) {
-            if (
-                this.settings.isConfigured &&
-                this.services.appLifecycle.isReady() &&
-                this.hasBoundedActivity()
-            ) {
+            if (this.settings.isConfigured && this.services.appLifecycle.isReady() && this.hasBoundedActivity()) {
                 const isHidden = activeWindow.document.hidden;
                 this.isLastHidden = isHidden;
                 this.deferredBoundedLifecycle = isHidden ? "suspend-if-hidden" : undefined;
@@ -283,7 +385,13 @@ export class ModuleObsidianEvents extends AbstractObsidianModule {
         }
         this.isLastHidden = isHidden;
 
+        // What was typed last may still be only in an editor; it is written before the pending events are committed.
+        const sendWhenHidden = isHidden && this.sendsWhenHidden();
+        const savedEditorFiles = sendWhenHidden ? await this.saveOpenEditors() : [];
+        // A visible event may have run while an editor save was pending. The older hide must not pause it.
+        if (isHidden && !activeWindow.document.hidden) return;
         await this.services.fileProcessing.commitPendingFileEvents();
+        if (isHidden && !activeWindow.document.hidden) return;
 
         // Desktop opt-in (LiveSync/Periodic only): keep the background channel running while the
         // window is hidden, instead of suspending on hide. On hide we skip the suspend for both
@@ -294,7 +402,9 @@ export class ModuleObsidianEvents extends AbstractObsidianModule {
 
         if (isHidden) {
             cancelTask(STALE_REMOTE_REQUEST_TASK);
-            if (boundedActivityInProgress && !keepActiveInBackground) {
+            if (sendWhenHidden) this.sendChangesBeforeFrozen(savedEditorFiles);
+            // Activity which is running now, including the sending just started, defers the suspension until it ends.
+            if (this.hasBoundedActivity() && !keepActiveInBackground) {
                 this.deferredBoundedLifecycle = "suspend-if-hidden";
                 this.deferLifecycleUntilBoundedActivityEnds();
             } else if (!keepActiveInBackground) {

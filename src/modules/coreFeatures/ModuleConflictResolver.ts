@@ -8,6 +8,7 @@ import {
     LOG_LEVEL_VERBOSE,
     MISSING_OR_ERROR,
     NOT_CONFLICTED,
+    REMOTE_MINIO,
     type diff_check_result,
     type FilePathWithPrefix,
 } from "@vrtmrz/livesync-commonlib/compat/common/types";
@@ -60,7 +61,8 @@ export class ModuleConflictResolver extends AbstractModule {
 
     async checkConflictAndPerformAutoMerge(path: FilePathWithPrefix): Promise<diff_check_result> {
         //
-        const ret = await this.localDatabase.tryAutoMerge(path, !this.settings.disableMarkdownAutoMerge);
+        const objectStorage = this.settings.remoteType === REMOTE_MINIO;
+        const ret = await this.localDatabase.tryAutoMerge(path, !this.settings.disableMarkdownAutoMerge, objectStorage);
         if ("ok" in ret) {
             return ret.ok;
         }
@@ -68,8 +70,9 @@ export class ModuleConflictResolver extends AbstractModule {
         if ("result" in ret) {
             const p = ret.result;
             // Merged content is coming.
-            // 1. Store the merged content to the storage
-            if (!(await this.core.databaseFileAccess.storeContent(path, p))) {
+            // 1. Store the merged content on the revision it was merged on, with the times of the merged leaves, so
+            //    every device which merges the same leaves stores the same revision.
+            if (!(await this.core.databaseFileAccess.storeContent(path, p, objectStorage ? ret.mergedOn : undefined))) {
                 this._log(`Merged content cannot be stored:${path}`, LOG_LEVEL_NOTICE);
                 return MISSING_OR_ERROR;
             }
@@ -96,7 +99,7 @@ export class ModuleConflictResolver extends AbstractModule {
         const isSame = leftLeaf.data == rightLeaf.data && leftLeaf.deleted == rightLeaf.deleted;
         const isBinary = !isPlainText(path);
         const alwaysNewer = this.settings.resolveConflictsByNewerFile;
-        if (isSame || isBinary || alwaysNewer) {
+        if (isSame || (!objectStorage && (isBinary || alwaysNewer))) {
             const result = compareMTime(leftLeaf.mtime, rightLeaf.mtime);
             let loser = leftLeaf;
             // if (lMtime > rMtime) {

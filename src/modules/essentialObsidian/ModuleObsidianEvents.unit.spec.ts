@@ -1,8 +1,9 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 
 import { ModuleObsidianEvents } from "./ModuleObsidianEvents";
-import { DEFAULT_SETTINGS, REMOTE_COUCHDB } from "@vrtmrz/livesync-commonlib/compat/common/types";
+import { DEFAULT_SETTINGS, REMOTE_COUCHDB, REMOTE_MINIO } from "@vrtmrz/livesync-commonlib/compat/common/types";
 import { reactiveSource } from "octagonal-wheels/dataobject/reactive";
+import { ObsidianReplicationService, ObsidianReplicatorService } from "@/modules/services/ObsidianServices";
 
 type SetupOptions = {
     settings?: Partial<typeof DEFAULT_SETTINGS>;
@@ -13,6 +14,8 @@ type SetupOptions = {
     // Platform is read via services.API.isMobile(); default desktop (false) so the feature applies.
     isMobile?: boolean;
     abortedStaleRequests?: number;
+    /** Whether the active replicator reports local changes which have not been sent. */
+    unsentLocalChanges?: boolean;
 };
 
 function setup(opts: SetupOptions) {
@@ -23,12 +26,39 @@ function setup(opts: SetupOptions) {
         onResuming: vi.fn(async () => true),
         onResumed: vi.fn(async () => true),
     };
-    const fileProcessing = { commitPendingFileEvents: vi.fn(async () => true) };
+    const fileProcessing = {
+        commitPendingFileEvents: vi.fn(async () => true),
+        totalQueued: reactiveSource(0),
+        totalStorageFileEventCount: 0,
+    };
     const boundedRemoteActivityCount = reactiveSource(0);
     const boundedLocalApplicationActivityCount = reactiveSource(0);
     const finiteReplicationActivityCount = reactiveSource(0);
     const abortStaleRemoteRequests = vi.fn((_startedBefore: number) => opts.abortedStaleRequests ?? 0);
+    const hasUnsentLocalChanges = vi.fn(async () => opts.unsentLocalChanges ?? false);
     const replicate = vi.fn(async () => true);
+    const storeFileToDBUnderFileEventLock = vi.fn(async (_path: string) => true);
+    // Counted before the task is awaited, as the replicator service does.
+    const runFiniteReplicationActivity = vi.fn(async (task: () => Promise<unknown>) => {
+        boundedRemoteActivityCount.value++;
+        finiteReplicationActivityCount.value++;
+        try {
+            return await task();
+        } finally {
+            finiteReplicationActivityCount.value--;
+            boundedRemoteActivityCount.value--;
+        }
+    });
+    const runBoundedLocalApplicationActivity = vi.fn(async (task: () => Promise<unknown>) => {
+        boundedLocalApplicationActivityCount.value++;
+        try {
+            return await task();
+        } finally {
+            boundedLocalApplicationActivityCount.value--;
+        }
+    });
+    const editor = { file: { path: "note.md" }, save: vi.fn(async () => undefined) };
+    const workspace = { getLeavesOfType: vi.fn((_type: string) => [{ view: editor }, { view: {} }]) };
 
     const core = {
         _services: {
@@ -47,7 +77,9 @@ function setup(opts: SetupOptions) {
                 boundedRemoteActivityCount,
                 boundedLocalApplicationActivityCount,
                 finiteReplicationActivityCount,
-                getActiveReplicator: () => ({ abortStaleRemoteRequests }),
+                getActiveReplicator: () => ({ abortStaleRemoteRequests, hasUnsentLocalChanges }),
+                runBoundedLocalApplicationActivity,
+                runFiniteReplicationActivity,
             },
             replication: { replicate },
         },
@@ -57,10 +89,11 @@ function setup(opts: SetupOptions) {
             isConfigured: true,
             ...opts.settings,
         },
+        serviceModules: { fileHandler: { storeFileToDBUnderFileEventLock } },
     } as any;
     Object.defineProperty(core, "services", { get: () => core._services });
 
-    const module = new ModuleObsidianEvents({} as any, core);
+    const module = new ModuleObsidianEvents({ app: { workspace } } as any, core);
     module.isLastHidden = opts.isLastHidden ?? false;
     module.hasFocus = opts.hasFocus ?? true;
 
@@ -74,8 +107,15 @@ function setup(opts: SetupOptions) {
         boundedRemoteActivityCount,
         boundedLocalApplicationActivityCount,
         finiteReplicationActivityCount,
+        runBoundedLocalApplicationActivity,
+        runFiniteReplicationActivity,
         abortStaleRemoteRequests,
+        hasUnsentLocalChanges,
         replicate,
+        storeFileToDBUnderFileEventLock,
+        editor,
+        workspace,
+        core,
     };
 }
 
@@ -484,5 +524,281 @@ describe("watchWindowVisibilityAsync — remote requests left waiting from the b
         await vi.advanceTimersByTimeAsync(10_000);
 
         expect(abortStaleRemoteRequests).toHaveBeenCalledExactlyOnceWith(visibleAt);
+    });
+});
+
+describe("watchWindowVisibilityAsync — sending what was written when the mobile app is hidden", () => {
+    const objectStorage = { remoteType: REMOTE_MINIO };
+
+    afterEach(() => {
+        vi.useRealTimers();
+        delete (globalThis as any).activeWindow;
+    });
+
+    function hideMobileApp(opts: Partial<SetupOptions> = {}) {
+        vi.useFakeTimers();
+        return setup({ settings: objectStorage, hidden: true, isMobile: true, ...opts });
+    }
+
+    it("saves the open editors before the pending storage events are committed", async () => {
+        const { module, editor, workspace, fileProcessing } = hideMobileApp();
+
+        await module.watchWindowVisibilityAsync();
+
+        expect(workspace.getLeavesOfType).toHaveBeenCalledWith("markdown");
+        expect(editor.save).toHaveBeenCalledOnce();
+        expect(editor.save.mock.invocationCallOrder[0]).toBeLessThan(
+            fileProcessing.commitPendingFileEvents.mock.invocationCallOrder[0]
+        );
+    });
+
+    it("sends changes which have not been sent, and suspends only once they are sent", async () => {
+        const { module, appLifecycle, replicate } = hideMobileApp({ unsentLocalChanges: true });
+        let finishSending!: () => void;
+        replicate.mockImplementationOnce(
+            () => new Promise<boolean>((resolve) => (finishSending = () => resolve(true)))
+        );
+
+        await module.watchWindowVisibilityAsync();
+        await vi.advanceTimersByTimeAsync(1_000);
+
+        expect(replicate).toHaveBeenCalledOnce();
+        expect(appLifecycle.onSuspending).not.toHaveBeenCalled();
+
+        finishSending();
+        await vi.waitFor(() => expect(appLifecycle.onSuspending).toHaveBeenCalledOnce());
+    });
+
+    it("lets the real replication coordinator finish readiness before the finite delivery activity starts", async () => {
+        const { module, core, appLifecycle, fileProcessing, storeFileToDBUnderFileEventLock } = setup({
+            settings: objectStorage,
+            hidden: true,
+            isMobile: true,
+        });
+        const context = { events: { emitEvent: vi.fn() }, translate: (key: string) => key } as never;
+        const getUnresolvedMessages = Object.assign(
+            vi.fn(async () => []),
+            { addHandler: vi.fn() }
+        );
+        Object.assign(appLifecycle, {
+            getUnresolvedMessages,
+            onLoaded: { addHandler: vi.fn() },
+            onResumed: Object.assign(appLifecycle.onResumed, { addHandler: vi.fn() }),
+        });
+        const settings = { currentSettings: () => core.settings };
+        const replicator = new ObsidianReplicatorService(context, {
+            settingService: settings,
+            appLifecycleService: appLifecycle,
+            databaseEventService: {},
+            registerLifecycleHandlers: false,
+            isMobile: () => true,
+        } as never);
+        const openReplication = vi.fn(async () => {
+            expect(replicator.finiteReplicationActivityCount.value).toBe(1);
+            expect(replicator.boundedRemoteActivityCount.value).toBe(1);
+            expect(replicator.boundedLocalApplicationActivityCount.value).toBe(1);
+            return true;
+        });
+        vi.spyOn(replicator, "getActiveReplicator").mockReturnValue({
+            hasUnsentLocalChanges: vi.fn(async () => true),
+            openReplication,
+        } as never);
+        let queueState: unknown;
+        const queueStore = {
+            get: vi.fn(async () => structuredClone(queueState)),
+            atomicUpdate: vi.fn(
+                async (_key: string, update: (value: unknown) => { value: unknown; result: unknown }) => {
+                    const changed = update(structuredClone(queueState));
+                    queueState = structuredClone(changed.value);
+                    return changed.result;
+                }
+            ),
+        };
+        const replication = new ObsidianReplicationService(context, {
+            APIService: { isOnline: true, isMobile: () => true, addLog: vi.fn() },
+            appLifecycleService: appLifecycle,
+            settingService: settings,
+            databaseService: {},
+            fileProcessingService: fileProcessing,
+            replicatorService: replicator,
+            replicationQueueStore: queueStore,
+        } as never);
+        const readinessFiniteCounts: number[] = [];
+        replication.onCheckReplicationReady.addHandler(async () => {
+            readinessFiniteCounts.push(replicator.finiteReplicationActivityCount.value);
+            return replicator.finiteReplicationActivityCount.value === 0;
+        });
+        core._services.replicator = replicator;
+        core._services.replication = replication;
+
+        await module.watchWindowVisibilityAsync();
+        await vi.waitFor(() => expect(openReplication).toHaveBeenCalledOnce(), { timeout: 2_500 });
+
+        expect(storeFileToDBUnderFileEventLock).toHaveBeenCalledWith("note.md");
+        expect(readinessFiniteCounts).toEqual([0]);
+        await vi.waitFor(() => expect(appLifecycle.onSuspending).toHaveBeenCalledOnce());
+        expect(replicator.boundedRemoteActivityCount.value).toBe(0);
+        expect(replicator.finiteReplicationActivityCount.value).toBe(0);
+        expect(replicator.boundedLocalApplicationActivityCount.value).toBe(0);
+    });
+
+    it("still checks a stale remote request after the app returns during the hidden send", async () => {
+        const {
+            module,
+            replicate,
+            boundedRemoteActivityCount,
+            boundedLocalApplicationActivityCount,
+            finiteReplicationActivityCount,
+            abortStaleRemoteRequests,
+        } = hideMobileApp({ unsentLocalChanges: true });
+        let finishReplication!: () => void;
+        replicate.mockImplementationOnce(async () => {
+            boundedRemoteActivityCount.value++;
+            finiteReplicationActivityCount.value++;
+            try {
+                await new Promise<void>((resolve) => (finishReplication = resolve));
+                return true;
+            } finally {
+                finiteReplicationActivityCount.value--;
+                boundedRemoteActivityCount.value--;
+            }
+        });
+
+        await module.watchWindowVisibilityAsync();
+        await vi.advanceTimersByTimeAsync(300);
+        expect(replicate).toHaveBeenCalledOnce();
+        expect(boundedLocalApplicationActivityCount.value).toBe(1);
+        expect(boundedRemoteActivityCount.value).toBe(1);
+
+        (globalThis as any).activeWindow.document.hidden = false;
+        await module.watchWindowVisibilityAsync();
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(abortStaleRemoteRequests).toHaveBeenCalledOnce();
+
+        finishReplication();
+        await vi.waitFor(() => expect(boundedLocalApplicationActivityCount.value).toBe(0));
+    });
+
+    it("sends nothing when nothing waits to be sent, and then suspends", async () => {
+        const { module, appLifecycle, replicate } = hideMobileApp({ unsentLocalChanges: false });
+
+        await module.watchWindowVisibilityAsync();
+        await vi.advanceTimersByTimeAsync(1_000);
+
+        await vi.waitFor(() => expect(appLifecycle.onSuspending).toHaveBeenCalledOnce());
+        expect(replicate).not.toHaveBeenCalled();
+    });
+
+    it("waits until a storage event which arrives after saving has been stored, and then sends it", async () => {
+        const { module, fileProcessing, hasUnsentLocalChanges, replicate, editor } = hideMobileApp({
+            unsentLocalChanges: false,
+        });
+        editor.save.mockImplementationOnce(async () => {
+            // The storage event of the write arrives and is queued a moment later, and is stored after that.
+            setTimeout(() => {
+                fileProcessing.totalStorageFileEventCount++;
+                fileProcessing.totalQueued.value = 1;
+            }, 150);
+            setTimeout(() => {
+                fileProcessing.totalQueued.value = 0;
+                hasUnsentLocalChanges.mockResolvedValue(true);
+            }, 350);
+        });
+
+        await module.watchWindowVisibilityAsync();
+        await vi.advanceTimersByTimeAsync(200);
+        expect(replicate).not.toHaveBeenCalled();
+
+        await vi.advanceTimersByTimeAsync(900);
+        expect(replicate).toHaveBeenCalledOnce();
+    });
+
+    it("stores saved editor content and sends it even when its storage event arrives after the old grace period", async () => {
+        const { module, fileProcessing, hasUnsentLocalChanges, replicate, storeFileToDBUnderFileEventLock, editor } =
+            hideMobileApp({
+                unsentLocalChanges: false,
+            });
+        let storageContent = "old content";
+        let databaseContent = "old content";
+        const sentContents: string[] = [];
+        editor.save.mockImplementationOnce(async () => {
+            storageContent = "last typed content";
+            setTimeout(() => {
+                fileProcessing.totalStorageFileEventCount++;
+                fileProcessing.totalQueued.value = 1;
+            }, 4_000);
+        });
+        storeFileToDBUnderFileEventLock.mockImplementationOnce(async (path) => {
+            expect(path).toBe("note.md");
+            databaseContent = storageContent;
+            hasUnsentLocalChanges.mockResolvedValue(true);
+            return true;
+        });
+        replicate.mockImplementationOnce(async () => {
+            sentContents.push(databaseContent);
+            return true;
+        });
+
+        await module.watchWindowVisibilityAsync();
+        await vi.advanceTimersByTimeAsync(300);
+        expect(storeFileToDBUnderFileEventLock).toHaveBeenCalledOnce();
+        expect(storeFileToDBUnderFileEventLock.mock.invocationCallOrder[0]).toBeLessThan(
+            hasUnsentLocalChanges.mock.invocationCallOrder[0]
+        );
+        expect(replicate).toHaveBeenCalledOnce();
+        expect(sentContents).toEqual(["last typed content"]);
+        expect(fileProcessing.totalStorageFileEventCount).toBe(0);
+    });
+
+    it("does not suspend when the app becomes visible while an editor save is pending", async () => {
+        const { module, appLifecycle, editor, replicate, storeFileToDBUnderFileEventLock } = hideMobileApp({
+            unsentLocalChanges: true,
+        });
+        let finishSave!: () => void;
+        editor.save.mockImplementationOnce(
+            () => new Promise<undefined>((resolve) => (finishSave = () => resolve(undefined)))
+        );
+
+        const hiding = module.watchWindowVisibilityAsync();
+        await vi.waitFor(() => expect(editor.save).toHaveBeenCalledOnce());
+        (globalThis as any).activeWindow.document.hidden = false;
+        await module.watchWindowVisibilityAsync();
+        finishSave();
+        await hiding;
+        await vi.advanceTimersByTimeAsync(3_000);
+
+        expect(appLifecycle.onSuspending).not.toHaveBeenCalled();
+        expect(replicate).not.toHaveBeenCalled();
+        expect(storeFileToDBUnderFileEventLock).not.toHaveBeenCalled();
+    });
+
+    it("sends what the queue still holds once it has waited long enough", async () => {
+        const { module, fileProcessing, replicate } = hideMobileApp({ unsentLocalChanges: false });
+        fileProcessing.totalQueued.value = 1;
+
+        await module.watchWindowVisibilityAsync();
+        await vi.advanceTimersByTimeAsync(2_800);
+        expect(replicate).not.toHaveBeenCalled();
+
+        await vi.advanceTimersByTimeAsync(400);
+        expect(replicate).toHaveBeenCalledOnce();
+    });
+
+    it.each([
+        ["on the desktop app", { isMobile: false }],
+        ["with a CouchDB remote", { settings: { remoteType: REMOTE_COUCHDB } }],
+        ["while synchronisation is suspended", { isSuspended: true }],
+    ])("neither saves nor sends %s", async (_, opts) => {
+        const { module, editor, replicate, storeFileToDBUnderFileEventLock } = hideMobileApp({
+            unsentLocalChanges: true,
+            ...opts,
+        });
+
+        await module.watchWindowVisibilityAsync();
+        await vi.advanceTimersByTimeAsync(3_000);
+
+        expect(editor.save).not.toHaveBeenCalled();
+        expect(storeFileToDBUnderFileEventLock).not.toHaveBeenCalled();
+        expect(replicate).not.toHaveBeenCalled();
     });
 });
