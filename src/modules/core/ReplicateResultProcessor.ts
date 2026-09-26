@@ -1,4 +1,5 @@
 import {
+    LARGE_FILE_BYTES,
     SYNCINFO_ID,
     VER,
     type AnyEntry,
@@ -9,6 +10,7 @@ import {
 } from "@vrtmrz/livesync-commonlib/compat/common/types";
 import type { ModuleReplicator } from "./ModuleReplicator";
 import { isChunk } from "@vrtmrz/livesync-commonlib/compat/common/typeUtils";
+import { stripAllPrefixes } from "@vrtmrz/livesync-commonlib/compat/string_and_binary/path";
 import {
     LOG_LEVEL_DEBUG,
     LOG_LEVEL_INFO,
@@ -39,6 +41,8 @@ type LocalApplicationActivityOwner = {
 type ReplicateResultProcessorState = {
     queued: PouchDB.Core.ExistingDocument<EntryDoc>[];
     processing: PouchDB.Core.ExistingDocument<EntryDoc>[];
+    /** Documents whose content could not be gathered yet. Snapshots of earlier versions do not have it. */
+    waiting?: PouchDB.Core.ExistingDocument<EntryDoc>[];
 };
 function shortenId(id: string): string {
     return id.length > 10 ? id.substring(0, 10) : id;
@@ -126,13 +130,19 @@ export class ReplicateResultProcessor {
      * This snapshot is stored in the KV database for recovery on restart.
      */
     protected async _takeSnapshot() {
+        // Until the snapshot of the previous run has been restored, it is the only record of that run's queue.
+        if (!this._snapshotRestored) {
+            this.reportStatus();
+            return;
+        }
         const snapshot = {
             queued: this._queuedChanges.slice(),
             processing: this._processingChanges.slice(),
+            waiting: [...this._waitingChanges.values()],
         } satisfies ReplicateResultProcessorState;
         await this.core.kvDB.set(KV_KEY_REPLICATION_RESULT_PROCESSOR_SNAPSHOT, snapshot);
         this.log(
-            `Snapshot taken. Queued: ${snapshot.queued.length}, Processing: ${snapshot.processing.length}`,
+            `Snapshot taken. Queued: ${snapshot.queued.length}, Processing: ${snapshot.processing.length}, Waiting: ${snapshot.waiting.length}`,
             LOG_LEVEL_DEBUG
         );
         this.reportStatus();
@@ -155,13 +165,20 @@ export class ReplicateResultProcessor {
         const snapshot = await this.core.kvDB.get<ReplicateResultProcessorState>(
             KV_KEY_REPLICATION_RESULT_PROCESSOR_SNAPSHOT
         );
+        // What the previous run left is part of this run's state from here on, so snapshots may replace it.
+        this._snapshotRestored = true;
         if (snapshot) {
+            // Documents which waited for their content go on waiting, and are tried again before the next synchronisation.
+            const waiting = snapshot.waiting ?? [];
+            for (const doc of waiting) {
+                if (!this._waitingChanges.has(doc._id)) this._waitingChanges.set(doc._id, doc);
+            }
             // Restoring the snapshot re-runs processing for both queued and processing items.
             const newQueue = [...snapshot.processing, ...snapshot.queued, ...this._queuedChanges];
             this._queuedChanges = [];
             this.enqueueAll(newQueue);
             this.log(
-                `Restored from snapshot (${snapshot.processing.length + snapshot.queued.length} items)`,
+                `Restored from snapshot (${snapshot.processing.length + snapshot.queued.length} items, ${waiting.length} waiting for their content)`,
                 LOG_LEVEL_INFO
             );
             // await this._takeSnapshot();
@@ -170,13 +187,22 @@ export class ReplicateResultProcessor {
 
     private _restoreFromSnapshot: Promise<void> | undefined = undefined;
 
+    /** Whether the snapshot of the previous run has been restored; no snapshot is taken before that. */
+    private _snapshotRestored = false;
+
     /**
      * Restore from snapshot only once.
+     *
+     * A restoration which fails is tried again by the next call. Until one succeeds, no snapshot is taken, so the
+     * stored queue of the previous run is not replaced.
      * @returns Promise that resolves when restoration is complete.
      */
     public restoreFromSnapshotOnce() {
         if (!this._restoreFromSnapshot) {
-            this._restoreFromSnapshot = this.restoreFromSnapshot();
+            this._restoreFromSnapshot = this.restoreFromSnapshot().catch((error: unknown) => {
+                this._restoreFromSnapshot = undefined;
+                throw error;
+            });
         }
         return this._restoreFromSnapshot;
     }
@@ -286,6 +312,50 @@ export class ReplicateResultProcessor {
      */
     private _processingChanges: PouchDB.Core.ExistingDocument<EntryDoc>[] = [];
 
+    /**
+     * Documents which could not be applied yet, by ID, until their revision is written or replaced.
+     *
+     * Usually their chunks have not arrived, for example after a receive was interrupted, and arrive with a later
+     * synchronisation, so they are queued again before each one. They are part of the snapshot, so they also survive
+     * a restart.
+     */
+    private _waitingChanges = new Map<string, PouchDB.Core.ExistingDocument<EntryDoc>>();
+
+    /**
+     * Queue the waiting documents again, before a synchronisation which may bring their chunks.
+     *
+     * A document which is already queued or being processed is left to that entry, which is at least as new.
+     */
+    public retryWaitingChanges() {
+        const busy = new Set([...this._queuedChanges, ...this._processingChanges].map((doc) => doc._id));
+        const waiting = [...this._waitingChanges.values()].filter((doc) => !busy.has(doc._id));
+        if (waiting.length === 0) return;
+        this.log(`Trying ${waiting.length} document(s) again which could not be applied yet`, LOG_LEVEL_INFO);
+        this.enqueueAll(waiting);
+    }
+
+    /**
+     * Keep a document which could not be applied, to try it again before the next synchronisation.
+     *
+     * Only the first failure of a revision is a notice; its repeats are logged quietly.
+     */
+    private keepWaiting(doc: PouchDB.Core.ExistingDocument<EntryDoc>, reason: string) {
+        const alreadyWaiting = this._waitingChanges.get(doc._id)?._rev === doc._rev;
+        this._waitingChanges.set(doc._id, doc);
+        this.log(
+            `${reason}; it is tried again before the next synchronisation`,
+            alreadyWaiting ? LOG_LEVEL_VERBOSE : LOG_LEVEL_NOTICE
+        );
+        this.triggerTakeSnapshot();
+    }
+
+    /** Stop waiting for a document once its waiting revision has been written, replaced, or cannot be applied at all. */
+    private stopWaiting(doc: { _id: string; _rev?: string }) {
+        if (this._waitingChanges.get(doc._id)?._rev !== doc._rev) return;
+        this._waitingChanges.delete(doc._id);
+        this.triggerTakeSnapshot();
+    }
+
     private _processingActivity?: Promise<void>;
     private _processingActivityDone?: PromiseWithResolvers<void>;
 
@@ -366,6 +436,34 @@ export class ReplicateResultProcessor {
     private _semaphore = Semaphore(10);
 
     /**
+     * Semaphore for documents of at least `LARGE_FILE_BYTES`, which are applied one at a time.
+     *
+     * Applying such a document can hold memory in proportion to its size, and several at once exhaust the memory of a
+     * mobile device. They do not take the slots of the other documents, which go on in parallel beside them.
+     */
+    private _largeDocumentSemaphore = Semaphore(1);
+
+    /**
+     * Whether applying a document can hold memory in proportion to a large file.
+     *
+     * That is so when the document is large, and also when the local file it replaces or deletes is, because a local
+     * file which may hold unsynchronised changes is read whole before it is replaced.
+     */
+    private async isLargeDocument(doc: PouchDB.Core.ExistingDocument<AnyEntry>): Promise<boolean> {
+        if (!isAnyNote(doc)) return false;
+        if ((doc.size ?? 0) >= LARGE_FILE_BYTES) return true;
+        try {
+            const local = await this.core.serviceModules.storageAccess.stat(
+                stripAllPrefixes(this.services.path.getPath(doc))
+            );
+            return (local?.size ?? 0) >= LARGE_FILE_BYTES;
+        } catch (error) {
+            this.logError(error);
+            return false;
+        }
+    }
+
+    /**
      * Flag indicating whether the process queue is currently running.
      */
     private _isRunningProcessQueue: boolean = false;
@@ -416,6 +514,7 @@ export class ReplicateResultProcessor {
      */
     async parseDocumentChange(change: PouchDB.Core.ExistingDocument<EntryDoc>) {
         try {
+            // A document which is skipped here is never applied, so it no longer waits either.
             if (isAnyNote(change)) {
                 const docMtime = change.mtime ?? 0;
                 const maxMTime = this.replicator.settings.maxMTimeForReflectEvents;
@@ -427,16 +526,21 @@ export class ReplicateResultProcessor {
                         ).toISOString()}) exceeding the limit`,
                         LOG_LEVEL_INFO
                     );
+                    this.stopWaiting(change);
                     return;
                 }
             }
             // If the document is a virtual document, process it in the virtual document processor.
-            if (await this.services.replication.processVirtualDocument(change)) return;
+            if (await this.services.replication.processVirtualDocument(change)) {
+                this.stopWaiting(change);
+                return;
+            }
             // If the document is version info, check compatibility and return.
             if (isAnyNote(change)) {
                 const docPath = this.getPath(change);
                 if (!(await this.services.vault.isTargetFile(docPath))) {
                     this.log(`Skipped: ${docPath}`, LOG_LEVEL_VERBOSE);
+                    this.stopWaiting(change);
                     return;
                 }
                 const size = change.size;
@@ -446,6 +550,7 @@ export class ReplicateResultProcessor {
                         `Processing ${docPath} has been skipped due to file size exceeding the limit`,
                         LOG_LEVEL_NOTICE
                     );
+                    this.stopWaiting(change);
                     return;
                 }
                 return await this.applyToDatabase(change);
@@ -476,7 +581,8 @@ export class ReplicateResultProcessor {
         return this.withCounting(async () => {
             let releaser: Awaited<ReturnType<typeof this._semaphore.acquire>> | undefined = undefined;
             try {
-                releaser = await this._semaphore.acquire();
+                const semaphore = (await this.isLargeDocument(doc)) ? this._largeDocumentSemaphore : this._semaphore;
+                releaser = await semaphore.acquire();
                 await this._applyToDatabase(doc);
             } catch (e) {
                 this.log(`Error while processing replication result`, LOG_LEVEL_NOTICE);
@@ -496,57 +602,94 @@ export class ReplicateResultProcessor {
         const path = this.getPath(dbDoc);
         return serialized(`replication-process:${dbDoc._id}`, async () => {
             const docNote = `${path} (${shortenId(dbDoc._id)}, ${shortenRev(dbDoc._rev)})`;
-            const isRequired = await this.checkIsChangeRequiredForDatabaseProcessing(dbDoc);
-            if (!isRequired) {
+            const requirement = await this.checkChangeRequirement(dbDoc);
+            if (requirement === "superseded") {
                 this.log(`Skipped (Not latest): ${docNote}`, LOG_LEVEL_VERBOSE);
+                this.stopWaiting(dbDoc);
                 return;
             }
+            if (requirement === "unknown") {
+                // A failed check says nothing about whether the revision is still the latest.
+                this.keepWaiting(doc_, `Could not check whether ${docNote} is the latest revision`);
+                return;
+            }
+            // A document which no longer exists locally cannot be completed later, so it does not wait.
+            if (requirement === "missing") this.stopWaiting(dbDoc);
             // If `Read chunks online` is disabled, chunks should be transferred before here.
             // However, in some cases, chunks are after that. So, if missing chunks exist, we have to wait for them.
             // (If `Use Only Local Chunks` is enabled, we should not attempt to fetch chunks online automatically).
 
             const isDeleted = dbDoc._deleted === true || ("deleted" in dbDoc && dbDoc.deleted === true);
             // Gather full document if not deleted
-            const doc = isDeleted
-                ? { ...dbDoc, data: "" }
-                : await this.localDatabase.getDBEntryFromMeta({ ...dbDoc }, false, true);
+            const doc = isDeleted ? { ...dbDoc, data: "" } : await this.gatherContent(dbDoc);
             if (!doc) {
-                // Failed to gather content
-                this.log(`Failed to gather content of ${docNote}`, LOG_LEVEL_NOTICE);
+                // Usually its chunks have not arrived, and nothing is receiving them now.
+                if (requirement === "missing") {
+                    this.log(`Failed to gather content of ${docNote}, which no longer exists`, LOG_LEVEL_VERBOSE);
+                } else {
+                    this.keepWaiting(doc_, `Failed to gather content of ${docNote}`);
+                }
                 return;
             }
+            // A waiting document stops waiting only once it has been written or can never be, so a failed write is
+            // tried again.
+            let settled: boolean;
             // Check if other processor wants to process this document, if so, skip processing here.
             if (await this.services.replication.processOptionalSynchroniseResult(dbDoc)) {
                 // Already processed
                 this.log(`Processed by other processor: ${docNote}`, LOG_LEVEL_DEBUG);
+                settled = true;
             } else if (this.services.vault.isValidPath(this.getPath(doc))) {
                 // Apply to storage if the path is valid
-                await this.applyToStorage(doc as MetaEntry);
+                settled = await this.applyToStorage(doc as MetaEntry);
                 this.log(`Processed: ${docNote}`, LOG_LEVEL_DEBUG);
             } else {
                 // Should process, but have an invalid path
                 this.log(`Unprocessed (Invalid path): ${docNote}`, LOG_LEVEL_VERBOSE);
+                settled = true;
             }
+            if (settled) this.stopWaiting(dbDoc);
             return;
         });
     }
+
+    /**
+     * Gather what applying a document needs, or false while its chunks are not all available.
+     *
+     * A large binary document which can be written in parts is only checked, without holding its content, and its
+     * metadata is applied; the file handler then writes it in parts. Other documents are loaded whole.
+     * A failed load is logged quietly here, because the caller reports it once.
+     */
+    private async gatherContent(dbDoc: LoadedEntry): Promise<LoadedEntry | false> {
+        if (isAnyNote(dbDoc) && (dbDoc.size ?? 0) >= LARGE_FILE_BYTES) {
+            const availability = await this.localDatabase.inspectDBEntryBinaryContent(dbDoc, true);
+            if (availability === "streamable") return { ...dbDoc, data: "" };
+            if (availability === "missing") return false;
+        }
+        return await this.localDatabase.getDBEntryFromMeta({ ...dbDoc }, false, true, LOG_LEVEL_VERBOSE);
+    }
+
     /**
      * Phase 3: Apply the given entry to storage.
      * @param entry
-     * @returns
+     * @returns Whether the entry was applied to storage
      */
-    protected applyToStorage(entry: MetaEntry) {
+    protected applyToStorage(entry: MetaEntry): Promise<boolean> {
         return this.withCounting(async () => {
-            await this.services.replication.processSynchroniseResult(entry);
+            return await this.services.replication.processSynchroniseResult(entry);
         }, this.services.replication.storageApplyingCount);
     }
 
     /**
      * Check whether processing is required for the given document.
      * @param dbDoc Document to check
-     * @returns True if processing is required; false otherwise
+     * @returns `required` when it has to be processed; `superseded` when a later revision has already been processed;
+     *     `missing` when the document no longer exists locally, which is still processed but never waits; `unknown` when
+     *     the check failed
      */
-    protected async checkIsChangeRequiredForDatabaseProcessing(dbDoc: LoadedEntry): Promise<boolean> {
+    protected async checkChangeRequirement(
+        dbDoc: LoadedEntry
+    ): Promise<"required" | "superseded" | "missing" | "unknown"> {
         const path = this.getPath(dbDoc);
         try {
             const savedDoc = await this.localDatabase.getRaw<LoadedEntry>(dbDoc._id, {
@@ -559,31 +702,31 @@ export class ReplicateResultProcessor {
             if (savedDoc._conflicts && savedDoc._conflicts.length > 0) {
                 // There are conflicts, so we have to process it.
                 // (May auto-resolve or user intervention will be occurred).
-                return true;
+                return "required";
             }
             if (newRev == latestRev) {
                 // The latest revision. Simply we can process it.
-                return true;
+                return "required";
             }
             const index = revisions.indexOf(newRev);
             if (index >= 0) {
                 // The revision has been inserted before.
-                return false; // This means that the document already processed (While no conflict existed).
+                return "superseded"; // This means that the document already processed (While no conflict existed).
             }
-            return true; // This mostly should not happen, but we have to process it just in case.
+            return "required"; // This mostly should not happen, but we have to process it just in case.
         } catch (e) {
             if (isNotFoundError(e)) {
                 // getRaw failed due to not existing, it may not be happened normally especially on replication.
                 // If the process caused by some other reason, we **probably** have to process it.
                 // Note that this is not a common case.
-                return true;
+                return "missing";
             } else {
                 this.log(
                     `Failed to get existing document for ${path} (${shortenId(dbDoc._id)}, ${shortenRev(dbDoc._rev)}) `,
-                    LOG_LEVEL_NOTICE
+                    LOG_LEVEL_VERBOSE
                 );
                 this.logError(e);
-                return false;
+                return "unknown";
             }
         }
     }

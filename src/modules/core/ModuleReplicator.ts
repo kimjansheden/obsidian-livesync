@@ -1,7 +1,7 @@
 import type PouchDB from "pouchdb-core";
 import { fireAndForget } from "octagonal-wheels/promises";
 import { AbstractModule } from "@/modules/AbstractModule";
-import { Logger, LOG_LEVEL_NOTICE, LOG_LEVEL_INFO } from "octagonal-wheels/common/logger";
+import { Logger, LOG_LEVEL_NOTICE, LOG_LEVEL_INFO, LOG_LEVEL_VERBOSE } from "octagonal-wheels/common/logger";
 import { skipIfDuplicated } from "octagonal-wheels/concurrency/lock";
 import { balanceChunkPurgedDBs } from "@vrtmrz/livesync-commonlib/compat/pouchdb/chunks";
 import { purgeUnreferencedChunks } from "@vrtmrz/livesync-commonlib/compat/pouchdb/chunks";
@@ -141,6 +141,8 @@ export class ModuleReplicator extends AbstractModule {
 
     async _everyBeforeReplicate(showMessage: boolean): Promise<boolean> {
         await this.processor.restoreFromSnapshotOnce();
+        // Documents whose chunks had not arrived are tried again beside the synchronisation which may bring them.
+        this.processor.retryWaitingChanges();
         this.clearErrors();
         return true;
     }
@@ -276,9 +278,17 @@ Even if you choose to clean up, you will see this option again if you exit Obsid
     //     return await shareRunningResult(`replication`, () => this.services.replication.replicate());
     // }
 
-    _parseReplicationResult(docs: Array<PouchDB.Core.ExistingDocument<EntryDoc>>): Promise<boolean> {
+    async _parseReplicationResult(docs: Array<PouchDB.Core.ExistingDocument<EntryDoc>>): Promise<boolean> {
+        // The start-up scan hands over documents it could not write before the database is initialised. The queue of
+        // the previous run is restored first, so its snapshot is not replaced by one which lacks it.
+        try {
+            await this.processor.restoreFromSnapshotOnce();
+        } catch (e) {
+            Logger(`Could not restore the queue of replication results before queueing more`, LOG_LEVEL_INFO);
+            Logger(e, LOG_LEVEL_VERBOSE);
+        }
         this.processor.enqueueAll(docs);
-        return Promise.resolve(true);
+        return true;
     }
 
     // _everyBeforeSuspendProcess(): Promise<boolean> {
