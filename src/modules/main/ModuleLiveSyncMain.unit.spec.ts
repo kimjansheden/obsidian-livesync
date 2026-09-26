@@ -247,7 +247,7 @@ describe("ModuleLiveSyncMain start-up", () => {
         expect(unqueued.phases).toEqual(COMPLETE_STARTUP);
     });
 
-    it("starts as before when the start-up scan could write every file", async () => {
+    it("completes start-up without a retry line when the start-up scan could write every file", async () => {
         const { module, phases, parseSynchroniseResult, startupLog } = createStartupHarness({ chunksArrived: true });
 
         await expect(module._onLiveSyncReady()).resolves.toBe(true);
@@ -261,7 +261,7 @@ describe("ModuleLiveSyncMain start-up", () => {
         ["the local database is not ready", { databaseReady: false }],
         ["the start-up scan could not run", { configured: false }],
         ["an error follows the aggregate result of the scan", { failInitialisedMark: true }],
-    ])("stops start-up as before when %s", async (_case, options) => {
+    ])("stops start-up when %s", async (_case, options) => {
         const { module, services, phases } = createStartupHarness({ chunksArrived: false, ...options });
 
         await expect(module._onLiveSyncReady()).resolves.toBe(false);

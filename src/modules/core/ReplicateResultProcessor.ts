@@ -657,7 +657,7 @@ export class ReplicateResultProcessor {
      * Gather what applying a document needs, or false while its chunks are not all available.
      *
      * A large binary document which can be written in parts is only checked, without holding its content, and its
-     * metadata is applied; the file handler then writes it in parts. Other documents are loaded whole, as before.
+     * metadata is applied; the file handler then writes it in parts. Other documents are loaded whole.
      * A failed load is logged quietly here, because the caller reports it once.
      */
     private async gatherContent(dbDoc: LoadedEntry): Promise<LoadedEntry | false> {
@@ -684,8 +684,8 @@ export class ReplicateResultProcessor {
      * Check whether processing is required for the given document.
      * @param dbDoc Document to check
      * @returns `required` when it has to be processed; `superseded` when a later revision has already been processed;
-     *     `missing` when the document no longer exists locally, which is processed as before; `unknown` when the check
-     *     failed
+     *     `missing` when the document no longer exists locally, which is still processed but never waits; `unknown` when
+     *     the check failed
      */
     protected async checkChangeRequirement(
         dbDoc: LoadedEntry

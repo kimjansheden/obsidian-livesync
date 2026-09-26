@@ -373,7 +373,7 @@ describe("ReplicateResultProcessor with large documents", () => {
         expect(processSynchroniseResult).toHaveBeenCalledWith(expect.objectContaining({ _id: "archive", data: "" }));
     });
 
-    it("loads a large document which cannot be written in parts, as before", async () => {
+    it("loads a large document whole when it cannot be written in parts", async () => {
         const { state, processor, processSynchroniseResult, getDBEntryFromMeta } = setup();
         state.streamable = false;
 
