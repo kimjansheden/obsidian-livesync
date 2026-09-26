@@ -1,5 +1,6 @@
 import { fireAndForget } from "octagonal-wheels/promises";
 import {
+    LOG_LEVEL_INFO,
     LOG_LEVEL_NOTICE,
     LOG_LEVEL_VERBOSE,
     type ObsidianLiveSyncSettings,
@@ -17,8 +18,34 @@ import type { InjectableServiceHub } from "@vrtmrz/livesync-commonlib/compat/ser
 import type { LiveSyncCore } from "@/main.ts";
 import { initialiseWorkerModule } from "@vrtmrz/livesync-commonlib/compat/worker/bgWorker";
 import { manifestVersion, packageVersion } from "@vrtmrz/livesync-commonlib/compat/common/coreEnvVars";
+import type { VaultScanOutcome } from "@vrtmrz/livesync-commonlib/compat/services/base/IService";
 
 export class ModuleLiveSyncMain extends AbstractModule {
+    /**
+     * State which files the start-up scan could not process, and how and when each is tried again.
+     *
+     * Start-up continues regardless: a file whose chunks have not arrived yet, for example after a receive was
+     * interrupted, cannot be written, and the synchronisation which brings them starts only once start-up has completed.
+     */
+    private logFilesTriedAgain(outcome: VaultScanOutcome) {
+        const failed = outcome.failedPairs ?? 0;
+        if (failed === 0) return;
+        const written = outcome.queuedForReflection ?? 0;
+        const stored = outcome.queuedAsStorageEvents ?? 0;
+        const nextScan = failed - written - stored;
+        const retries = [
+            written > 0
+                ? `${written} to be written from the database by the queue of received changes, which tries one whose chunks have not arrived again before each synchronisation, also after a restart`
+                : "",
+            stored > 0 ? `${stored} to be stored into the database from the storage events queued again` : "",
+            nextScan > 0 ? `${nextScan} at the next full scan` : "",
+        ].filter((retry) => retry !== "");
+        this._log(
+            `The start-up scan could not process ${failed} file(s), and start-up continues. They are tried again: ${retries.join("; ")}.`,
+            LOG_LEVEL_INFO
+        );
+    }
+
     async _onLiveSyncReady() {
         if (!(await this.core.services.appLifecycle.onLayoutReady())) return false;
         eventHub.emitEvent(EVENT_LAYOUT_READY);
@@ -42,11 +69,17 @@ export class ModuleLiveSyncMain extends AbstractModule {
                 return false;
             }
         }
-        const isInitialized = await this.services.databaseEvents.initialiseDatabase(false, false);
+        // Start-up continues when only individual files of the scan failed; the preparation then completes itself.
+        const scanOutcome: VaultScanOutcome = {};
+        const isInitialized = await this.services.databaseEvents.initialiseDatabase(false, false, false, {
+            completeAfterFailedPairs: true,
+            scanOutcome,
+        });
         if (!isInitialized) {
             //TODO:stop all sync.
             return false;
         }
+        this.logFilesTriedAgain(scanOutcome);
         if (!(await this.core.services.appLifecycle.onFirstInitialise())) return false;
         // await this.core.$$realizeSettingSyncMode();
         await this.services.control.applySettings();
