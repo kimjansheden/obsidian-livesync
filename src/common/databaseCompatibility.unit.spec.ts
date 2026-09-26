@@ -170,7 +170,7 @@ describe("packaged Commonlib compatibility gate", () => {
         const openReplication = vi.fn().mockResolvedValue(true);
         const runFiniteReplicationActivity = vi.fn(async (task: () => unknown) => await task());
         const dependencies = {
-            APIService: { isOnline: true, addLog: vi.fn() },
+            APIService: { isOnline: true, addLog: vi.fn(), isMobile: vi.fn(() => false) },
             appLifecycleService: {
                 isReady: () => true,
                 onLoaded: { addHandler: vi.fn() },

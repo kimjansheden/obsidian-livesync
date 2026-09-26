@@ -177,7 +177,8 @@ function createStartupHarness(options: StartupOptions) {
                 ),
                 ...(options.queuesStorageEvents ? { appendStorageEvents } : {}),
             },
-            fileHandler: { dbToStorage, storeFileToDB },
+            // The scan stores a file under the lock of its storage events.
+            fileHandler: { dbToStorage, storeFileToDBUnderFileEventLock: storeFileToDB },
         },
     };
     // The preparation, the scan and the start-up reach only the members these fakes provide.

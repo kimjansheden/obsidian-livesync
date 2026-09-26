@@ -5,6 +5,8 @@ import {
     LOG_LEVEL_INFO,
     LOG_LEVEL_NOTICE,
     MISSING_OR_ERROR,
+    REMOTE_COUCHDB,
+    REMOTE_MINIO,
     type FilePathWithPrefix,
     type MetaEntry,
 } from "@vrtmrz/livesync-commonlib/compat/common/types";
@@ -43,7 +45,7 @@ function createModule(files: FilePathWithPrefix[] = []) {
                 getActiveFilePath: vi.fn(() => undefined),
             },
         },
-        settings: DEFAULT_SETTINGS,
+        settings: { ...DEFAULT_SETTINGS, remoteType: REMOTE_MINIO },
         fileHandler: {
             deleteRevisionFromDB: vi.fn(async () => true),
             dbToStorage: vi.fn(async () => true),
@@ -189,6 +191,48 @@ describe("ModuleConflictResolver independent same-path creation", () => {
     });
 });
 
+describe("ModuleConflictResolver remote conflict policy", () => {
+    it.each([
+        ["binary content", "image.png", false],
+        ["newer-file setting", "note.md", true],
+    ])("keeps different %s for a manual Object Storage decision", async (_, name, newerFile) => {
+        const { module, resolveByDeletingRevision, tryAutoMerge } = createModule();
+        module.core.settings.remoteType = REMOTE_MINIO;
+        module.core.settings.resolveConflictsByNewerFile = newerFile;
+        const path = name as FilePathWithPrefix;
+        tryAutoMerge.mockResolvedValue({
+            leftRev: "1-left",
+            rightRev: "1-right",
+            leftLeaf: { rev: "1-left", data: "left", mtime: 1, deleted: false },
+            rightLeaf: { rev: "1-right", data: "right", mtime: 2, deleted: false },
+        });
+
+        const result = await module.checkConflictAndPerformAutoMerge(path);
+
+        expect(result).toHaveProperty("diff");
+        expect(resolveByDeletingRevision).not.toHaveBeenCalled();
+        expect(tryAutoMerge).toHaveBeenCalledWith(path, true, true);
+    });
+
+    it("keeps CouchDB's newer-file conflict resolution", async () => {
+        const { module, resolveByDeletingRevision, tryAutoMerge } = createModule();
+        module.core.settings.remoteType = REMOTE_COUCHDB;
+        module.core.settings.resolveConflictsByNewerFile = true;
+        const path = "note.md" as FilePathWithPrefix;
+        tryAutoMerge.mockResolvedValue({
+            leftRev: "1-left",
+            rightRev: "1-right",
+            leftLeaf: { rev: "1-left", data: "left", mtime: 1, deleted: false },
+            rightLeaf: { rev: "1-right", data: "right", mtime: 2, deleted: false },
+        });
+
+        await module.checkConflictAndPerformAutoMerge(path);
+
+        expect(resolveByDeletingRevision).toHaveBeenCalledOnce();
+        expect(tryAutoMerge).toHaveBeenCalledWith(path, true, false);
+    });
+});
+
 describe("ModuleConflictResolver sensible merge hand-off", () => {
     it("keeps an unreadable non-winner revision unresolved", async () => {
         const path = "missing-conflict-body.md" as FilePathWithPrefix;
@@ -212,20 +256,24 @@ describe("ModuleConflictResolver sensible merge hand-off", () => {
         expect(resolveByDeletingRevision).not.toHaveBeenCalled();
     });
 
-    it("stores the merged body and removes the resolved conflict leaf", async () => {
+    it("stores the merged body on the revision it was merged on, and removes the resolved conflict leaf", async () => {
         const path = "sensible.md" as FilePathWithPrefix;
         const { module, resolveByDeletingRevision, tryAutoMerge } = createModule();
+        const mergedOn = { revision: "2-left", ctime: 10, mtime: 30 };
         tryAutoMerge.mockResolvedValue({
             result: "Title\nLeft changed\nRight changed\n",
             conflictedRev: "2-right",
+            mergedOn,
         });
 
         const result = await module.checkConflictAndPerformAutoMerge(path);
 
         expect(result).toBe(AUTO_MERGED);
+        // The same revision and times on every device let their identical merges become one revision.
         expect(module.core.databaseFileAccess.storeContent).toHaveBeenCalledWith(
             path,
-            "Title\nLeft changed\nRight changed\n"
+            "Title\nLeft changed\nRight changed\n",
+            mergedOn
         );
         expect(resolveByDeletingRevision).toHaveBeenCalledWith(path, "2-right", "Sensible");
     });
@@ -240,16 +288,18 @@ describe("ModuleConflictResolver sensible merge hand-off", () => {
             leftLeaf: { rev: "3-merged", data: "Merged\n", ctime: 1, mtime: 3 },
             rightLeaf: { rev: "2-third", data: "Overlapping\n", ctime: 1, mtime: 2 },
         };
+        const mergedOn = { revision: "2-first", ctime: 1, mtime: 3 };
         tryAutoMerge
             .mockResolvedValueOnce({
                 result: "Merged\n",
                 conflictedRev: "2-second",
+                mergedOn,
             })
             .mockResolvedValueOnce(remainingManualPair);
 
         await (module as any)._resolveConflict(path);
 
-        expect(module.core.databaseFileAccess.storeContent).toHaveBeenCalledWith(path, "Merged\n");
+        expect(module.core.databaseFileAccess.storeContent).toHaveBeenCalledWith(path, "Merged\n", mergedOn);
         expect(resolveByDeletingRevision).toHaveBeenCalledWith(path, "2-second", "Sensible");
         expect(queueCheckFor).toHaveBeenCalledWith(path);
         expect(resolveByUserInteraction).not.toHaveBeenCalled();

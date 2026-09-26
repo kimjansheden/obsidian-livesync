@@ -1323,7 +1323,10 @@ describe("Red Flag Feature", () => {
                         },
                     ]),
                 });
-                Object.assign(host.serviceModules, { fileHandler: { storeFileToDB, dbToStorage } });
+                // The scan stores a file under the lock of its storage events.
+                Object.assign(host.serviceModules, {
+                    fileHandler: { storeFileToDBUnderFileEventLock: storeFileToDB, dbToStorage },
+                });
                 host.mocks.setting.settings.maxMTimeForReflectEvents = maxMTimeForReflectEvents;
                 host.mocks.tweakValue.fetchRemotePreferred.mockResolvedValue(
                     availableRemoteTweaks({ batchSave: false })
