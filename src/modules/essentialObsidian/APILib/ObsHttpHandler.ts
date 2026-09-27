@@ -102,6 +102,7 @@ export class ObsHttpHandler extends FetchHttpHandler {
             method: method,
             url: url,
             contentType: contentType,
+            throw: false,
         };
 
         const raceOfPromises = [

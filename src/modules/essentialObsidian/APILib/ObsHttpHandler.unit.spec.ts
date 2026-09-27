@@ -1,9 +1,13 @@
+import { GetObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { HttpRequest } from "@smithy/protocol-http";
+import type { BucketSyncSetting } from "@vrtmrz/livesync-commonlib/compat/common/types";
+import type { LiveSyncJournalReplicatorEnv } from "@vrtmrz/livesync-commonlib/compat/replication/journal/LiveSyncJournalReplicatorEnv";
+import { MinioStorageAdapter } from "@vrtmrz/livesync-commonlib/compat/replication/journal/objectstore/MinioStorageAdapter";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const requestUrlMock = vi.hoisted(() =>
     vi.fn<
-        (param: { body?: string | ArrayBuffer }) => Promise<{
+        (param: { body?: string | ArrayBuffer; throw?: boolean }) => Promise<{
             headers: Record<string, string>;
             status: number;
             arrayBuffer: ArrayBuffer;
@@ -26,6 +30,71 @@ function requestWithBody(body: unknown) {
         headers: {},
         body,
     });
+}
+
+// Like Obsidian's requestUrl, reject an error status unless the caller passes `throw: false`.
+function mockS3ErrorResponse(status: number, code?: string) {
+    requestUrlMock.mockImplementation(async (param) => {
+        if (param.throw !== false) {
+            throw new Error(`Request failed, status ${status}`);
+        }
+        return {
+            headers: { "content-type": "application/xml" },
+            status,
+            arrayBuffer: new TextEncoder().encode(code ? `<Error><Code>${code}</Code></Error>` : "").buffer,
+        };
+    });
+}
+
+function createS3Client() {
+    return new S3Client({
+        region: "us-east-1",
+        credentials: {
+            accessKeyId: "access-key",
+            secretAccessKey: "secret-key",
+        },
+        endpoint: "https://objects.example.com",
+        forcePathStyle: true,
+        maxAttempts: 1,
+        requestHandler: new ObsHttpHandler(),
+    });
+}
+
+function getMissingObject(client: S3Client) {
+    return client.send(
+        new GetObjectCommand({
+            Bucket: "bucket",
+            Key: "missing.json",
+        })
+    );
+}
+
+const SYNC_PARAMETERS_KEY = "_obsidian_livesync_journal_sync_parameters.json";
+const MILESTONE_KEY = "_00000000-milestone.json";
+
+function createStorageThroughCustomHandler() {
+    const settings: BucketSyncSetting = {
+        accessKey: "access-key",
+        secretKey: "secret-key",
+        bucket: "bucket",
+        region: "auto",
+        endpoint: "https://objects.example.com",
+        useCustomRequestHandler: true,
+        bucketCustomHeaders: "",
+        bucketPrefix: "",
+        forcePathStyle: true,
+    };
+    const handler = new ObsHttpHandler();
+    const env = {
+        services: {
+            API: {
+                requestCount: { value: 0 },
+                responseCount: { value: 0 },
+                getCustomFetchHandler: () => handler,
+            },
+        },
+    } as unknown as LiveSyncJournalReplicatorEnv;
+    return new MinioStorageAdapter(settings, env);
 }
 
 describe("ObsHttpHandler request bodies", () => {
@@ -56,5 +125,86 @@ describe("ObsHttpHandler request bodies", () => {
             "Obsidian requestUrl does not support the request body type ReadableStream"
         );
         expect(requestUrlMock).not.toHaveBeenCalled();
+    });
+});
+
+describe("ObsHttpHandler response handling", () => {
+    beforeEach(() => {
+        requestUrlMock.mockReset();
+    });
+
+    it("returns an HTTP error response to the Smithy client", async () => {
+        mockS3ErrorResponse(404, "NoSuchKey");
+        const request = new HttpRequest({
+            protocol: "https:",
+            hostname: "objects.example.com",
+            method: "GET",
+            path: "/bucket/missing.json",
+            headers: {},
+        });
+
+        const result = await new ObsHttpHandler().handle(request);
+
+        expect(requestUrlMock).toHaveBeenCalledWith(expect.objectContaining({ throw: false }));
+        expect(result.response.statusCode).toBe(404);
+    });
+
+    it.each([
+        { code: "NoSuchKey", name: "NoSuchKey" },
+        { code: undefined, name: "NotFound" },
+    ])("lets the S3 client classify a missing object as $name", async ({ code, name }) => {
+        mockS3ErrorResponse(404, code);
+
+        await expect(getMissingObject(createS3Client())).rejects.toMatchObject({
+            name,
+            $metadata: { httpStatusCode: 404 },
+        });
+    });
+
+    it.each([
+        { status: 403, code: "AccessDenied" },
+        { status: 500, code: "InternalError" },
+    ])("keeps an S3 $status response distinct from a missing object", async ({ status, code }) => {
+        mockS3ErrorResponse(status, code);
+
+        await expect(getMissingObject(createS3Client())).rejects.toMatchObject({
+            name: code,
+            $metadata: { httpStatusCode: status },
+        });
+    });
+
+    it("preserves a transport failure", async () => {
+        const failure = new Error("network failed");
+        requestUrlMock.mockRejectedValue(failure);
+
+        await expect(new ObsHttpHandler().handle(requestWithBody(new ArrayBuffer(0)))).rejects.toBe(failure);
+    });
+});
+
+describe("Object Storage reads through the custom handler", () => {
+    beforeEach(() => {
+        requestUrlMock.mockReset();
+    });
+
+    it.each([SYNC_PARAMETERS_KEY, MILESTONE_KEY])(
+        "reports %s as absent when a new remote does not have it",
+        async (key) => {
+            mockS3ErrorResponse(404, "NoSuchKey");
+
+            const result = await createStorageThroughCustomHandler().downloadWithResult(key, true);
+
+            expect(result).toEqual({ status: "not-found" });
+        }
+    );
+
+    it("reports a denied read as unreadable", async () => {
+        mockS3ErrorResponse(403, "AccessDenied");
+
+        const result = await createStorageThroughCustomHandler().downloadWithResult(SYNC_PARAMETERS_KEY, true);
+
+        expect(result).toMatchObject({
+            status: "unavailable",
+            error: { name: "AccessDenied", $metadata: { httpStatusCode: 403 } },
+        });
     });
 });
