@@ -589,6 +589,33 @@ describe("ReplicateResultProcessor with documents which cannot be applied yet", 
         await vi.waitFor(() => expect(waitingInLatestSnapshot(restarted.setSnapshot)).toEqual([]));
     });
 
+    it.each(["returns false", "throws"])(
+        "retries a deletion with missing metadata whose storage write %s",
+        async (failure) => {
+            let writes = 0;
+            const first = setup({
+                processSynchroniseResult: async () => {
+                    if (++writes === 1) {
+                        if (failure === "throws") throw new Error("storage is temporarily unavailable");
+                        return false;
+                    }
+                    return true;
+                },
+            });
+            first.state.lookupFailure = "not-found";
+            first.processor.enqueueAll([{ ...note("one"), _deleted: true }]);
+            await vi.waitFor(() => expect(first.processSynchroniseResult).toHaveBeenCalledOnce());
+            await vi.waitFor(() => expect(waitingInLatestSnapshot(first.setSnapshot)).toEqual(["one"]));
+
+            const restarted = setup({ getSnapshot: async () => latestSnapshot(first.setSnapshot) });
+            restarted.state.lookupFailure = "not-found";
+            await restarted.processor.restoreFromSnapshotOnce();
+            restarted.processor.retryWaitingChanges();
+            await vi.waitFor(() => expect(restarted.processSynchroniseResult).toHaveBeenCalledOnce());
+            await vi.waitFor(() => expect(waitingInLatestSnapshot(restarted.setSnapshot)).toEqual([]));
+        }
+    );
+
     it("does not retry an older revision after its first storage write fails", async () => {
         const { state, processor, processSynchroniseResult, setSnapshot } = setup({
             processSynchroniseResult: async () => false,
