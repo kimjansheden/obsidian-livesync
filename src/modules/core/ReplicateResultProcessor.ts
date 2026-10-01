@@ -585,7 +585,11 @@ export class ReplicateResultProcessor {
                 releaser = await semaphore.acquire();
                 await this._applyToDatabase(doc);
             } catch (e) {
-                this.log(`Error while processing replication result`, LOG_LEVEL_NOTICE);
+                const alreadyWaiting = this._waitingChanges.get(doc._id)?._rev === doc._rev;
+                this.log(
+                    `Error while processing replication result`,
+                    alreadyWaiting ? LOG_LEVEL_VERBOSE : LOG_LEVEL_NOTICE
+                );
                 this.logError(e);
             } finally {
                 // Remove from processing queue (To remove from "in-progress" list, and snapshot will not include it)
@@ -641,7 +645,12 @@ export class ReplicateResultProcessor {
                 settled = true;
             } else if (this.services.vault.isValidPath(this.getPath(doc))) {
                 // Apply to storage if the path is valid
-                settled = await this.applyToStorage(doc as MetaEntry);
+                try {
+                    settled = await this.applyToStorage(doc as MetaEntry);
+                } catch (e) {
+                    if (requirement !== "missing") this.keepWaiting(doc_, `Failed to apply ${docNote} to storage`);
+                    throw e;
+                }
                 this.log(`Processed: ${docNote}`, LOG_LEVEL_DEBUG);
             } else {
                 // Should process, but have an invalid path
@@ -649,6 +658,7 @@ export class ReplicateResultProcessor {
                 settled = true;
             }
             if (settled) this.stopWaiting(dbDoc);
+            else if (requirement !== "missing") this.keepWaiting(doc_, `Failed to apply ${docNote} to storage`);
             return;
         });
     }
