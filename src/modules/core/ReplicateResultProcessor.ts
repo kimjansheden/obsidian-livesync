@@ -585,7 +585,11 @@ export class ReplicateResultProcessor {
                 releaser = await semaphore.acquire();
                 await this._applyToDatabase(doc);
             } catch (e) {
-                this.log(`Error while processing replication result`, LOG_LEVEL_NOTICE);
+                const alreadyWaiting = this._waitingChanges.get(doc._id)?._rev === doc._rev;
+                this.log(
+                    `Error while processing replication result`,
+                    alreadyWaiting ? LOG_LEVEL_VERBOSE : LOG_LEVEL_NOTICE
+                );
                 this.logError(e);
             } finally {
                 // Remove from processing queue (To remove from "in-progress" list, and snapshot will not include it)
@@ -613,13 +617,14 @@ export class ReplicateResultProcessor {
                 this.keepWaiting(doc_, `Could not check whether ${docNote} is the latest revision`);
                 return;
             }
-            // A document which no longer exists locally cannot be completed later, so it does not wait.
-            if (requirement === "missing") this.stopWaiting(dbDoc);
+            const isDeleted = dbDoc._deleted === true || ("deleted" in dbDoc && dbDoc.deleted === true);
+            const canWait = requirement !== "missing" || isDeleted;
+            // Missing content cannot be recovered, but a deletion can still remove the local file.
+            if (!canWait) this.stopWaiting(dbDoc);
             // If `Read chunks online` is disabled, chunks should be transferred before here.
             // However, in some cases, chunks are after that. So, if missing chunks exist, we have to wait for them.
             // (If `Use Only Local Chunks` is enabled, we should not attempt to fetch chunks online automatically).
 
-            const isDeleted = dbDoc._deleted === true || ("deleted" in dbDoc && dbDoc.deleted === true);
             // Gather full document if not deleted
             const doc = isDeleted ? { ...dbDoc, data: "" } : await this.gatherContent(dbDoc);
             if (!doc) {
@@ -641,7 +646,12 @@ export class ReplicateResultProcessor {
                 settled = true;
             } else if (this.services.vault.isValidPath(this.getPath(doc))) {
                 // Apply to storage if the path is valid
-                settled = await this.applyToStorage(doc as MetaEntry);
+                try {
+                    settled = await this.applyToStorage(doc as MetaEntry);
+                } catch (e) {
+                    if (canWait) this.keepWaiting(doc_, `Failed to apply ${docNote} to storage`);
+                    throw e;
+                }
                 this.log(`Processed: ${docNote}`, LOG_LEVEL_DEBUG);
             } else {
                 // Should process, but have an invalid path
@@ -649,6 +659,7 @@ export class ReplicateResultProcessor {
                 settled = true;
             }
             if (settled) this.stopWaiting(dbDoc);
+            else if (canWait) this.keepWaiting(doc_, `Failed to apply ${docNote} to storage`);
             return;
         });
     }
@@ -684,8 +695,8 @@ export class ReplicateResultProcessor {
      * Check whether processing is required for the given document.
      * @param dbDoc Document to check
      * @returns `required` when it has to be processed; `superseded` when a later revision has already been processed;
-     *     `missing` when the document no longer exists locally, which is still processed but never waits; `unknown` when
-     *     the check failed
+     *     `missing` when the document no longer exists locally, which is still processed but waits only for failed
+     *     deletion writes; `unknown` when the check failed
      */
     protected async checkChangeRequirement(
         dbDoc: LoadedEntry

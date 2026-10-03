@@ -567,6 +567,85 @@ describe("ReplicateResultProcessor with documents which cannot be applied yet", 
         await vi.waitFor(() => expect(waitingInLatestSnapshot(setSnapshot)).toEqual([]));
     });
 
+    it.each(["returns false", "throws"])("retries a first storage write which %s", async (failure) => {
+        let writes = 0;
+        const first = setup({
+            processSynchroniseResult: async () => {
+                if (++writes === 1) {
+                    if (failure === "throws") throw new Error("storage is temporarily unavailable");
+                    return false;
+                }
+                return true;
+            },
+        });
+        first.processor.enqueueAll([note("one")]);
+        await vi.waitFor(() => expect(first.processSynchroniseResult).toHaveBeenCalledOnce());
+        await vi.waitFor(() => expect(waitingInLatestSnapshot(first.setSnapshot)).toEqual(["one"]));
+
+        const restarted = setup({ getSnapshot: async () => latestSnapshot(first.setSnapshot) });
+        await restarted.processor.restoreFromSnapshotOnce();
+        restarted.processor.retryWaitingChanges();
+        await vi.waitFor(() => expect(restarted.processSynchroniseResult).toHaveBeenCalledOnce());
+        await vi.waitFor(() => expect(waitingInLatestSnapshot(restarted.setSnapshot)).toEqual([]));
+    });
+
+    it.each(["returns false", "throws"])(
+        "retries a deletion with missing metadata whose storage write %s",
+        async (failure) => {
+            let writes = 0;
+            const first = setup({
+                processSynchroniseResult: async () => {
+                    if (++writes === 1) {
+                        if (failure === "throws") throw new Error("storage is temporarily unavailable");
+                        return false;
+                    }
+                    return true;
+                },
+            });
+            first.state.lookupFailure = "not-found";
+            first.processor.enqueueAll([{ ...note("one"), _deleted: true }]);
+            await vi.waitFor(() => expect(first.processSynchroniseResult).toHaveBeenCalledOnce());
+            await vi.waitFor(() => expect(waitingInLatestSnapshot(first.setSnapshot)).toEqual(["one"]));
+
+            const restarted = setup({ getSnapshot: async () => latestSnapshot(first.setSnapshot) });
+            restarted.state.lookupFailure = "not-found";
+            await restarted.processor.restoreFromSnapshotOnce();
+            restarted.processor.retryWaitingChanges();
+            await vi.waitFor(() => expect(restarted.processSynchroniseResult).toHaveBeenCalledOnce());
+            await vi.waitFor(() => expect(waitingInLatestSnapshot(restarted.setSnapshot)).toEqual([]));
+        }
+    );
+
+    it("does not retry an older revision after its first storage write fails", async () => {
+        const { state, processor, processSynchroniseResult, setSnapshot } = setup({
+            processSynchroniseResult: async () => false,
+        });
+        processor.enqueueAll([note("one")]);
+        await vi.waitFor(() => expect(waitingInLatestSnapshot(setSnapshot)).toEqual(["one"]));
+
+        state.latest.one = ["2-newer", "1-test"];
+        processor.retryWaitingChanges();
+        await vi.waitFor(() => expect(waitingInLatestSnapshot(setSnapshot)).toEqual([]));
+        expect(processSynchroniseResult).toHaveBeenCalledOnce();
+    });
+
+    it("reports repeated storage exceptions only once as a notice", async () => {
+        const { processor, processSynchroniseResult, setSnapshot, logs } = setup({
+            processSynchroniseResult: async () => {
+                throw new Error("storage is temporarily unavailable");
+            },
+        });
+        processor.enqueueAll([note("one")]);
+        await vi.waitFor(() => expect(waitingInLatestSnapshot(setSnapshot)).toEqual(["one"]));
+
+        processor.retryWaitingChanges();
+        await vi.waitFor(() => expect(processSynchroniseResult).toHaveBeenCalledTimes(2));
+        await settle();
+        const notices = logs.mock.calls.filter(([, level]) => level === LOG_LEVEL_NOTICE);
+        expect(notices).toHaveLength(1);
+        expect(notices[0][0]).toContain("Failed to apply");
+    });
+
     it("does not queue a waiting document again while it is being processed", async () => {
         const writing = promiseWithResolvers<void>();
         const { state, processor, processSynchroniseResult, setSnapshot } = setup({
