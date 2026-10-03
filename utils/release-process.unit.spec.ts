@@ -191,7 +191,7 @@ describe("release workflow", () => {
         expect(workflow).toContain("npm run test:security-state-mutations");
         expect(workflow).toContain("npm ci --ignore-scripts");
         expect(workflow).toContain("npm audit --audit-level=low");
-        expect(workflow).toContain("npm run sbom -- --output-file release-assets/sbom.cdx.json");
+        expect(workflow).toContain("npm run sbom -- release-assets/sbom.cdx.json");
         expect(workflow).toContain(
             "sha256sum LICENSE-INVENTORY.tsv commonlib-release.json main.js manifest.json package-lock.json sbom.cdx.json source-receipt.json styles.css"
         );

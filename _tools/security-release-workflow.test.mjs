@@ -2,6 +2,7 @@ const assert = process.getBuiltinModule("node:assert/strict");
 const { readFile } = process.getBuiltinModule("node:fs/promises");
 const { describe, it } = process.getBuiltinModule("node:test");
 import commonlibIdentity from "../docs/security/commonlib-release.json" with { type: "json" };
+import { normaliseCycloneDxSbom } from "../scripts/security/generate-sbom.mjs";
 import { validateCommonlibSourceReceipt } from "../scripts/security/verify-commonlib-source-receipt.mjs";
 
 const releaseWorkflow = await readFile(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");
@@ -80,6 +81,57 @@ describe("attested security release workflow", () => {
         assert.notEqual(workflowTests, -1, "release workflow contract tests are missing");
         assert.ok(workflowTests < artefactCreation, "workflow tests must precede artefact creation");
         assert.ok(workflowTests < publication, "workflow tests must precede publication");
+    });
+
+    it("creates the release SBOM through the repository generator", () => {
+        assert.match(releaseWorkflow, /npm run sbom -- release-assets\/sbom\.cdx\.json/u);
+    });
+
+    it("removes volatile CycloneDX fields without changing the source object", () => {
+        const source = {
+            bomFormat: "CycloneDX",
+            specVersion: "1.5",
+            serialNumber: "urn:uuid:volatile",
+            metadata: { timestamp: "2026-10-03T10:00:00.000Z", component: { name: "obsidian-livesync" } },
+            components: [],
+        };
+
+        const normalised = normaliseCycloneDxSbom(source);
+
+        assert.equal(normalised.serialNumber, undefined);
+        assert.equal(normalised.metadata.timestamp, undefined);
+        assert.equal(source.serialNumber, "urn:uuid:volatile");
+        assert.equal(source.metadata.timestamp, "2026-10-03T10:00:00.000Z");
+    });
+
+    it("restores declared workspace names in the SBOM", () => {
+        const source = {
+            bomFormat: "CycloneDX",
+            specVersion: "1.5",
+            metadata: { component: { name: "obsidian-livesync" } },
+            components: [
+                {
+                    name: "cli",
+                    version: "1.0.21-cli",
+                    "bom-ref": "self-hosted-livesync-cli@1.0.21-cli",
+                },
+            ],
+        };
+        const packageLock = {
+            packages: {
+                "node_modules/self-hosted-livesync-cli": { link: true, resolved: "src/apps/cli" },
+                "src/apps/cli": { name: "self-hosted-livesync-cli", version: "1.0.21-cli" },
+            },
+        };
+
+        const normalised = normaliseCycloneDxSbom(source, packageLock);
+
+        assert.equal(normalised.components[0].name, "self-hosted-livesync-cli");
+        assert.equal(source.components[0].name, "cli");
+    });
+
+    it("rejects malformed SBOM output", () => {
+        assert.throws(() => normaliseCycloneDxSbom({ bomFormat: "SPDX" }), /CycloneDX/u);
     });
 
     it("attests and publishes the complete release-assets directory", () => {
