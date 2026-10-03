@@ -2,7 +2,6 @@ import { defineConfig } from "vitest/config";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
 import { sveltePreprocess } from "svelte-preprocess";
 import inlineWorkerPlugin from "esbuild-plugin-inline-worker";
-import copy from "rollup-plugin-copy";
 import path from "path";
 import { fileURLToPath } from "node:url";
 import fs from "node:fs";
@@ -87,6 +86,20 @@ const PATHS_TEST_INSTALL = process.env?.PATHS_TEST_INSTALL || "";
 const PATH_TEST_INSTALL = PATHS_TEST_INSTALL.split(path.delimiter)
     .map((p) => p.trim())
     .filter((p) => p.length);
+const BUILD_OUTPUTS = ["manifest.json", "main.js", "styles.css"];
+const copyBuildOutputs = (destinations: string[]) => ({
+    name: "copy-build-outputs",
+    async writeBundle() {
+        for (const destination of destinations) {
+            await fs.promises.mkdir(destination, { recursive: true });
+            for (const file of BUILD_OUTPUTS) {
+                const target = path.join(destination, file);
+                await fs.promises.copyFile(path.resolve(__dirname, file), target);
+                console.log(`Copied ${file} -> ${target}`);
+            }
+        }
+    },
+});
 if (PATH_TEST_INSTALL) {
     console.log(`Built files will be copied to ${PATH_TEST_INSTALL}`);
 } else {
@@ -117,14 +130,7 @@ export default defineConfig(({ mode }) => {
                 compilerOptions: { css: "injected", preserveComments: false },
             }),
 
-            copy({
-                targets: ["manifest.json", "main.js", "styles.css"]
-                    .map((file) => PATH_TEST_INSTALL.map((dest) => ({ src: file, dest: dest })))
-                    .flat(),
-                // Copy after the build is complete
-                hook: "writeBundle",
-                verbose: true,
-            }),
+            copyBuildOutputs(PATH_TEST_INSTALL),
         ],
 
         resolve: {
