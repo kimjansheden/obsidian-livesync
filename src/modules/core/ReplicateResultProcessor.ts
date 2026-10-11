@@ -43,6 +43,11 @@ type ReplicateResultProcessorState = {
     processing: PouchDB.Core.ExistingDocument<EntryDoc>[];
     /** Documents whose content could not be gathered yet. Snapshots of earlier versions do not have it. */
     waiting?: PouchDB.Core.ExistingDocument<EntryDoc>[];
+    /**
+     * The IDs of the waiting documents whose missing content has not been reported with a notice yet, because it
+     * was still to come. Snapshots of earlier versions do not have it.
+     */
+    waitingWithoutNotice?: string[];
 };
 function shortenId(id: string): string {
     return id.length > 10 ? id.substring(0, 10) : id;
@@ -139,6 +144,7 @@ export class ReplicateResultProcessor {
             queued: this._queuedChanges.slice(),
             processing: this._processingChanges.slice(),
             waiting: [...this._waitingChanges.values()],
+            waitingWithoutNotice: [...this._waitingWithoutNotice],
         } satisfies ReplicateResultProcessorState;
         await this.core.kvDB.set(KV_KEY_REPLICATION_RESULT_PROCESSOR_SNAPSHOT, snapshot);
         this.log(
@@ -170,8 +176,13 @@ export class ReplicateResultProcessor {
         if (snapshot) {
             // Documents which waited for their content go on waiting, and are tried again before the next synchronisation.
             const waiting = snapshot.waiting ?? [];
+            // A snapshot of an earlier version names none, as it gave every notice at once.
+            const waitingWithoutNotice = new Set(snapshot.waitingWithoutNotice);
             for (const doc of waiting) {
-                if (!this._waitingChanges.has(doc._id)) this._waitingChanges.set(doc._id, doc);
+                if (this._waitingChanges.has(doc._id)) continue;
+                this._waitingChanges.set(doc._id, doc);
+                // The notice which was held back for it is still due when its content turns out not to come.
+                if (waitingWithoutNotice.has(doc._id)) this._waitingWithoutNotice.add(doc._id);
             }
             // Restoring the snapshot re-runs processing for both queued and processing items.
             const newQueue = [...snapshot.processing, ...snapshot.queued, ...this._queuedChanges];
@@ -335,24 +346,53 @@ export class ReplicateResultProcessor {
     }
 
     /**
+     * Whether content is still to come which the active replicator puts off receiving, such as large chunks.
+     *
+     * The replicator is looked for without reporting that none is active, as this is asked whenever a document is
+     * applied.
+     */
+    private isContentStillToCome(): boolean {
+        return this.services.replicator.peekActiveReplicator()?.hasDeferredRemoteContent() ?? false;
+    }
+
+    /**
      * Keep a document which could not be applied, to try it again before the next synchronisation.
      *
      * Only the first failure of a revision is a notice; its repeats are logged quietly.
+     *
+     * @param isMissingContent whether the document waits because its content could not be gathered. While content
+     * is still to come that is expected, so the notice is held back until a failure finds nothing more to come, or
+     * is of another kind.
      */
-    private keepWaiting(doc: PouchDB.Core.ExistingDocument<EntryDoc>, reason: string) {
+    private keepWaiting(doc: PouchDB.Core.ExistingDocument<EntryDoc>, reason: string, isMissingContent = false) {
         const alreadyWaiting = this._waitingChanges.get(doc._id)?._rev === doc._rev;
         this._waitingChanges.set(doc._id, doc);
-        this.log(
-            `${reason}; it is tried again before the next synchronisation`,
-            alreadyWaiting ? LOG_LEVEL_VERBOSE : LOG_LEVEL_NOTICE
-        );
+        let level: LOG_LEVEL = alreadyWaiting ? LOG_LEVEL_VERBOSE : LOG_LEVEL_NOTICE;
+        if (isMissingContent && this.isContentStillToCome()) {
+            if (!alreadyWaiting) {
+                this._waitingWithoutNotice.add(doc._id);
+                level = LOG_LEVEL_INFO;
+            }
+        } else if (this._waitingWithoutNotice.delete(doc._id)) {
+            // Nothing excuses the silence any more: no content is to come, or the content came and the document
+            // fails for another reason.
+            level = LOG_LEVEL_NOTICE;
+        }
+        this.log(`${reason}; it is tried again before the next synchronisation`, level);
         this.triggerTakeSnapshot();
     }
+
+    /**
+     * The waiting documents whose missing content has not been reported with a notice, because it was still to come.
+     * They are part of the snapshot like the waiting documents, so the notice is not lost by a restart.
+     */
+    private _waitingWithoutNotice = new Set<string>();
 
     /** Stop waiting for a document once its waiting revision has been written, replaced, or cannot be applied at all. */
     private stopWaiting(doc: { _id: string; _rev?: string }) {
         if (this._waitingChanges.get(doc._id)?._rev !== doc._rev) return;
         this._waitingChanges.delete(doc._id);
+        this._waitingWithoutNotice.delete(doc._id);
         this.triggerTakeSnapshot();
     }
 
@@ -632,7 +672,7 @@ export class ReplicateResultProcessor {
                 if (requirement === "missing") {
                     this.log(`Failed to gather content of ${docNote}, which no longer exists`, LOG_LEVEL_VERBOSE);
                 } else {
-                    this.keepWaiting(doc_, `Failed to gather content of ${docNote}`);
+                    this.keepWaiting(doc_, `Failed to gather content of ${docNote}`, true);
                 }
                 return;
             }
@@ -670,14 +710,20 @@ export class ReplicateResultProcessor {
      * A large binary document which can be written in parts is only checked, without holding its content, and its
      * metadata is applied; the file handler then writes it in parts. Other documents are loaded whole.
      * A failed load is logged quietly here, because the caller reports it once.
+     *
+     * Chunks which a running replication is delivering are waited for, unless the replicator puts content off:
+     * large chunks then arrive after the documents, possibly several synchronisations later, and a document which
+     * waited for them here would keep its place among the documents applied at once, holding back notes queued
+     * behind it. It goes to the waiting list at once instead.
      */
     private async gatherContent(dbDoc: LoadedEntry): Promise<LoadedEntry | false> {
+        const waitForChunks = !this.isContentStillToCome();
         if (isAnyNote(dbDoc) && (dbDoc.size ?? 0) >= LARGE_FILE_BYTES) {
-            const availability = await this.localDatabase.inspectDBEntryBinaryContent(dbDoc, true);
+            const availability = await this.localDatabase.inspectDBEntryBinaryContent(dbDoc, waitForChunks);
             if (availability === "streamable") return { ...dbDoc, data: "" };
             if (availability === "missing") return false;
         }
-        return await this.localDatabase.getDBEntryFromMeta({ ...dbDoc }, false, true, LOG_LEVEL_VERBOSE);
+        return await this.localDatabase.getDBEntryFromMeta({ ...dbDoc }, false, waitForChunks, LOG_LEVEL_VERBOSE);
     }
 
     /**
