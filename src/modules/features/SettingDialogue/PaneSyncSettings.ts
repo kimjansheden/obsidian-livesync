@@ -2,6 +2,7 @@ import {
     type ObsidianLiveSyncSettings,
     LOG_LEVEL_NOTICE,
     REMOTE_COUCHDB,
+    REMOTE_MINIO,
     LEVEL_ADVANCED,
 } from "@vrtmrz/livesync-commonlib/compat/common/types";
 import { Logger } from "@vrtmrz/livesync-commonlib/compat/common/logger";
@@ -169,6 +170,11 @@ export function paneSyncSettings(
         if (!this.services.API.isMobile()) {
             new Setting(paneEl).autoWireToggle("allowSleepDuringSynchronisationOnDesktop");
         }
+        // An Object Storage remote only grows unless devices remove what no file uses any more. Every device does
+        // that on the same terms, so the toggle is shown on every platform. It is a preference of this device.
+        new Setting(paneEl).autoWireToggle("removeUnreferencedJournalData", {
+            onUpdate: visibleOnly(() => this.isConfiguredAs("remoteType", REMOTE_MINIO)),
+        });
     });
 
     void addPanel(

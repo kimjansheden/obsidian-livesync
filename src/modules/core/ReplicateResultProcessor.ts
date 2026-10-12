@@ -671,6 +671,12 @@ export class ReplicateResultProcessor {
                 // Usually its chunks have not arrived, and nothing is receiving them now.
                 if (requirement === "missing") {
                     this.log(`Failed to gather content of ${docNote}, which no longer exists`, LOG_LEVEL_VERBOSE);
+                } else if ((await this.checkChangeRequirement(dbDoc)) === "superseded") {
+                    // A later revision was stored while the content was gathered. Often it is the deletion of a
+                    // file whose content is no longer in the remote, which a device that was away receives after
+                    // the file itself. Nothing is missing then, so the document stops waiting without a notice.
+                    this.log(`Skipped (No longer latest): ${docNote}`, LOG_LEVEL_VERBOSE);
+                    this.stopWaiting(dbDoc);
                 } else {
                     this.keepWaiting(doc_, `Failed to gather content of ${docNote}`, true);
                 }

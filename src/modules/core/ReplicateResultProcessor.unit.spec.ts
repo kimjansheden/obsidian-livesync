@@ -1023,6 +1023,146 @@ describe("ReplicateResultProcessor while the replicator puts large content off",
 
         expect(logLevels(logs)).toEqual([LOG_LEVEL_INFO, LOG_LEVEL_VERBOSE]);
     });
+
+    describe("for a file whose content was removed from the remote after the file was deleted", () => {
+        /** Every notice the processor gave. */
+        const notices = (logs: ReturnType<typeof setup>["logs"]) =>
+            logs.mock.calls.filter(([, level]) => level === LOG_LEVEL_NOTICE).map(([message]) => String(message));
+        const storeDeletion = (state: ReturnType<typeof setup>["state"], id: string) => {
+            state.latest[id] = ["2-deletion", "1-test"];
+        };
+
+        it.each([
+            ["while the journals with documents are received", true],
+            ["when nothing more is to come", false],
+        ])(
+            "drops the file without a notice when its deletion was stored before its content could not be gathered, %s",
+            async (_case, deferredRemoteContent) => {
+                const { state, processor, processSynchroniseResult, setSnapshot, getDBEntryFromMeta, logs } = setup({
+                    remoteType: REMOTE_MINIO,
+                });
+                state.deferredRemoteContent = deferredRemoteContent;
+                // The file is the latest revision when it is taken up, and no longer when its content turns out
+                // to be missing.
+                getDBEntryFromMeta.mockImplementationOnce(async () => {
+                    storeDeletion(state, "one");
+                    return false;
+                });
+
+                processor.enqueueAll([note("one")]);
+                await vi.waitFor(() => expect(getDBEntryFromMeta).toHaveBeenCalledOnce());
+                await vi.waitFor(() => expect(waitingInLatestSnapshot(setSnapshot)).toEqual([]));
+
+                expect(notices(logs)).toEqual([]);
+                expect(logLevels(logs)).toEqual([]);
+                expect(waitingWithoutNoticeInLatestSnapshot(setSnapshot)).toEqual([]);
+                // Nothing waits, so nothing is tried again.
+                processor.retryWaitingChanges();
+                await settle();
+                expect(getDBEntryFromMeta).toHaveBeenCalledOnce();
+                expect(processSynchroniseResult).not.toHaveBeenCalled();
+            }
+        );
+
+        it("holds the notice back when the deletion is stored after the content could not be gathered, and then drops both", async () => {
+            const { state, processor, processSynchroniseResult, setSnapshot, getDBEntryFromMeta, logs } = setup({
+                remoteType: REMOTE_MINIO,
+            });
+            state.chunksArrived = false;
+            // The journals with documents are being received, so content counts as still to come.
+            state.deferredRemoteContent = true;
+            processor.enqueueAll([note("one")]);
+            await vi.waitFor(() => expect(waitingWithoutNoticeInLatestSnapshot(setSnapshot)).toEqual(["one"]));
+            expect(logLevels(logs)).toEqual([LOG_LEVEL_INFO]);
+
+            // A later journal of the same receive holds the deletion. Then the receive ends, with nothing to come.
+            storeDeletion(state, "one");
+            state.deferredRemoteContent = false;
+            processor.retryWaitingChanges();
+            await vi.waitFor(() => expect(waitingInLatestSnapshot(setSnapshot)).toEqual([]));
+
+            expect(waitingWithoutNoticeInLatestSnapshot(setSnapshot)).toEqual([]);
+            expect(notices(logs)).toEqual([]);
+            expect(getDBEntryFromMeta).toHaveBeenCalledOnce();
+            expect(processSynchroniseResult).not.toHaveBeenCalled();
+        });
+
+        it("stops waiting for the file when its deletion is stored while it is tried again", async () => {
+            const { state, processor, setSnapshot, getDBEntryFromMeta, logs } = setup({ remoteType: REMOTE_MINIO });
+            state.chunksArrived = false;
+            state.deferredRemoteContent = true;
+            processor.enqueueAll([note("one")]);
+            await vi.waitFor(() => expect(waitingWithoutNoticeInLatestSnapshot(setSnapshot)).toEqual(["one"]));
+
+            // Nothing more is to come when it is tried again, and its deletion is stored during that try.
+            state.deferredRemoteContent = false;
+            getDBEntryFromMeta.mockImplementationOnce(async () => {
+                storeDeletion(state, "one");
+                return false;
+            });
+            processor.retryWaitingChanges();
+            await vi.waitFor(() => expect(getDBEntryFromMeta).toHaveBeenCalledTimes(2));
+            await vi.waitFor(() => expect(waitingInLatestSnapshot(setSnapshot)).toEqual([]));
+
+            expect(waitingWithoutNoticeInLatestSnapshot(setSnapshot)).toEqual([]);
+            expect(notices(logs)).toEqual([]);
+        });
+
+        it("still gives the notice when the file is the latest revision and its content is missing", async () => {
+            const { state, processor, setSnapshot, logs } = setup({ remoteType: REMOTE_MINIO });
+            state.chunksArrived = false;
+
+            processor.enqueueAll([note("one")]);
+            await vi.waitFor(() => expect(waitingInLatestSnapshot(setSnapshot)).toEqual(["one"]));
+
+            expect(logLevels(logs)).toEqual([LOG_LEVEL_NOTICE]);
+        });
+
+        it("still keeps the file waiting when its latest revision cannot be checked after the content could not be gathered", async () => {
+            const { state, processor, setSnapshot, getDBEntryFromMeta, logs } = setup({ remoteType: REMOTE_MINIO });
+            getDBEntryFromMeta.mockImplementationOnce(async () => {
+                state.lookupFailure = "error";
+                return false;
+            });
+
+            processor.enqueueAll([note("one")]);
+            await vi.waitFor(() => expect(waitingInLatestSnapshot(setSnapshot)).toEqual(["one"]));
+
+            expect(logLevels(logs)).toEqual([LOG_LEVEL_NOTICE]);
+        });
+
+        it("does not let ten such files hold the places of what is queued behind them", async () => {
+            const { state, processor, processSynchroniseResult, setSnapshot, getDBEntryFromMeta, logs } = setup({
+                remoteType: REMOTE_MINIO,
+            });
+            // The journals with documents are being received, so content counts as still to come. A read which
+            // waited for chunks would stay pending for as long as that receive runs.
+            state.deferredRemoteContent = true;
+            getDBEntryFromMeta.mockImplementation(async (entry: { _id: string; _rev: string }, ...rest) => {
+                if (entry._id === "note") return { ...entry, data: "x" };
+                if (rest[1] === true) await new Promise<void>(() => {});
+                return false;
+            });
+            const removed = Array.from({ length: 10 }, (_, index) => binaryNote(`removed-${index}`, 1_000_000));
+
+            processor.enqueueAll([...removed, note("note")]);
+
+            await vi.waitFor(() => expect(processSynchroniseResult).toHaveBeenCalledOnce());
+            expect(processSynchroniseResult).toHaveBeenCalledWith(expect.objectContaining({ _id: "note" }));
+            await vi.waitFor(() =>
+                expect(waitingInLatestSnapshot(setSnapshot)?.sort()).toEqual(removed.map((doc) => doc._id).sort())
+            );
+
+            // Their deletions arrive with a later journal, and the receive ends.
+            for (const doc of removed) storeDeletion(state, doc._id);
+            state.deferredRemoteContent = false;
+            processor.retryWaitingChanges();
+            await vi.waitFor(() => expect(waitingInLatestSnapshot(setSnapshot)).toEqual([]));
+
+            expect(notices(logs)).toEqual([]);
+            expect(processSynchroniseResult).toHaveBeenCalledOnce();
+        });
+    });
 });
 
 describe("ReplicateResultProcessor snapshots before the previous queue is restored", () => {

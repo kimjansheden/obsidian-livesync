@@ -588,6 +588,16 @@ Desktop only. Allow the operating system to sleep during finite synchronisation 
 
 Setup URIs preserve both sleep preferences. Older Setup URIs which do not contain them use the defaults described above. The preferences cover finite remote operations, including one-shot replication, P2P peer discovery and selection, rebuilds, fetches, remote chunk fetching, and applying downloaded documents to the Vault. They do not control whether continuous replication remains active while Obsidian is hidden, and allowing sleep does not force the operating system to suspend the device.
 
+#### Remove the content of deleted files from the remote
+
+Setting key: removeUnreferencedJournalData
+
+Object Storage only. Disabled by default, and a preference of each device: neither a setup QR code nor a Setup URI carries it. While a device with this setting synchronises, it removes from the remote the large content which no file uses any more, so that the content of deleted files does not stay there for good. Content which a file still uses is never removed, also not when the file is one side of an unresolved conflict, and neither are notes or other small changes. Content must have been found unused in two rounds, at least ten minutes apart, before it is removed.
+
+Enable it on each device, and only once every device runs a version which has this setting: an earlier version does not know which content was removed. The content of a deleted file can no longer be restored from the remote afterwards; it remains in the trash and the local history of the devices which had the file. Content uploaded by earlier versions is removed by desktop devices only.
+
+A device removes nothing while it cannot be sure that its local database holds everything: after a received file or note could not be stored, when the local database is not the one its journal history belongs to, or while it holds no file at all. It says so once after each start. **Reset all journal counter** in the maintenance settings lets such a device receive everything again and start anew.
+
 ### 3. Update thinning
 
 #### Batch database update
