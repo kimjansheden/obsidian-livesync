@@ -13,6 +13,7 @@ import type { LiveSyncCore } from "@/main.ts";
 // import { __$checkInstanceBinding } from "@vrtmrz/livesync-commonlib/compat/dev/checks";
 import { createInstanceLogFunction } from "@vrtmrz/livesync-commonlib/compat/services/lib/logUtils";
 import {
+    createOwnPluginProtectedPathMatcher,
     createTrustedReleaseKeysPathMatcher,
     pluginDirectoryOf,
 } from "@/serviceFeatures/releaseInstall/trustedReleaseKeys.ts";
@@ -61,6 +62,21 @@ export abstract class LiveSyncCommands {
             pluginDirectoryOf(this.services.context.plugin)
         );
         return this.trustedReleaseKeysPathMatcher(path);
+    }
+
+    private ownPluginProtectedPathMatcher?: (path: string) => boolean;
+
+    /**
+     * Whether `path` addresses one of this plug-in's own installed files: its signed executable files (`main.js`,
+     * `manifest.json`, `styles.css`) or its trusted-keys file. Those change only through the signed-release install
+     * path, so no add-on stores them into the database or writes them from a synchronised record. Files of other
+     * plug-ins, and any other file in this plug-in's own folder, are not matched.
+     */
+    protected isOwnPluginProtectedPath(path: string): boolean {
+        this.ownPluginProtectedPathMatcher ??= createOwnPluginProtectedPathMatcher(
+            pluginDirectoryOf(this.services.context.plugin)
+        );
+        return this.ownPluginProtectedPathMatcher(path);
     }
 
     _isMainReady() {

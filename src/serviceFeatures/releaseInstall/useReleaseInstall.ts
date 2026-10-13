@@ -76,13 +76,17 @@ export function releasePluginHostOf(app: object): ReleasePluginHost | undefined 
         // Called synchronously, so that an unload starts in the same turn in which it was decided.
         return (...args: unknown[]) => Promise.resolve(Reflect.apply(candidate, manager, args) as unknown);
     };
-    const disablePlugin = method("disablePlugin");
-    const enablePlugin = method("enablePlugin");
-    if (!disablePlugin || !enablePlugin) return undefined;
+    // The swap unloads the running build and loads the next one with the transient methods the host's own reload
+    // uses. `disablePlugin`/`enablePlugin` would persist the plug-in as disabled between the two steps, so a crash
+    // in the swap window would leave it disabled on the next start and load no build at all; `unloadPlugin`/
+    // `loadPlugin` leave the persisted enabled set untouched, so a crash still loads a build (new or restored).
+    const unloadPlugin = method("unloadPlugin");
+    const loadPlugin = method("loadPlugin");
+    if (!unloadPlugin || !loadPlugin) return undefined;
     const loadManifests = method("loadManifests");
     return {
-        disablePlugin: async (pluginId) => void (await disablePlugin(pluginId)),
-        enablePlugin: async (pluginId) => void (await enablePlugin(pluginId)),
+        disablePlugin: async (pluginId) => void (await unloadPlugin(pluginId)),
+        enablePlugin: async (pluginId) => void (await loadPlugin(pluginId)),
         ...(loadManifests ? { loadManifests: async () => void (await loadManifests()) } : {}),
         getInstance: (pluginId) => {
             const plugins: unknown = Reflect.get(manager, "plugins");

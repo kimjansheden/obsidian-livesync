@@ -61,6 +61,16 @@ const KEYS_FILE_SPELLINGS = [
 ] as FilePath[];
 /** Another file in the same folder, which Customisation Sync handles as before. */
 const OTHER_FILE = `${PLUGIN_DIRECTORY}/other.json` as FilePath;
+/** This plug-in's own executable files, which installation owns; spellings a file system folds to them too. */
+const OWN_EXECUTABLE_SPELLINGS = [
+    `${PLUGIN_DIRECTORY}/main.js`,
+    `${PLUGIN_DIRECTORY}/manifest.json`,
+    `${PLUGIN_DIRECTORY}/styles.css`,
+    `${CONFIG_DIRECTORY}/plugins/Obsidian-LiveSync/MAIN.JS`,
+    `${CONFIG_DIRECTORY}/plugins/obsidian-livesync/manifest.json.`,
+] as FilePath[];
+/** Another plug-in's executable file, which Customisation Sync must still handle. */
+const OTHER_PLUGIN_MAIN = `${CONFIG_DIRECTORY}/plugins/another-plugin/main.js` as FilePath;
 /** The file name of a path as a customisation document states it: relative to the configuration folder. */
 const filenameOf = (path: string) => path.slice(CONFIG_DIRECTORY.length + 1);
 
@@ -207,5 +217,56 @@ describe("Customisation Sync and the trusted release keys: applying", () => {
         expect(storageAccess.writeHiddenFileAuto).toHaveBeenCalledOnce();
         expect(storageAccess.writeHiddenFileAuto.mock.calls[0][0]).toBe(OTHER_FILE);
         expect(storageAccess.ensureDir).toHaveBeenCalledExactlyOnceWith(OTHER_FILE);
+    });
+});
+
+describe("Customisation Sync and this plug-in's own executable files", () => {
+    it.each(OWN_EXECUTABLE_SPELLINGS)("gives %s no category, so a scan does not select it", (path) => {
+        const { configSync } = setup();
+
+        expect(configSync.getFileCategory(path)).toBe("");
+        expect(configSync.isTargetPath(path)).toBe(false);
+    });
+
+    it.each(OWN_EXECUTABLE_SPELLINGS)("does not read %s to store it", async (path) => {
+        const { configSync, storageAccess } = setup();
+
+        await expect(configSync.makeEntryFromFile(path)).resolves.toBe(false);
+        await expect(configSync.storeCustomisationFileV2(path, "synthetic-device")).resolves.toBe(false);
+        await expect(configSync.watchVaultRawEventsAsync(path)).resolves.toBe(false);
+
+        expect(storageAccess.statHidden).not.toHaveBeenCalled();
+        expect(storageAccess.readHiddenFileBinary).not.toHaveBeenCalled();
+    });
+
+    it.each(OWN_EXECUTABLE_SPELLINGS)("does not write %s from a selected document", async (path) => {
+        const { configSync, storageAccess } = setup();
+
+        await expect(configSync.applyDataV2(receivedData([path]), "content chosen in the dialogue")).resolves.toBe(
+            false
+        );
+
+        expect(storageAccess.ensureDir).not.toHaveBeenCalled();
+        expect(storageAccess.writeHiddenFileAuto).not.toHaveBeenCalled();
+    });
+
+    it("passes over this plug-in's main.js among a document's files, and applies another plug-in's file", async () => {
+        const { configSync, storageAccess, storeCustomisationFileV2 } = setup();
+        storeCustomisationFileV2.mockResolvedValue(false);
+
+        await configSync.applyDataV2(receivedData([`${PLUGIN_DIRECTORY}/main.js` as FilePath, OTHER_PLUGIN_MAIN]));
+
+        expect(storageAccess.writeHiddenFileAuto).toHaveBeenCalledExactlyOnceWith(
+            OTHER_PLUGIN_MAIN,
+            "content from another device",
+            { mtime: 2_000, ctime: 2_000 }
+        );
+    });
+
+    it("still categorises and synchronises another plug-in's executable files", () => {
+        const { configSync } = setup();
+
+        expect(configSync.getFileCategory(OTHER_PLUGIN_MAIN)).toBe("PLUGIN_MAIN");
+        expect(configSync.isTargetPath(OTHER_PLUGIN_MAIN)).toBe(true);
     });
 });

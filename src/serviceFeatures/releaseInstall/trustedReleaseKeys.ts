@@ -82,6 +82,22 @@ export function createTrustedReleaseKeysPathMatcher(pluginDirectory: string): (p
     return (path) => typeof path === "string" && normaliseForComparison(path) === protectedPath;
 }
 
+/** This plug-in's own files which installation owns: the signed executable files and the trusted-keys file. */
+export const OWN_PLUGIN_PROTECTED_FILES = ["main.js", "manifest.json", "styles.css", TRUSTED_RELEASE_KEYS_FILE];
+
+/**
+ * Create the test which keeps synchronisation off this plug-in's own installed files: the signed executable files
+ * (`main.js`, `manifest.json`, `styles.css`) and the trusted-keys file, all in the plug-in's own `pluginDirectory`.
+ * Those change only through the signed-release install path, never from a synchronised record. Files of other
+ * plug-ins, and any other file in this plug-in's own folder, are not matched, so their sync is unaffected.
+ */
+export function createOwnPluginProtectedPathMatcher(pluginDirectory: string): (path: string) => boolean {
+    const protectedPaths = new Set(
+        OWN_PLUGIN_PROTECTED_FILES.map((name) => normaliseForComparison(`${pluginDirectory}/${name}`))
+    );
+    return (path) => typeof path === "string" && protectedPaths.has(normaliseForComparison(path));
+}
+
 /** The plug-in's own folder, relative to the vault: the folder which the host loaded it from. */
 export function pluginDirectoryOf(plugin: {
     manifest: { id: string; dir?: string };

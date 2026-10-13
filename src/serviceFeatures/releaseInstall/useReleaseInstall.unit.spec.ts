@@ -59,12 +59,24 @@ function createHost(
         app: undefined as unknown,
     };
     const plugins: Record<string, unknown> = { [TEST_PLUGIN_ID]: plugin };
+    // The persisted enabled set, which the swap must never clear: the transient unload/load leave it untouched.
+    const enabledPlugins = new Set<string>([TEST_PLUGIN_ID]);
     const manager = {
         plugins,
+        enabledPlugins,
+        unloadPlugin: vi.fn(async (id: string) => {
+            delete plugins[id];
+        }),
+        loadPlugin: vi.fn(async (id: string) => {
+            plugins[id] = loadSyntheticBuild(adapter.files.get(pluginFile("main.js")));
+        }),
+        // The persisting pair, present on the real host too; the swap must not use it. It clears the enabled set.
         disablePlugin: vi.fn(async (id: string) => {
+            enabledPlugins.delete(id);
             delete plugins[id];
         }),
         enablePlugin: vi.fn(async (id: string) => {
+            enabledPlugins.add(id);
             plugins[id] = loadSyntheticBuild(adapter.files.get(pluginFile("main.js")));
         }),
         loadManifests: vi.fn(async () => undefined),
@@ -258,7 +270,11 @@ describe("with trusted keys", () => {
         expect(encodeBase64(host.adapter.files.get(pluginFile("data.json"))!)).toBe(
             host.folderBefore[pluginFile("data.json")]
         );
-        expect(host.manager.disablePlugin).toHaveBeenCalledExactlyOnceWith(TEST_PLUGIN_ID);
+        // The swap used the transient unload/load, and never the persisting pair, so the plug-in stays enabled:
+        // a crash in the swap window would still load a build on the next start.
+        expect(host.manager.unloadPlugin).toHaveBeenCalledExactlyOnceWith(TEST_PLUGIN_ID);
+        expect(host.manager.disablePlugin).not.toHaveBeenCalled();
+        expect(host.manager.enabledPlugins.has(TEST_PLUGIN_ID)).toBe(true);
     }, 15_000);
 
     it("does not swap while a replication runs or the mobile app is hidden", async () => {
@@ -273,10 +289,10 @@ describe("with trusted keys", () => {
             timeout: 5000,
         });
         await new Promise((resolve) => setTimeout(resolve, 2500));
-        expect(host.manager.disablePlugin).not.toHaveBeenCalled();
+        expect(host.manager.unloadPlugin).not.toHaveBeenCalled();
         host.services.replicator.boundedRemoteActivityCount.value = 0;
         await new Promise((resolve) => setTimeout(resolve, 2500));
-        expect(host.manager.disablePlugin).not.toHaveBeenCalled();
+        expect(host.manager.unloadPlugin).not.toHaveBeenCalled();
 
         host.bindings.isAppHidden.mockReturnValue(false);
 
@@ -315,7 +331,7 @@ describe("with trusted keys", () => {
                 timeout: 5000,
             });
             await new Promise((resolve) => setTimeout(resolve, 2500));
-            expect(host.manager.disablePlugin).not.toHaveBeenCalled();
+            expect(host.manager.unloadPlugin).not.toHaveBeenCalled();
 
             setBusy(host, false);
 
@@ -335,7 +351,7 @@ describe("with trusted keys", () => {
             timeout: 5000,
         });
         await new Promise((resolve) => setTimeout(resolve, 2500));
-        expect(host.manager.disablePlugin).not.toHaveBeenCalled();
+        expect(host.manager.unloadPlugin).not.toHaveBeenCalled();
 
         host.lifecycle.ready = true;
 
@@ -354,7 +370,7 @@ describe("with trusted keys", () => {
             "Release package next.livesync-release was rejected (unknown-key-id). Nothing was installed."
         );
         expect(host.adapter.snapshot()).toEqual(host.folderBefore);
-        expect(host.manager.disablePlugin).not.toHaveBeenCalled();
+        expect(host.manager.unloadPlugin).not.toHaveBeenCalled();
     });
 
     it("looks again, after a pause, when a package file is created, modified or renamed, and at nothing else", async () => {
@@ -425,42 +441,63 @@ describe("the running build", () => {
 describe("the app's plug-in manager", () => {
     it.each([
         ["no plug-in manager", {}],
-        ["a manager without disablePlugin", { plugins: { enablePlugin: async () => {} } }],
-        ["a manager without enablePlugin", { plugins: { disablePlugin: async () => {} } }],
+        ["a manager without unloadPlugin", { plugins: { loadPlugin: async () => {} } }],
+        ["a manager without loadPlugin", { plugins: { unloadPlugin: async () => {} } }],
         ["a manager which is not an object", { plugins: "plugins" }],
     ])("is not usable with %s", (_, app) => {
         expect(releasePluginHostOf(app)).toBeUndefined();
     });
 
-    it("is called on the manager itself, in the same turn, and its results are awaited", async () => {
+    it("unloads and loads through the transient methods, on the manager itself, in the same turn, awaited", async () => {
         const calls: unknown[][] = [];
         const manager = {
             plugins: { p: "instance" },
-            disablePlugin(this: unknown, id: string) {
-                calls.push(["disablePlugin", this === manager, id]);
+            unloadPlugin(this: unknown, id: string) {
+                calls.push(["unloadPlugin", this === manager, id]);
             },
-            enablePlugin(this: unknown, id: string) {
-                calls.push(["enablePlugin", this === manager, id]);
+            loadPlugin(this: unknown, id: string) {
+                calls.push(["loadPlugin", this === manager, id]);
                 return Promise.resolve();
             },
         };
         const host = releasePluginHostOf({ plugins: manager })!;
 
         const unloading = host.disablePlugin("p");
-        expect(calls).toEqual([["disablePlugin", true, "p"]]);
+        expect(calls).toEqual([["unloadPlugin", true, "p"]]);
         await unloading;
         await host.enablePlugin("p");
 
-        expect(calls[1]).toEqual(["enablePlugin", true, "p"]);
+        expect(calls[1]).toEqual(["loadPlugin", true, "p"]);
         expect(host.getInstance("p")).toBe("instance");
         expect(host.getInstance("q")).toBeUndefined();
         expect(host.loadManifests).toBeUndefined();
     });
 
+    it("never uses the persisting disable/enable, so a crash in the swap leaves the plug-in enabled", async () => {
+        const enabledPlugins = new Set<string>(["p"]);
+        const calls: string[] = [];
+        const manager = {
+            plugins: { p: "instance" },
+            // The transient pair the swap must use: they do not touch the persisted enabled set.
+            unloadPlugin: async (_id: string) => void calls.push("unloadPlugin"),
+            loadPlugin: async (_id: string) => void calls.push("loadPlugin"),
+            // The persisting pair: using either in the swap would clear the enabled set and defeat the restore.
+            disablePlugin: async (id: string) => void (enabledPlugins.delete(id), calls.push("disablePlugin")),
+            enablePlugin: async (id: string) => void (enabledPlugins.add(id), calls.push("enablePlugin")),
+        };
+        const host = releasePluginHostOf({ plugins: manager })!;
+
+        // Model a crash in the swap window: the unload runs, the paired load never does.
+        await host.disablePlugin("p");
+
+        expect(calls).toEqual(["unloadPlugin"]);
+        expect(enabledPlugins.has("p")).toBe(true);
+    });
+
     it("reads the manifests again where the app offers it", async () => {
         const loadManifests = vi.fn(async () => undefined);
         const host = releasePluginHostOf({
-            plugins: { disablePlugin: async () => {}, enablePlugin: async () => {}, loadManifests },
+            plugins: { unloadPlugin: async () => {}, loadPlugin: async () => {}, loadManifests },
         })!;
 
         await host.loadManifests?.();
