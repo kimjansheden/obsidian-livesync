@@ -434,9 +434,11 @@ export class ReplicateResultProcessor {
     public async restoreFromSnapshot() {
         const store = this.core.kvDB as unknown as SnapshotStore;
         const snapshot = await store.get<ReplicateResultProcessorState>(KV_KEY_REPLICATION_RESULT_PROCESSOR_SNAPSHOT);
-        // What the previous run left is part of this run's state from here on, so snapshots may replace it.
-        this._snapshotRestored = true;
-        if (!snapshot) return;
+        if (!snapshot) {
+            // Nothing to restore, so the run is restored at once and snapshots may be taken.
+            this._snapshotRestored = true;
+            return;
+        }
         // Documents which waited for their content go on waiting, and are tried again before the next synchronisation.
         const waiting = snapshot.waiting ?? [];
         // A snapshot of an earlier version names none, as it gave every notice at once.
@@ -467,10 +469,16 @@ export class ReplicateResultProcessor {
         const carried = [...this._queuedChanges.values()];
         this._queuedChanges = new PagedDocumentQueue(SNAPSHOT_PAGE_SIZE);
         const toQueue = [...snapshot.processing, ...(snapshot.queued ?? []), ...overflow, ...carried];
+        // Not yet restored: enqueueAll below fires a throttled snapshot per slice, and a replication event may fire
+        // one too. Taking a snapshot now would persist only the prefix enqueued so far over the complete stored
+        // snapshot, and a crash would then lose the un-restored tail. `_takeSnapshot` stays blocked until the flag
+        // below, so the stored snapshot is replaced only once every page has been read and enqueued.
         for (let from = 0; from < toQueue.length; from += RESTORE_SLICE_SIZE) {
             this.enqueueAll(toQueue.slice(from, from + RESTORE_SLICE_SIZE));
             if (from + RESTORE_SLICE_SIZE < toQueue.length) await delay(0);
         }
+        // The whole queue is restored; from here a snapshot persists the complete state, never a partial prefix.
+        this._snapshotRestored = true;
         this.log(
             `Restored from snapshot (${toQueue.length - carried.length} items, ${waiting.length} waiting for their content)`,
             LOG_LEVEL_INFO
@@ -555,8 +563,17 @@ export class ReplicateResultProcessor {
             if (batch.length === 0) return;
             this.enqueueAll(batch);
             batch = [];
-            // The position is stored only once the batch is queued, so what is on disk never runs ahead of it.
-            if (store) await store.set(KV_KEY_REPLICATION_RESULT_REPROCESS_POSITION, position);
+            if (store) {
+                // Persist the batch durably before advancing the stored position. enqueueAll only schedules a
+                // throttled snapshot, so without this a stop after the position write but before that snapshot
+                // commits would skip the batch on the next run — the position would have moved past documents no
+                // snapshot ever kept, losing them. A stop before the position advances instead re-reads from the old
+                // position and reprocesses the batch, which is idempotent. The snapshot is awaited, and serialises
+                // with the throttled ones. The position is stored only once the batch is persisted, so what is on
+                // disk never runs ahead of it.
+                await this._takeSnapshot();
+                await store.set(KV_KEY_REPLICATION_RESULT_REPROCESS_POSITION, position);
+            }
             // Keep the queue bounded: wait for it to drain below the limit before more is read and queued. A
             // suspended processor never drains, so stop the pass instead of spinning; it resumes from the stored
             // position when the processor resumes, which also lets the database cursor close.

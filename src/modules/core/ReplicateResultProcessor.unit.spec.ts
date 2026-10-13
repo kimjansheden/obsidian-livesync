@@ -1664,6 +1664,56 @@ describe("ReplicateResultProcessor snapshot that survives a crash at any point",
             }
         );
     });
+
+    it("takes no snapshot until the whole restore has completed, so a snapshot mid-restore keeps every document", async () => {
+        const { store, map } = memoryStore();
+        // A complete paged snapshot of several pages.
+        const length = SNAPSHOT_PAGE_SIZE * 2 + 25;
+        const seed = setup({ applicationReady: false, kv: store });
+        await seed.processor.restoreFromSnapshotOnce();
+        for (let i = 0; i < length; i++) queueOf(seed.processor)._queuedChanges.enqueue(note(padId("doc", i)));
+        await queueOf(seed.processor)._takeSnapshot();
+        const completeKeys = new Set(map.keys());
+        const completeBase = JSON.stringify(map.get(SNAPSHOT_KEY));
+
+        // A fresh processor restores. On every slice it enqueues, a throttled snapshot fires and a replication event
+        // enqueues, exactly as production would during the sliced restore. None may replace the complete stored
+        // snapshot with the prefix enqueued so far, or a crash during the restore would lose the un-restored tail.
+        const b = setup({ applicationReady: false, kv: store });
+        const proc = b.processor;
+        let restoring = true;
+        let writesWhileRestoring = 0;
+        store.set.mockImplementation(async (k: string, v: unknown) => {
+            if (restoring) writesWhileRestoring++;
+            map.set(k, structuredClone(v));
+        });
+        store.del.mockImplementation(async (k: string) => {
+            if (restoring) writesWhileRestoring++;
+            map.delete(k);
+        });
+        const realEnqueueAll = proc.enqueueAll.bind(proc);
+        const firedMidRestore: Promise<void>[] = [];
+        let n = 0;
+        vi.spyOn(proc, "enqueueAll").mockImplementation((docs) => {
+            realEnqueueAll(docs);
+            realEnqueueAll([note(`concurrent-${n++}`)]);
+            firedMidRestore.push((proc as unknown as { _takeSnapshot(): Promise<void> })._takeSnapshot());
+        });
+        await proc.restoreFromSnapshotOnce();
+        await Promise.all(firedMidRestore);
+        restoring = false;
+
+        // Nothing was written until the restore finished: the complete stored snapshot is byte-for-byte intact.
+        expect(writesWhileRestoring).toBe(0);
+        expect(new Set(map.keys())).toEqual(completeKeys);
+        expect(JSON.stringify(map.get(SNAPSHOT_KEY))).toBe(completeBase);
+
+        // And a fresh restore from that untouched store still yields every original document.
+        const after = setup({ applicationReady: false, kv: store });
+        await after.processor.restoreFromSnapshotOnce();
+        const ids = new Set([...queueOf(after.processor)._queuedChanges.values()].map((doc) => doc._id));
+        for (let i = 0; i < length; i++) expect(ids.has(padId("doc", i)), `doc ${i} lost`).toBe(true);
+    });
 });
 
 describe("ReplicateResultProcessor restore of a large stored queue", () => {
@@ -1860,6 +1910,51 @@ describe("ReplicateResultProcessor reprocessing a changed filter", () => {
         lifecycle.ready = true;
         processor.resumeAfterApplicationReady();
         await vi.waitFor(async () => expect(await store.get(REPROCESS_POSITION_KEY)).toBeUndefined());
+    });
+
+    it("persists each batch before advancing its resume position, so a crash after the position keeps the batch", async () => {
+        const total = REPROCESS_BATCH * 2;
+        const allIds = Array.from({ length: total }, (_, i) => padId("file", i));
+        const yieldAll = async function* () {
+            for (const id of allIds) yield storedDoc(id);
+        };
+
+        // A store that lets the first batch's writes through, then crashes on the next snapshot write: a stop just
+        // after the first batch's resume position was stored. Because the snapshot commits before the position, the
+        // first batch is already persisted. Reversing that order (position before snapshot) loses it here.
+        const map = new Map<string, unknown>();
+        let snapshotBaseWrites = 0;
+        const store = {
+            get: vi.fn(async (key: string) => map.get(key)),
+            set: vi.fn(async (key: string, value: unknown) => {
+                if (key === SNAPSHOT_KEY && ++snapshotBaseWrites >= 2) {
+                    throw new Error("crash after the first batch's resume position was stored");
+                }
+                map.set(key, structuredClone(value));
+            }),
+            del: vi.fn(async (key: string) => void map.delete(key)),
+        };
+
+        const first = setup({ applicationReady: false, kv: store });
+        (first.processor as unknown as { triggerTakeSnapshot(): void }).triggerTakeSnapshot = () => undefined;
+        await first.processor.restoreFromSnapshotOnce();
+        (
+            first.processor.core as unknown as { localDatabase: { findAllNormalDocs: () => AsyncGenerator<unknown> } }
+        ).localDatabase.findAllNormalDocs = yieldAll;
+        await expect(first.processor.reprocessStoredDocuments()).rejects.toThrow("crash");
+
+        // The position advanced past the first batch, and that batch is in the committed snapshot it was stored with.
+        expect(await store.get(REPROCESS_POSITION_KEY)).toBe(allIds[REPROCESS_BATCH - 1]);
+
+        // A fresh run restores the snapshot and reprocesses from the stored position: every first-batch id is
+        // restored from the snapshot (the position keeps them from being re-read), so none is skipped and lost.
+        const second = setup({ applicationReady: false, kv: store });
+        (second.processor as unknown as { triggerTakeSnapshot(): void }).triggerTakeSnapshot = () => undefined;
+        await second.processor.restoreFromSnapshotOnce();
+        const restored = new Set([...queueOf(second.processor)._queuedChanges.values()].map((doc) => doc._id));
+        for (let i = 0; i < REPROCESS_BATCH; i++) {
+            expect(restored.has(allIds[i]), `first-batch id ${allIds[i]} lost`).toBe(true);
+        }
     });
 });
 

@@ -23,7 +23,12 @@ export interface ReleaseInstallRecords extends FailedReleaseRecords {
     hasFailedToLoad(packageSha256: string): boolean;
 }
 
-/** Entries kept per list. The oldest is dropped first; forgetting one only repeats a notice or an attempt. */
+/**
+ * How many `noticed` entries are kept: the oldest is dropped first, and forgetting one only repeats a notice once.
+ * `failedToLoad` is never capped. Dropping a failed-to-load hash would let its still-failing package be selected
+ * again after a restart (the session memory is gone), so a vault with more such packages than any cap would loop
+ * unload → restore → install → fail forever. The hashes are few and small, one per package this device rejected.
+ */
 export const MAX_RELEASE_INSTALL_RECORDS = 32;
 const MAX_RECORD_LENGTH = 512;
 
@@ -32,11 +37,18 @@ interface StoredRecords {
     failedToLoad: string[];
 }
 
-function readList(value: unknown): string[] {
+/** How many entries each list keeps. `failedToLoad` keeps every hash; see {@link MAX_RELEASE_INSTALL_RECORDS}. */
+const LIST_CAPS: Record<keyof StoredRecords, number> = {
+    noticed: MAX_RELEASE_INSTALL_RECORDS,
+    failedToLoad: Infinity,
+};
+
+function readList(value: unknown, cap: number): string[] {
     if (!Array.isArray(value)) return [];
-    return value
-        .filter((entry): entry is string => typeof entry === "string" && entry.length <= MAX_RECORD_LENGTH)
-        .slice(-MAX_RELEASE_INSTALL_RECORDS);
+    const entries = value.filter(
+        (entry): entry is string => typeof entry === "string" && entry.length <= MAX_RECORD_LENGTH
+    );
+    return Number.isFinite(cap) ? entries.slice(-cap) : entries;
 }
 
 function read(storage: DeviceLocalStorage): StoredRecords {
@@ -48,7 +60,10 @@ function read(storage: DeviceLocalStorage): StoredRecords {
         stored = undefined;
     }
     const records = isPlainObject(stored) ? stored : {};
-    return { noticed: readList(records.noticed), failedToLoad: readList(records.failedToLoad) };
+    return {
+        noticed: readList(records.noticed, LIST_CAPS.noticed),
+        failedToLoad: readList(records.failedToLoad, LIST_CAPS.failedToLoad),
+    };
 }
 
 export function createReleaseInstallRecords(storage: DeviceLocalStorage): ReleaseInstallRecords {
@@ -60,7 +75,9 @@ export function createReleaseInstallRecords(storage: DeviceLocalStorage): Releas
     const remember = (list: keyof StoredRecords, entry: string): boolean => {
         const records = read(storage);
         if (records[list].includes(entry)) return true;
-        records[list] = [...records[list], entry].slice(-MAX_RELEASE_INSTALL_RECORDS);
+        const cap = LIST_CAPS[list];
+        const next = [...records[list], entry];
+        records[list] = Number.isFinite(cap) ? next.slice(-cap) : next;
         try {
             storage.save(JSON.stringify(records));
         } catch {

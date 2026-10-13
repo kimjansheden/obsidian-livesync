@@ -652,6 +652,26 @@ describe("device-local records", () => {
         });
     });
 
+    it("never forgets a failed-to-load package, however many there are, so none is retried after a restart", () => {
+        let stored: unknown;
+        const storage = { load: () => stored, save: (value: string) => void (stored = value) };
+        const writer = createReleaseInstallRecords(storage);
+        const total = MAX_RELEASE_INSTALL_RECORDS * 2 + 5;
+        for (let index = 0; index < total; index++) writer.rememberFailedToLoad(`fail-${index}`);
+
+        // A later instance, as after a restart, reads only the store: its session memory is empty. Every failed hash
+        // must still be known, or its still-failing package would be selected and reinstalled again, looping forever.
+        const afterRestart = createReleaseInstallRecords(storage);
+        for (let index = 0; index < total; index++) {
+            expect(afterRestart.hasFailedToLoad(`fail-${index}`), `fail-${index} was forgotten`).toBe(true);
+        }
+        // The notice list, in contrast, stays bounded; only the failed-to-load list is kept in full.
+        for (let index = 0; index <= MAX_RELEASE_INSTALL_RECORDS; index++) writer.rememberNoticed(`notice-${index}`);
+        const rereadNotices = createReleaseInstallRecords(storage);
+        expect(rereadNotices.hasNoticed("notice-0")).toBe(false);
+        expect(rereadNotices.hasNoticed(`notice-${MAX_RELEASE_INSTALL_RECORDS}`)).toBe(true);
+    });
+
     it("are shared by instances which read the same storage", () => {
         let stored: unknown;
         const storage = { load: () => stored, save: (value: string) => void (stored = value) };
