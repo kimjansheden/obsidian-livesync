@@ -31,23 +31,183 @@ import type { ReactiveSource } from "octagonal-wheels/dataobject/reactive_v2";
 import type { LiveSyncBaseCore } from "@/LiveSyncBaseCore";
 import { isNotFoundError } from "@vrtmrz/livesync-commonlib/compat/common/utils.doc";
 import type PouchDB from "pouchdb-core";
-import { promiseWithResolvers, type PromiseWithResolvers } from "octagonal-wheels/promises";
+import { delay, promiseWithResolvers, type PromiseWithResolvers } from "octagonal-wheels/promises";
 
 const KV_KEY_REPLICATION_RESULT_PROCESSOR_SNAPSHOT = "replicationResultProcessorSnapshot";
 const REPROCESS_BATCH_SIZE = 100;
-type LocalApplicationActivityOwner = {
-    runBoundedLocalApplicationActivity<T>(task: () => T | PromiseLike<T>, options?: { label?: string }): Promise<T>;
+/** The key which holds how far the reprocessing of a changed filter has come, so a restart continues from there. */
+const KV_KEY_REPLICATION_RESULT_REPROCESS_POSITION = "replicationResultProcessorReprocessPosition";
+/**
+ * While no more documents than this wait to be processed, the whole queue is written as one record, in the exact
+ * shape an earlier release wrote (no `overflow` field). The value sits far above an ordinary replication batch and
+ * above the reprocessing bound below, so the common case keeps that single record: an earlier release reads and
+ * writes it unchanged, which makes both upgrade and downgrade trivial there. Above it the queue is paged, and the
+ * write for one change stays bounded by this record plus one page, whatever the length of the queue.
+ */
+export const SNAPSHOT_INLINE_LIMIT = 1000;
+/** How many documents one overflow page holds. */
+export const SNAPSHOT_PAGE_SIZE = 1000;
+/** How many documents are enqueued from a stored queue before yielding to the event loop while restoring. */
+export const RESTORE_SLICE_SIZE = 1000;
+/** The most documents the reprocessing of a changed filter keeps queued at once, so the queue stays bounded. */
+export const REPROCESS_QUEUE_LIMIT = 1000;
+/** How long the reprocessing waits between checks while the queue drains below its bound. */
+const REPROCESS_DRAIN_POLL_MS = 50;
+
+/** The small part of the key-value database this processor uses. `del` is absent on some hosts, so it is optional. */
+type SnapshotStore = {
+    get<T>(key: string): Promise<T>;
+    set(key: string, value: unknown): Promise<unknown>;
+    del?(key: string): Promise<void>;
 };
+type QueueDoc = PouchDB.Core.ExistingDocument<EntryDoc>;
+/** A contiguous range of overflow page numbers. */
+type OverflowRange = { fromPage: number; toPage: number };
+/** Thrown to end the filter reprocessing while the processor is suspended; the pass resumes on {@link ReplicateResultProcessor.resume}. */
+class ReprocessSuspended extends Error {}
+
+/**
+ * A first-in-first-out queue of documents, de-duplicated by id, with O(1) enqueue, replace and dequeue.
+ *
+ * An index from id to the slot which holds the document means adding or replacing one never scans the queue.
+ * A removed or replaced slot becomes a hole which the queue skips; a head page of only consumed slots is dropped.
+ * The documents are grouped into fixed-size pages with stable numbers, so that what must be written to survive a
+ * restart can be limited to the pages which changed.
+ */
+class PagedDocumentQueue {
+    /** pages[0] is the head. Each page holds up to `pageSize` slots; a consumed or removed slot holds undefined. */
+    private readonly pages: (QueueDoc | undefined)[][] = [];
+    /** The number of pages[0]. It only rises, as drained head pages are dropped, so a page keeps its number for life. */
+    private basePage = 0;
+    private readonly index = new Map<string, { page: number; slot: number }>();
+    /** The next slot to take from, within pages[0]. */
+    private headSlot = 0;
+    private _size = 0;
+    /** Overflow pages (number >= basePage + 1) whose content changed since the last {@link drainChangedPages}. */
+    private readonly changedOverflow = new Set<number>();
+
+    constructor(private readonly pageSize: number) {}
+
+    get size(): number {
+        return this._size;
+    }
+
+    get(id: string): QueueDoc | undefined {
+        const at = this.index.get(id);
+        return at ? this.pages[at.page - this.basePage][at.slot] : undefined;
+    }
+
+    /** Append a document, moving it to the end when it is already queued (its earlier slot becomes a hole). */
+    enqueue(doc: QueueDoc): void {
+        this.delete(doc._id);
+        let tail = this.pages[this.pages.length - 1];
+        if (tail === undefined || tail.length >= this.pageSize) {
+            tail = [];
+            this.pages.push(tail);
+        }
+        const page = this.basePage + this.pages.length - 1;
+        this.index.set(doc._id, { page, slot: tail.length });
+        tail.push(doc);
+        this._size++;
+        if (page > this.basePage) this.changedOverflow.add(page);
+    }
+
+    /** Remove a document by its id, if it is queued. */
+    delete(id: string): void {
+        const at = this.index.get(id);
+        if (!at) return;
+        this.pages[at.page - this.basePage][at.slot] = undefined;
+        this.index.delete(id);
+        this._size--;
+        if (at.page > this.basePage) this.changedOverflow.add(at.page);
+    }
+
+    /** Take the document at the head, skipping holes, or undefined when the queue is empty. */
+    dequeue(): QueueDoc | undefined {
+        while (this.pages.length > 0) {
+            const head = this.pages[0];
+            while (this.headSlot < head.length) {
+                const doc = head[this.headSlot];
+                this.headSlot++;
+                if (doc === undefined) continue;
+                this.index.delete(doc._id);
+                this._size--;
+                if (this.headSlot >= head.length) this.dropHeadPage();
+                return doc;
+            }
+            this.dropHeadPage();
+        }
+        return undefined;
+    }
+
+    private dropHeadPage(): void {
+        this.pages.shift();
+        this.basePage++;
+        this.headSlot = 0;
+        // The page which is now at the head, if any, has left the overflow; a later snapshot stops naming its key.
+        if (this.pages.length > 0) this.changedOverflow.delete(this.basePage);
+    }
+
+    /** The live documents in order, from the head. */
+    *values(): IterableIterator<QueueDoc> {
+        for (let i = 0; i < this.pages.length; i++) {
+            const from = i === 0 ? this.headSlot : 0;
+            const page = this.pages[i];
+            for (let slot = from; slot < page.length; slot++) {
+                const doc = page[slot];
+                if (doc !== undefined) yield doc;
+            }
+        }
+    }
+
+    /** The live documents of the head page, which the base record holds while the queue is paged. */
+    headDocs(): QueueDoc[] {
+        if (this.pages.length === 0) return [];
+        return this.pages[0].slice(this.headSlot).filter((doc): doc is QueueDoc => doc !== undefined);
+    }
+
+    /** The range of overflow page numbers, or undefined when the whole queue fits in the head page. */
+    overflowRange(): OverflowRange | undefined {
+        if (this.pages.length <= 1) return undefined;
+        return { fromPage: this.basePage + 1, toPage: this.basePage + this.pages.length - 1 };
+    }
+
+    /** The live documents of one overflow page. */
+    overflowPage(page: number): QueueDoc[] {
+        return this.pages[page - this.basePage].filter((doc): doc is QueueDoc => doc !== undefined);
+    }
+
+    /**
+     * The overflow pages whose content changed since the last call, by number, clearing the record. A snapshot
+     * rewrites exactly these under fresh keys; pages it does not name here keep the key an earlier snapshot wrote.
+     */
+    drainChangedPages(): number[] {
+        const changed = [...this.changedOverflow];
+        this.changedOverflow.clear();
+        return changed;
+    }
+}
+
 type ReplicateResultProcessorState = {
-    queued: PouchDB.Core.ExistingDocument<EntryDoc>[];
-    processing: PouchDB.Core.ExistingDocument<EntryDoc>[];
+    queued: QueueDoc[];
+    processing: QueueDoc[];
     /** Documents whose content could not be gathered yet. Snapshots of earlier versions do not have it. */
-    waiting?: PouchDB.Core.ExistingDocument<EntryDoc>[];
+    waiting?: QueueDoc[];
     /**
      * The IDs of the waiting documents whose missing content has not been reported with a notice yet, because it
      * was still to come. Snapshots of earlier versions do not have it.
      */
     waitingWithoutNotice?: string[];
+    /**
+     * Present only when the queue did not fit in this one record. It names, in queue order, the keys which hold the
+     * documents past the head page, one page each. Each key carries the generation that last wrote its page, so a
+     * rewrite takes a new key and never overwrites one this record still names. Absent within the inline limit, so
+     * an earlier release reads the record exactly as before and simply ignores the field it does not know.
+     */
+    overflow?: string[];
+};
+type LocalApplicationActivityOwner = {
+    runBoundedLocalApplicationActivity<T>(task: () => T | PromiseLike<T>, options?: { label?: string }): Promise<T>;
 };
 function shortenId(id: string): string {
     return id.length > 10 ? id.substring(0, 10) : id;
@@ -91,6 +251,9 @@ export class ReplicateResultProcessor {
         this._suspended = false;
         this.resumeAfterApplicationReady();
     }
+
+    /** Whether a filter reprocess stopped on suspension and should continue when the processor resumes. */
+    private _reprocessInterrupted = false;
     /**
      * Continue processing which was held back while the application was not ready.
      * An explicit suspension remains in effect.
@@ -98,6 +261,12 @@ export class ReplicateResultProcessor {
     public resumeAfterApplicationReady() {
         this.updateProcessingActivity();
         this.triggerProcessQueue();
+        // A filter reprocess which stopped because the processor was suspended continues from its stored position,
+        // whether suspension cleared through resume() or through the application becoming ready.
+        if (this._reprocessInterrupted && !this.isSuspended) {
+            this._reprocessInterrupted = false;
+            fireAndForget(() => this.reprocessStoredDocuments());
+        }
     }
 
     // Whether the processing is suspended
@@ -140,18 +309,113 @@ export class ReplicateResultProcessor {
             this.reportStatus();
             return;
         }
+        // Serialise the whole body so the throttled fire-and-forget and the awaited call in the processing
+        // `finally` cannot interleave page and base writes, which the crash-safe order below depends on.
+        await serialized(KV_KEY_REPLICATION_RESULT_PROCESSOR_SNAPSHOT, () => this._writeSnapshot());
+    }
+
+    private async _writeSnapshot() {
+        const store = this.core.kvDB as unknown as SnapshotStore;
+        const processing = this._processingChanges.slice();
+        const waiting = [...this._waitingChanges.values()];
+        const waitingWithoutNotice = [...this._waitingWithoutNotice];
+        const baseKey = KV_KEY_REPLICATION_RESULT_PROCESSOR_SNAPSHOT;
+        if (this._queuedChanges.size <= SNAPSHOT_INLINE_LIMIT) {
+            // The common case: the whole queue fits one record, written in the exact shape an earlier release reads.
+            const snapshot = {
+                queued: [...this._queuedChanges.values()],
+                processing,
+                waiting,
+                waitingWithoutNotice,
+            } satisfies ReplicateResultProcessorState;
+            await store.set(baseKey, snapshot);
+            // The base now holds the whole queue, so the overflow keys the previous base named are unreferenced.
+            const staleKeys = this._storedOverflowKeys;
+            this._storedOverflowKeys = [];
+            this._overflowKeys.clear();
+            await this._deleteOverflowKeys(store, staleKeys);
+            this.log(
+                `Snapshot taken. Queued: ${snapshot.queued.length}, Processing: ${processing.length}, Waiting: ${waiting.length}`,
+                LOG_LEVEL_DEBUG
+            );
+            this.reportStatus();
+            return;
+        }
+        // Above the limit: the head page stays in the base record, the rest is paged under per-page keys the base
+        // names. The base record is the single commit point. Each page whose content changed this interval is
+        // written under a fresh-generation key, never overwriting a key the committed base still names; an unchanged
+        // page keeps the key an earlier generation wrote it under. The base then commits naming the exact current
+        // set of keys, and only afterwards are the keys the previous base named but the new one does not (superseded
+        // pages, and pages which left the overflow) deleted. So some committed base names a key for every live id at
+        // every crash point: before the flip, the old base and its still-present keys; after it, the new base and
+        // the fresh keys written before it. A page which is both the source and the destination of a moved id is
+        // simply rewritten under one fresh key with its final content, so no page needs a before/after split and a
+        // move can duplicate an id but never lose it.
+        //
+        // Take one consistent cut synchronously, before the first await. serialized() blocks another snapshot but
+        // not enqueue/dequeue, which runProcessQueue performs between its own awaits, so reading the queue after an
+        // await could persist a base which no longer names head documents a concurrent dequeue just removed. Every
+        // value the writes persist is materialised here into plain arrays.
+        const headDocs = this._queuedChanges.headDocs();
+        const range = this._queuedChanges.overflowRange();
+        const currentPages: number[] = [];
+        if (range) for (let n = range.fromPage; n <= range.toPage; n++) currentPages.push(n);
+        const currentPageSet = new Set(currentPages);
+        const changed = new Set(this._queuedChanges.drainChangedPages());
+        const generation = ++this._snapshotGeneration;
+        const newKeys = new Map(this._overflowKeys);
+        const toWrite: { key: string; docs: QueueDoc[] }[] = [];
+        for (const n of currentPages) {
+            // A page is rewritten when its content changed, or when no key holds it yet (the first paged snapshot,
+            // or the first after a restore); an unchanged page keeps the key an earlier generation wrote it under.
+            if (changed.has(n) || !newKeys.has(n)) {
+                const key = this._overflowPageKey(generation, n);
+                newKeys.set(n, key);
+                toWrite.push({ key, docs: this._queuedChanges.overflowPage(n) });
+            }
+        }
+        // Drop the keys of pages which are no longer part of the overflow, so the base names only current pages.
+        for (const n of [...newKeys.keys()]) if (!currentPageSet.has(n)) newKeys.delete(n);
+        const overflow = currentPages.map((n) => newKeys.get(n)!);
         const snapshot = {
-            queued: this._queuedChanges.slice(),
-            processing: this._processingChanges.slice(),
-            waiting: [...this._waitingChanges.values()],
-            waitingWithoutNotice: [...this._waitingWithoutNotice],
+            queued: headDocs,
+            processing,
+            waiting,
+            waitingWithoutNotice,
+            overflow,
         } satisfies ReplicateResultProcessorState;
-        await this.core.kvDB.set(KV_KEY_REPLICATION_RESULT_PROCESSOR_SNAPSHOT, snapshot);
+        // From here only the captured values are used; the queue is never read again across an await.
+        for (const page of toWrite) await store.set(page.key, page.docs);
+        await store.set(baseKey, snapshot);
+        const named = new Set(overflow);
+        const stale = this._storedOverflowKeys.filter((key) => !named.has(key));
+        this._overflowKeys = newKeys;
+        this._storedOverflowKeys = overflow;
+        await this._deleteOverflowKeys(store, stale);
         this.log(
-            `Snapshot taken. Queued: ${snapshot.queued.length}, Processing: ${snapshot.processing.length}, Waiting: ${snapshot.waiting.length}`,
+            `Snapshot taken (paged). Head: ${snapshot.queued.length}, Overflow pages: ${overflow.length}, Processing: ${processing.length}, Waiting: ${waiting.length}`,
             LOG_LEVEL_DEBUG
         );
         this.reportStatus();
+    }
+
+    /**
+     * The key under which overflow page `n` is stored at generation `gen`. A page keeps its number but takes a
+     * fresh key each time it is rewritten, so a write never overwrites a key a committed base still names.
+     */
+    private _overflowPageKey(gen: number, n: number): string {
+        return `${KV_KEY_REPLICATION_RESULT_PROCESSOR_SNAPSHOT}:q:${gen}:${n}`;
+    }
+    /** The generation encoded in an overflow key, or -1 when it does not parse, to continue past the stored keys. */
+    private _overflowKeyGeneration(key: string): number {
+        const parts = key.split(":");
+        const gen = Number(parts[parts.length - 2]);
+        return Number.isFinite(gen) ? gen : -1;
+    }
+    /** Remove overflow keys no base still names, best effort; a host without `del` keeps them, which readers ignore. */
+    private async _deleteOverflowKeys(store: SnapshotStore, keys: Iterable<string>): Promise<void> {
+        if (!store.del) return;
+        for (const key of keys) await store.del(key);
     }
     /**
      * Trigger taking a snapshot.
@@ -168,32 +432,49 @@ export class ReplicateResultProcessor {
      * Restore from snapshot.
      */
     public async restoreFromSnapshot() {
-        const snapshot = await this.core.kvDB.get<ReplicateResultProcessorState>(
-            KV_KEY_REPLICATION_RESULT_PROCESSOR_SNAPSHOT
-        );
+        const store = this.core.kvDB as unknown as SnapshotStore;
+        const snapshot = await store.get<ReplicateResultProcessorState>(KV_KEY_REPLICATION_RESULT_PROCESSOR_SNAPSHOT);
         // What the previous run left is part of this run's state from here on, so snapshots may replace it.
         this._snapshotRestored = true;
-        if (snapshot) {
-            // Documents which waited for their content go on waiting, and are tried again before the next synchronisation.
-            const waiting = snapshot.waiting ?? [];
-            // A snapshot of an earlier version names none, as it gave every notice at once.
-            const waitingWithoutNotice = new Set(snapshot.waitingWithoutNotice);
-            for (const doc of waiting) {
-                if (this._waitingChanges.has(doc._id)) continue;
-                this._waitingChanges.set(doc._id, doc);
-                // The notice which was held back for it is still due when its content turns out not to come.
-                if (waitingWithoutNotice.has(doc._id)) this._waitingWithoutNotice.add(doc._id);
-            }
-            // Restoring the snapshot re-runs processing for both queued and processing items.
-            const newQueue = [...snapshot.processing, ...snapshot.queued, ...this._queuedChanges];
-            this._queuedChanges = [];
-            this.enqueueAll(newQueue);
-            this.log(
-                `Restored from snapshot (${snapshot.processing.length + snapshot.queued.length} items, ${waiting.length} waiting for their content)`,
-                LOG_LEVEL_INFO
-            );
-            // await this._takeSnapshot();
+        if (!snapshot) return;
+        // Documents which waited for their content go on waiting, and are tried again before the next synchronisation.
+        const waiting = snapshot.waiting ?? [];
+        // A snapshot of an earlier version names none, as it gave every notice at once.
+        const waitingWithoutNotice = new Set(snapshot.waitingWithoutNotice);
+        for (const doc of waiting) {
+            if (this._waitingChanges.has(doc._id)) continue;
+            this._waitingChanges.set(doc._id, doc);
+            // The notice which was held back for it is still due when its content turns out not to come.
+            if (waitingWithoutNotice.has(doc._id)) this._waitingWithoutNotice.add(doc._id);
         }
+        // The overflow keys the record names hold the queued documents past the head page, in order.
+        const overflow: QueueDoc[] = [];
+        const storedKeys = Array.isArray(snapshot.overflow) ? snapshot.overflow : [];
+        for (const key of storedKeys) {
+            const page = await store.get<QueueDoc[] | undefined>(key);
+            if (page) overflow.push(...page);
+        }
+        // Keep those keys on disk until the next snapshot commits a base of fresh keys; continue the generation past
+        // every stored key so a rewrite cannot reuse one of them before the new base stops naming it.
+        this._storedOverflowKeys = storedKeys;
+        this._overflowKeys.clear();
+        for (const key of storedKeys) {
+            this._snapshotGeneration = Math.max(this._snapshotGeneration, this._overflowKeyGeneration(key) + 1);
+        }
+        // Restoring re-runs processing for the processing items, the queued ones, and the overflow, before what
+        // was enqueued meanwhile. Enqueueing is O(1) per document, and runs in slices so a large queue does not
+        // block the event loop: a single stretch is at most RESTORE_SLICE_SIZE documents.
+        const carried = [...this._queuedChanges.values()];
+        this._queuedChanges = new PagedDocumentQueue(SNAPSHOT_PAGE_SIZE);
+        const toQueue = [...snapshot.processing, ...(snapshot.queued ?? []), ...overflow, ...carried];
+        for (let from = 0; from < toQueue.length; from += RESTORE_SLICE_SIZE) {
+            this.enqueueAll(toQueue.slice(from, from + RESTORE_SLICE_SIZE));
+            if (from + RESTORE_SLICE_SIZE < toQueue.length) await delay(0);
+        }
+        this.log(
+            `Restored from snapshot (${toQueue.length - carried.length} items, ${waiting.length} waiting for their content)`,
+            LOG_LEVEL_INFO
+        );
     }
 
     private _restoreFromSnapshot: Promise<void> | undefined = undefined;
@@ -238,7 +519,7 @@ export class ReplicateResultProcessor {
      */
     protected reportStatus() {
         this.services.replication.replicationResultCount.value =
-            this._queuedChanges.length + this._processingChanges.length;
+            this._queuedChanges.size + this._processingChanges.length;
     }
 
     /**
@@ -262,16 +543,63 @@ export class ReplicateResultProcessor {
      * by the previous filter, so a later ordinary sync cannot emit them again.
      */
     public async reprocessStoredDocuments(): Promise<number> {
+        const store = this.core.kvDB as unknown as SnapshotStore | undefined;
+        // A run interrupted by a restart left how far it had come; this one continues after that id, so no stored
+        // document is processed twice and none is left out. The documents stream a page at a time, so the memory in
+        // use does not grow with how many are stored.
+        const resumeFrom = store ? ((await store.get<string>(KV_KEY_REPLICATION_RESULT_REPROCESS_POSITION)) ?? "") : "";
         let count = 0;
+        let position = resumeFrom;
         let batch: PouchDB.Core.ExistingDocument<EntryDoc>[] = [];
-        for await (const document of this.localDatabase.findAllNormalDocs()) {
-            batch.push(document);
-            count++;
-            if (batch.length < REPROCESS_BATCH_SIZE) continue;
+        const flush = async () => {
+            if (batch.length === 0) return;
             this.enqueueAll(batch);
             batch = [];
+            // The position is stored only once the batch is queued, so what is on disk never runs ahead of it.
+            if (store) await store.set(KV_KEY_REPLICATION_RESULT_REPROCESS_POSITION, position);
+            // Keep the queue bounded: wait for it to drain below the limit before more is read and queued. A
+            // suspended processor never drains, so stop the pass instead of spinning; it resumes from the stored
+            // position when the processor resumes, which also lets the database cursor close.
+            while (this._queuedChanges.size + this._processingChanges.length >= REPROCESS_QUEUE_LIMIT) {
+                if (this.isSuspended) {
+                    this._reprocessInterrupted = true;
+                    throw new ReprocessSuspended();
+                }
+                this.triggerProcessQueue();
+                await delay(REPROCESS_DRAIN_POLL_MS);
+            }
+        };
+        let lastSeenId: string | undefined;
+        try {
+            for await (const document of this.localDatabase.findAllNormalDocs()) {
+                // The resume skip below relies on an ascending id order; fail loudly if the library ever breaks it,
+                // rather than silently skipping documents a lower position would cover.
+                if (lastSeenId !== undefined && document._id <= lastSeenId) {
+                    throw new Error(
+                        `findAllNormalDocs yielded ${document._id} after ${lastSeenId}, out of ascending id order`
+                    );
+                }
+                lastSeenId = document._id;
+                // A document at or before the stored position is already processed.
+                if (resumeFrom !== "" && document._id <= resumeFrom) continue;
+                batch.push(document);
+                count++;
+                position = document._id;
+                if (batch.length >= REPROCESS_BATCH_SIZE) await flush();
+            }
+            await flush();
+        } catch (error) {
+            if (error instanceof ReprocessSuspended) {
+                this.log(
+                    `Reprocessing is suspended after ${count} document(s); it continues when resumed`,
+                    LOG_LEVEL_INFO
+                );
+                return count;
+            }
+            throw error;
         }
-        if (batch.length > 0) this.enqueueAll(batch);
+        // Only a pass which read the whole database clears the position.
+        if (store) await store.del?.(KV_KEY_REPLICATION_RESULT_REPROCESS_POSITION);
         this.log(`Requeued ${count} stored document(s) after the reflection filters changed`, LOG_LEVEL_INFO);
         return count;
     }
@@ -314,9 +642,16 @@ export class ReplicateResultProcessor {
     }
 
     /**
-     * Queue of changes to be processed.
+     * Queue of changes to be processed, de-duplicated by id, with O(1) enqueue, replace and dequeue, and written
+     * in pages when it grows past {@link SNAPSHOT_INLINE_LIMIT}.
      */
-    private _queuedChanges: PouchDB.Core.ExistingDocument<EntryDoc>[] = [];
+    private _queuedChanges = new PagedDocumentQueue(SNAPSHOT_PAGE_SIZE);
+    /** The current storage key of each live overflow page, by page number; a changed page takes a fresh-gen key. */
+    private _overflowKeys = new Map<number, string>();
+    /** The overflow keys the committed base record names, deleted once a later base names a different set. */
+    private _storedOverflowKeys: string[] = [];
+    /** Rises each paged snapshot so a rewritten page takes a key no committed base still names; never reused. */
+    private _snapshotGeneration = 0;
 
     /**
      * List of changes being processed.
@@ -338,7 +673,7 @@ export class ReplicateResultProcessor {
      * A document which is already queued or being processed is left to that entry, which is at least as new.
      */
     public retryWaitingChanges() {
-        const busy = new Set([...this._queuedChanges, ...this._processingChanges].map((doc) => doc._id));
+        const busy = new Set([...this._queuedChanges.values(), ...this._processingChanges].map((doc) => doc._id));
         const waiting = [...this._waitingChanges.values()].filter((doc) => !busy.has(doc._id));
         if (waiting.length === 0) return;
         this.log(`Trying ${waiting.length} document(s) again which could not be applied yet`, LOG_LEVEL_INFO);
@@ -404,7 +739,7 @@ export class ReplicateResultProcessor {
             this._processingActivityDone?.resolve();
             return;
         }
-        const hasPendingDocuments = this._queuedChanges.length > 0 || this._processingChanges.length > 0;
+        const hasPendingDocuments = this._queuedChanges.size > 0 || this._processingChanges.length > 0;
         if (!hasPendingDocuments) {
             this._processingActivityDone?.resolve();
             return;
@@ -436,7 +771,8 @@ export class ReplicateResultProcessor {
      * @returns
      */
     protected enqueueChange(doc: PouchDB.Core.ExistingDocument<EntryDoc>) {
-        const old = this._queuedChanges.find((e) => e._id == doc._id);
+        // The index finds any queued revision of this id without a scan of the queue.
+        const old = this._queuedChanges.get(doc._id);
         const path = "path" in doc ? this.getPath(doc) : "<unknown>";
         const docNote = `${path} (${shortenId(doc._id)}, ${shortenRev(doc._rev)})`;
         if (old) {
@@ -444,19 +780,13 @@ export class ReplicateResultProcessor {
                 this.log(`[Enqueue] skipped (Already queued): ${docNote}`, LOG_LEVEL_VERBOSE);
                 return;
             }
-
-            const oldRev = old._rev ?? "";
-            const isDeletedBefore = old._deleted === true || ("deleted" in old && old.deleted === true);
-            const isDeletedNow = doc._deleted === true || ("deleted" in doc && doc.deleted === true);
-
-            // Replace the old queued change (This may performed batched updates, actually process performed always with the latest version, hence we can simply replace it if the change is the same type).
-            if (isDeletedBefore === isDeletedNow) {
-                this._queuedChanges = this._queuedChanges.filter((e) => e._id != doc._id);
-                this.log(`[Enqueue] requeued: ${docNote} (from rev: ${shortenRev(oldRev)})`, LOG_LEVEL_VERBOSE);
-            }
+            // The queue holds one entry per id, the latest to arrive: processing always reads the current
+            // database winner for the id rather than the queued document, so an earlier queued revision, deleted
+            // or not, would be processed to the same end. The start-up scan reconciles anything a collapse could
+            // skip. So a new revision replaces the queued one in place.
+            this.log(`[Enqueue] requeued: ${docNote} (from rev: ${shortenRev(old._rev ?? "")})`, LOG_LEVEL_VERBOSE);
         }
-        // Enqueue the change
-        this._queuedChanges.push(doc);
+        this._queuedChanges.enqueue(doc);
         this.updateProcessingActivity();
         this.triggerTakeSnapshot();
         this.triggerProcessQueue();
@@ -515,14 +845,14 @@ export class ReplicateResultProcessor {
         // Avoid re-entrance, suspend processing, or empty queue loop consumption.
         if (this._isRunningProcessQueue) return;
         if (this.isSuspended) return;
-        if (this._queuedChanges.length == 0) return;
+        if (this._queuedChanges.size == 0) return;
         try {
             this._isRunningProcessQueue = true;
-            while (this._queuedChanges.length > 0) {
+            while (this._queuedChanges.size > 0) {
                 // If getting suspended, bail the loop. Some concurrent tasks may still be running.
                 if (this.isSuspended) {
                     this.log(
-                        `Processing has got suspended. Remaining items in queue: ${this._queuedChanges.length}`,
+                        `Processing has got suspended. Remaining items in queue: ${this._queuedChanges.size}`,
                         LOG_LEVEL_INFO
                     );
                     break;
@@ -533,7 +863,7 @@ export class ReplicateResultProcessor {
                 const releaser = await this._semaphore.acquire();
                 releaser();
                 // Dequeue the next change
-                const doc = this._queuedChanges.shift();
+                const doc = this._queuedChanges.dequeue();
                 if (doc) {
                     this._processingChanges.push(doc);
                     void this.parseDocumentChange(doc);
@@ -601,7 +931,7 @@ export class ReplicateResultProcessor {
             // Remove from processing queue
             this._processingChanges = this._processingChanges.filter((e) => e !== change);
             try {
-                if (this._queuedChanges.length === 0 && this._processingChanges.length === 0) {
+                if (this._queuedChanges.size === 0 && this._processingChanges.length === 0) {
                     try {
                         await this._takeSnapshot();
                     } catch (error) {
