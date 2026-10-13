@@ -19,16 +19,27 @@ export class ObsidianVaultAdapter implements IVaultAdapter<TFile, TFolder> {
      * @param isWriteProtected Tells whether a path addresses a file which nothing may create or rename to through
      * this adapter: this plug-in's own installed files, kept out of every synchronised write at this choke point as
      * on the storage adapter. The installer writes the raw host adapter directly, never this one.
+     * @param isRemoveProtected Tells whether a path may not be renamed from or to: the protected files and also the
+     * plug-in's own directory and its ancestors, so a rename cannot move or replace the plug-in with its files.
+     * Defaults to {@link isWriteProtected}, which covers the files but no ancestor directory.
      */
     constructor(
         private app: App,
         private readonly aliasGuard: PathAliasGuard = createPathAliasGuard(app),
         private readonly linkGuard: ProtectedPathLinkGuard = noProtectedPathLinkGuard(),
-        private readonly isWriteProtected: (path: string) => boolean = () => false
+        private readonly isWriteProtected: (path: string) => boolean = () => false,
+        private readonly isRemoveProtected: (path: string) => boolean = isWriteProtected
     ) {}
 
     private assertMayCreate(path: string): void {
         if (this.isWriteProtected(path)) throw new Error("Refusing to change a write-protected file.");
+    }
+
+    /** A rename may neither move one of the protected paths away (its source) nor move or replace one (its target). */
+    private assertMayRename(fromPath: string, toPath: string): void {
+        if (this.isRemoveProtected(fromPath) || this.isRemoveProtected(toPath)) {
+            throw new Error("Refusing to change a write-protected file.");
+        }
     }
 
     async read(file: TFile): Promise<string> {
@@ -67,7 +78,7 @@ export class ObsidianVaultAdapter implements IVaultAdapter<TFile, TFolder> {
     }
 
     async rename(file: TFile, newPath: string): Promise<void> {
-        this.assertMayCreate(newPath);
+        this.assertMayRename(file.path, newPath);
         await this.linkGuard.assertNoLinkEscape(newPath);
         await this.aliasGuard.assertNoAlias(newPath);
         return await this.app.vault.rename(file, newPath);

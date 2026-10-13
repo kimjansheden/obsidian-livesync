@@ -16,14 +16,17 @@ export class FileAccessObsidian extends FileAccessBase<ObsidianFileSystemAdapter
      * through this access layer.
      * @param linkGuard Refuses a path which a symbolic link or junction resolves into a protected path. A no-op
      * where links cannot arise, such as on the mobile file system.
+     * @param isRemoveProtected Tells whether a path may not be removed or renamed: the protected files and also the
+     * plug-in's own directory and its ancestors, so a directory delete cannot take the plug-in's files with it.
      */
     constructor(
         app: App,
         dependencies: FileAccessBaseDependencies,
         isWriteProtected: (path: string) => boolean,
-        linkGuard: ProtectedPathLinkGuard = noProtectedPathLinkGuard()
+        linkGuard: ProtectedPathLinkGuard = noProtectedPathLinkGuard(),
+        isRemoveProtected?: (path: string) => boolean
     ) {
-        const adapter = new ObsidianFileSystemAdapter(app, isWriteProtected, linkGuard);
+        const adapter = new ObsidianFileSystemAdapter(app, isWriteProtected, linkGuard, isRemoveProtected);
         super(adapter, dependencies);
     }
 }

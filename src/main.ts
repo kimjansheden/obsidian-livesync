@@ -55,6 +55,7 @@ import { RUNNING_RELEASE_NUMBER } from "./serviceFeatures/releaseInstall/running
 import { trackLoadState, type SecurityReleaseStatus } from "./serviceFeatures/releaseInstall/releaseInstaller.ts";
 import {
     createOwnPluginProtectedPathMatcher,
+    createOwnPluginRemovalProtectedPathMatcher,
     pluginDirectoryOf,
 } from "./serviceFeatures/releaseInstall/trustedReleaseKeys.ts";
 import { createObsidianProtectedPathLinkGuard } from "./serviceModules/FileSystemAdapters/protectedPathLinkGuardObsidian.ts";
@@ -100,7 +101,10 @@ export default class ObsidianLiveSyncPlugin extends Plugin {
             // installer touches them, through the raw host adapter.
             createOwnPluginProtectedPathMatcher(pluginDirectoryOf(this)),
             // Nor may a symbolic link or junction resolve a synchronised write into the plug-in folder or those keys.
-            createObsidianProtectedPathLinkGuard(this.app, pluginDirectoryOf(this))
+            createObsidianProtectedPathLinkGuard(this.app, pluginDirectoryOf(this)),
+            // A remove or rename is refused for the plug-in's own directory and its ancestors too, so a synchronised
+            // directory delete cannot take the signed executables and the keys file down with it.
+            createOwnPluginRemovalProtectedPathMatcher(pluginDirectoryOf(this))
         );
         const storageEventManager = new StorageEventManagerObsidian(this, core, {
             fileProcessing: services.fileProcessing,

@@ -16,6 +16,7 @@ import { afterAll, describe, expect, it } from "vitest";
 import type { App, TFile } from "obsidian";
 import {
     createOwnPluginProtectedPathMatcher,
+    createOwnPluginRemovalProtectedPathMatcher,
     createTrustedReleaseKeysPathMatcher,
 } from "@/serviceFeatures/releaseInstall/trustedReleaseKeys";
 import { ObsidianStorageAdapter } from "./ObsidianStorageAdapter";
@@ -436,6 +437,8 @@ describe("a path which a symbolic link or junction resolves into the plug-in fol
             await expect(adapter.writeBinary("updates/main.js", new ArrayBuffer(2))).rejects.toThrow(REFUSAL);
             await expect(adapter.append("updates/main.js", "evil")).rejects.toThrow(REFUSAL);
             await expect(adapter.remove("updates/main.js")).rejects.toThrow(REFUSAL);
+            // Removing the junction itself, which resolves to the plug-in directory, is refused too.
+            await expect(adapter.remove("updates")).rejects.toThrow(REFUSAL);
             await expect(adapter.mkdir("updates/made")).rejects.toThrow(REFUSAL);
             await expect(adapter.write("updates/trusted-release-keys.json", "evil")).rejects.toThrow(REFUSAL);
 
@@ -481,14 +484,17 @@ describe("this plug-in's own installed files at the storage adapter", () => {
     const PROTECTED = [MAIN_JS, MANIFEST, STYLES, KEYS_FILE];
     const WRITE_PROTECTED = "write-protected";
 
-    // The production wiring: the one write-protection matcher at the synchronised-content adapter covers all of this
-    // plug-in's own installed files, so no synchronised write of any feature can reach them, whichever added it.
+    // The production wiring: the write-protection matcher covers this plug-in's own installed files for a write, and
+    // the removal matcher additionally covers the plug-in's own directory and its ancestors for a remove or rename,
+    // so no synchronised write or delete of any feature can reach them, whichever added it.
     function protectedAdapterOver(files: SyntheticFileSystem) {
         const app = files.app() as unknown as App;
         return new ObsidianStorageAdapter(
             app,
             createOwnPluginProtectedPathMatcher(PLUGIN_DIRECTORY),
-            createPathAliasGuard(app)
+            createPathAliasGuard(app),
+            undefined,
+            createOwnPluginRemovalProtectedPathMatcher(PLUGIN_DIRECTORY)
         );
     }
 
@@ -557,5 +563,65 @@ describe("this plug-in's own installed files at the storage adapter", () => {
         expect(await files.read(".obsidian/plugins/another-plugin/main.js")).toBe("updated");
         expect(await files.read("notes/b.md")).toBe("a note");
         expect(await files.read(`${PLUGIN_DIRECTORY}/data.json`)).toBe("new settings");
+    });
+
+    it.each([PLUGIN_DIRECTORY, `${CONFIG_DIRECTORY}/plugins`, CONFIG_DIRECTORY])(
+        "refuses removing %s, since it contains this plug-in's files",
+        async (directory) => {
+            const files = createSyntheticVault();
+            const adapter = protectedAdapterOver(files);
+            const before = files.snapshot();
+
+            await expect(adapter.remove(directory)).rejects.toThrow(WRITE_PROTECTED);
+
+            expect(files.changes()).toEqual([]);
+            expect(files.snapshot()).toEqual(before);
+            expect(await files.read(MAIN_JS)).toBe("the code");
+            expect(await files.read(KEYS_FILE)).toBe("the trusted keys");
+        }
+    );
+
+    it("refuses removing an aliased spelling of an ancestor, through the alias guard", async () => {
+        const files = createSyntheticVault();
+        const adapter = protectedAdapterOver(files);
+
+        await expect(adapter.remove("OBSIDI~1")).rejects.toThrow();
+        await expect(adapter.remove("OBSIDI~1/plugins/obsidian-livesync")).rejects.toThrow();
+
+        expect(files.changes()).toEqual([]);
+        expect(await files.read(MAIN_JS)).toBe("the code");
+    });
+
+    it("still removes an unrelated subfolder, a sibling plug-in, and this plug-in's data.json", async () => {
+        const files = createSyntheticVault()
+            .add(`${CONFIG_DIRECTORY}/themes/dark.css`, "theme")
+            .add(`${CONFIG_DIRECTORY}/plugins/another-plugin/main.js`, "other code");
+        const adapter = protectedAdapterOver(files);
+
+        await adapter.remove(`${CONFIG_DIRECTORY}/themes`);
+        await adapter.remove(`${CONFIG_DIRECTORY}/plugins/another-plugin`);
+        await adapter.remove(`${PLUGIN_DIRECTORY}/data.json`);
+
+        expect(await files.exists(`${CONFIG_DIRECTORY}/themes`)).toBe(false);
+        expect(await files.exists(`${CONFIG_DIRECTORY}/plugins/another-plugin`)).toBe(false);
+        expect(await files.exists(`${PLUGIN_DIRECTORY}/data.json`)).toBe(false);
+    });
+
+    it("refuses a rename which would move the plug-in directory away or replace an ancestor", async () => {
+        const files = createSyntheticVault();
+        const app = files.app() as unknown as App;
+        const vault = new ObsidianVaultAdapter(
+            app,
+            createPathAliasGuard(app),
+            undefined,
+            createOwnPluginProtectedPathMatcher(PLUGIN_DIRECTORY),
+            createOwnPluginRemovalProtectedPathMatcher(PLUGIN_DIRECTORY)
+        );
+
+        // Source is the plug-in directory (move it away), or the target replaces an ancestor directory.
+        await expect(vault.rename({ path: PLUGIN_DIRECTORY } as TFile, "notes/moved")).rejects.toThrow(WRITE_PROTECTED);
+        await expect(vault.rename({ path: "notes/a.md" } as TFile, CONFIG_DIRECTORY)).rejects.toThrow(WRITE_PROTECTED);
+
+        expect(app.vault.rename).not.toHaveBeenCalled();
     });
 });

@@ -98,6 +98,26 @@ export function createOwnPluginProtectedPathMatcher(pluginDirectory: string): (p
     return (path) => typeof path === "string" && protectedPaths.has(normaliseForComparison(path));
 }
 
+/**
+ * Create the test a remove or rename applies, which keeps those operations from destroying this plug-in's own
+ * installed files: it answers true for the protected files themselves and for the plug-in's own directory and
+ * every ancestor of it, since removing or renaming any of those takes the protected files with it. A sibling
+ * plug-in's directory, an unrelated directory, and this plug-in's own `data.json` are not matched, so they stay
+ * removable. The spellings are folded as for the file matcher; aliased and symbolic-link spellings are refused by
+ * the alias and link guards, which run beside this test.
+ */
+export function createOwnPluginRemovalProtectedPathMatcher(pluginDirectory: string): (path: string) => boolean {
+    const isProtectedFile = createOwnPluginProtectedPathMatcher(pluginDirectory);
+    const pluginDirectoryNormalised = normaliseForComparison(pluginDirectory);
+    return (path) => {
+        if (typeof path !== "string") return false;
+        if (isProtectedFile(path)) return true;
+        const target = normaliseForComparison(path);
+        // The plug-in directory itself, or an ancestor of it: removing or renaming it would take the plug-in with it.
+        return target !== "" && (pluginDirectoryNormalised === target || pluginDirectoryNormalised.startsWith(`${target}/`));
+    };
+}
+
 /** The plug-in's own folder, relative to the vault: the folder which the host loaded it from. */
 export function pluginDirectoryOf(plugin: {
     manifest: { id: string; dir?: string };

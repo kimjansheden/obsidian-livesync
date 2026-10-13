@@ -38,19 +38,33 @@ export class ObsidianStorageAdapter implements IStorageAdapter<Stat> {
      * the rules which decide by the spelling of a path hold for the name the file system uses.
      * @param linkGuard Refuses a path which a symbolic link or junction resolves into the plug-in folder or its
      * keys file, which the spelling and alias checks cannot see. A no-op where links cannot arise (mobile).
+     * @param isRemoveProtected Tells whether a path may not be removed through this adapter: the protected files,
+     * and also the plug-in's own directory and its ancestors, since removing one of those would take the protected
+     * files with it. Defaults to {@link isWriteProtected}, which covers the files but no ancestor directory.
      */
     constructor(
         private app: App,
         private readonly isWriteProtected: (path: string) => boolean = () => false,
         private readonly aliasGuard: PathAliasGuard = createPathAliasGuard(app),
-        private readonly linkGuard: ProtectedPathLinkGuard = noProtectedPathLinkGuard()
+        private readonly linkGuard: ProtectedPathLinkGuard = noProtectedPathLinkGuard(),
+        private readonly isRemoveProtected: (path: string) => boolean = isWriteProtected
     ) {
         this.staged = new StagedBinaryPublication(app.vault.adapter);
     }
 
-    /** What every operation which creates, changes or removes something checks before it reaches storage. */
+    /** What every operation which creates or changes something checks before it reaches storage. */
     private async assertMayChange(path: string): Promise<void> {
         if (this.isWriteProtected(path)) throw new Error("Refusing to change a write-protected file.");
+        await this.linkGuard.assertNoLinkEscape(path);
+        await this.aliasGuard.assertNoAlias(path);
+    }
+
+    /**
+     * What a removal checks: besides the write-protected files it also refuses the plug-in's own directory and its
+     * ancestors, so a synchronised delete of a directory cannot take the protected files down with it.
+     */
+    private async assertMayRemove(path: string): Promise<void> {
+        if (this.isRemoveProtected(path)) throw new Error("Refusing to change a write-protected file.");
         await this.linkGuard.assertNoLinkEscape(path);
         await this.aliasGuard.assertNoAlias(path);
     }
@@ -91,7 +105,7 @@ export class ObsidianStorageAdapter implements IStorageAdapter<Stat> {
 
     async remove(path: string): Promise<void> {
         assertVaultRelativePath(path);
-        await this.assertMayChange(path);
+        await this.assertMayRemove(path);
         await this.app.vault.adapter.remove(path);
     }
 
