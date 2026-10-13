@@ -25,6 +25,10 @@ vi.mock("@/features/LiveSyncCommands.ts", () => ({
         get settings() {
             return this.core.settings;
         }
+        // None of the paths in these tests is the file of trusted release keys.
+        isTrustedReleaseKeysPath() {
+            return false;
+        }
     },
 }));
 vi.mock("./configureHiddenFileSyncMode.ts", () => ({
@@ -77,6 +81,7 @@ function createHiddenRevisionOperation() {
     Object.assign(hiddenFileSync, {
         core: {
             services: {
+                appLifecycle: { hasUnloaded: () => false },
                 vault: {
                     isIgnoredByIgnoreFile: vi.fn(async () => false),
                 },

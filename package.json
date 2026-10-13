@@ -34,6 +34,7 @@
         "test:security-state-faults": "vitest run --config vitest.config.security-mutation.ts",
         "test:security-state-mutations": "stryker run",
         "security:policy": "node scripts/security/verify-repository-policy.mjs",
+        "security:release-marker": "node scripts/security/verify-release-marker.mjs --main main.js",
         "sbom": "node scripts/security/generate-sbom.mjs",
         "build:browser-apps": "npm run build --workspace livesync-webapp --workspace webpeer",
         "test:browser-apps": "npm run test:browser --workspace livesync-webapp && npm run test:browser --workspace webpeer",

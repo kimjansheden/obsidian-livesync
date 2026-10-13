@@ -69,6 +69,9 @@ export class ModuleLiveSyncMain extends AbstractModule {
                 return false;
             }
         }
+        // The host may have been unloaded while the layout was becoming ready, for example by a release install
+        // during start-up. Opening and scanning the database then does nothing useful; the next start begins again.
+        if (this.core.services.appLifecycle.hasUnloaded()) return false;
         // Start-up continues when only individual files of the scan failed; the preparation then completes itself.
         const scanOutcome: VaultScanOutcome = {};
         const isInitialized = await this.services.databaseEvents.initialiseDatabase(false, false, false, {
@@ -132,6 +135,8 @@ export class ModuleLiveSyncMain extends AbstractModule {
             this._log($msg("moduleLiveSyncMain.logPluginInitCancelled"), LOG_LEVEL_NOTICE);
             return false;
         }
+        // Do not open the database for a host which has been unloaded in the meantime.
+        if (this.core.services.appLifecycle.hasUnloaded()) return false;
         await this.services.database.openDatabase({
             databaseEvents: this.services.databaseEvents,
             replicator: this.services.replicator,

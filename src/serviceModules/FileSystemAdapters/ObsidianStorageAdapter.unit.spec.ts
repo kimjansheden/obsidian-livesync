@@ -81,10 +81,14 @@ describe("ObsidianStorageAdapter", () => {
         const append = vi.fn().mockResolvedValue(undefined);
         const app = {
             vault: {
+                // A new file at the root is not in the index and does not exist yet, so the alias guard allows it
+                // without listing anything.
+                getAbstractFileByPath: () => null,
                 adapter: {
                     write,
                     writeBinary,
                     append,
+                    exists: vi.fn(async () => false),
                 },
             },
         } as unknown as App;

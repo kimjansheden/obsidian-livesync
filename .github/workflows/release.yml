@@ -60,6 +60,16 @@ jobs:
           test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
           test "$(git rev-parse "refs/tags/$TAG^{commit}")" = "$EXPECTED_SHA"
           test "${TAG%%-security.*}" = "$(node -p "require('./package.json').version")"
+          node scripts/security/verify-release-marker.mjs --tag "$TAG"
+          # The release number must be higher than every earlier security release, so a device never passes over
+          # a number it has already seen. Devices compare only the number, so a lower one would not install.
+          new_number="${TAG##*-security.}"
+          for earlier in $(git tag --list '*-security.*'); do
+            [ "$earlier" = "$TAG" ] && continue
+            earlier_number="${earlier##*-security.}"
+            case "$earlier_number" in *[!0-9]*) continue ;; esac
+            [ "$new_number" -gt "$earlier_number" ] || { echo "Release number $new_number is not above earlier tag $earlier" >&2; exit 1; }
+          done
           test "$(git ls-remote --exit-code origin refs/heads/main | cut -f1)" = "$EXPECTED_SHA"
           git config gpg.ssh.allowedSignersFile docs/security/release-signers.allowed
           git verify-tag "$TAG"
@@ -123,6 +133,11 @@ jobs:
 
       - name: Build release artefacts
         run: npm run build
+
+      - name: Verify the release marker of the built plug-in
+        env:
+          TAG: ${{ inputs.tag }}
+        run: node scripts/security/verify-release-marker.mjs --main main.js --tag "$TAG"
 
       - name: Create SBOM, licence inventory, and source receipt
         env:

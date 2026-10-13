@@ -11,6 +11,8 @@ type SetupOptions = {
     isLastHidden?: boolean;
     hasFocus?: boolean;
     isSuspended?: boolean;
+    /** Whether the plug-in has been unloaded, which also suspends it. */
+    hasUnloaded?: boolean;
     // Platform is read via services.API.isMobile(); default desktop (false) so the feature applies.
     isMobile?: boolean;
     abortedStaleRequests?: number;
@@ -19,9 +21,12 @@ type SetupOptions = {
 };
 
 function setup(opts: SetupOptions) {
+    // As in the lifecycle service, an unloaded plug-in is suspended and not ready.
+    const lifecycleState = { unloaded: opts.hasUnloaded ?? false };
     const appLifecycle = {
-        isReady: vi.fn(() => true),
-        isSuspended: vi.fn(() => opts.isSuspended ?? false),
+        isReady: vi.fn(() => !lifecycleState.unloaded),
+        isSuspended: vi.fn(() => lifecycleState.unloaded || (opts.isSuspended ?? false)),
+        hasUnloaded: vi.fn(() => lifecycleState.unloaded),
         onSuspending: vi.fn(async () => true),
         onResuming: vi.fn(async () => true),
         onResumed: vi.fn(async () => true),
@@ -103,6 +108,7 @@ function setup(opts: SetupOptions) {
     return {
         module,
         appLifecycle,
+        lifecycleState,
         fileProcessing,
         boundedRemoteActivityCount,
         boundedLocalApplicationActivityCount,
@@ -118,6 +124,87 @@ function setup(opts: SetupOptions) {
         core,
     };
 }
+
+describe("an unloaded plug-in", () => {
+    afterEach(() => {
+        delete (globalThis as any).activeWindow;
+    });
+
+    const mobileObjectStorage = { isMobile: true, settings: { remoteType: REMOTE_MINIO } } as const;
+
+    it("sends what was written when the mobile app is hidden while it is loaded", async () => {
+        const { module, replicate, fileProcessing, hasUnsentLocalChanges } = setup({
+            ...mobileObjectStorage,
+            hidden: true,
+            unsentLocalChanges: true,
+        });
+
+        await module.watchWindowVisibilityAsync();
+        await vi.waitFor(() => expect(replicate).toHaveBeenCalledOnce(), { timeout: 5000 });
+
+        expect(fileProcessing.commitPendingFileEvents).toHaveBeenCalled();
+        expect(hasUnsentLocalChanges).toHaveBeenCalled();
+    });
+
+    it("neither saves, commits, sends nor suspends when the app is hidden", async () => {
+        const { module, appLifecycle, replicate, fileProcessing, editor, runBoundedLocalApplicationActivity } = setup({
+            ...mobileObjectStorage,
+            hidden: true,
+            unsentLocalChanges: true,
+            hasUnloaded: true,
+        });
+
+        await module.watchWindowVisibilityAsync();
+
+        expect(editor.save).not.toHaveBeenCalled();
+        expect(fileProcessing.commitPendingFileEvents).not.toHaveBeenCalled();
+        expect(runBoundedLocalApplicationActivity).not.toHaveBeenCalled();
+        expect(replicate).not.toHaveBeenCalled();
+        expect(appLifecycle.onSuspending).not.toHaveBeenCalled();
+    });
+
+    it("does not resume when the app is shown again", async () => {
+        const { module, appLifecycle } = setup({ hidden: false, isLastHidden: true, hasUnloaded: true });
+
+        await module.watchWindowVisibilityAsync();
+
+        expect(appLifecycle.onResuming).not.toHaveBeenCalled();
+        expect(appLifecycle.onResumed).not.toHaveBeenCalled();
+    });
+
+    it("does not apply a deferred suspension when its activity ends after the unload", async () => {
+        const { module, appLifecycle, lifecycleState, boundedRemoteActivityCount } = setup({
+            settings: { keepReplicationActiveInBackground: false, liveSync: false },
+            hidden: true,
+        });
+        boundedRemoteActivityCount.value = 1;
+        await module.watchWindowVisibilityAsync();
+
+        lifecycleState.unloaded = true;
+        boundedRemoteActivityCount.value = 0;
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        expect(appLifecycle.onSuspending).not.toHaveBeenCalled();
+    });
+
+    it("does not restart continuous replication when deferred activity ends after the unload", async () => {
+        const { module, appLifecycle, lifecycleState, boundedRemoteActivityCount } = setup({
+            settings: { keepReplicationActiveInBackground: true, liveSync: true },
+            hidden: false,
+            isLastHidden: true,
+        });
+        boundedRemoteActivityCount.value = 1;
+        await module.watchWindowVisibilityAsync();
+
+        lifecycleState.unloaded = true;
+        boundedRemoteActivityCount.value = 0;
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        expect(appLifecycle.onSuspending).not.toHaveBeenCalled();
+        expect(appLifecycle.onResuming).not.toHaveBeenCalled();
+        expect(appLifecycle.onResumed).not.toHaveBeenCalled();
+    });
+});
 
 describe("watchWindowVisibilityAsync — keepReplicationActiveInBackground", () => {
     afterEach(() => {
@@ -800,5 +887,59 @@ describe("watchWindowVisibilityAsync — sending what was written when the mobil
         expect(editor.save).not.toHaveBeenCalled();
         expect(storeFileToDBUnderFileEventLock).not.toHaveBeenCalled();
         expect(replicate).not.toHaveBeenCalled();
+    });
+});
+
+describe("the save-command wrapper across a reload in the same app session", () => {
+    interface SaveModule {
+        plugin: { app: { commands?: unknown } };
+        swapSaveCommand: () => void;
+        restoreSaveCommand: () => Promise<boolean>;
+        initialCallback?: () => void;
+    }
+    /** A module whose save command lives in the shared registry, as a second instance's would after a reload. */
+    function moduleOver(registry: { commands: Record<string, { callback: () => void }> }): SaveModule {
+        const module = setup({ hidden: false }).module as unknown as SaveModule;
+        module.plugin.app.commands = registry;
+        return module;
+    }
+
+    afterEach(() => {
+        delete (globalThis as any).activeWindow;
+    });
+
+    it("puts the original callback back at unload, so the next instance wraps the original", async () => {
+        const original = vi.fn();
+        const registry = { commands: { "editor:save-file": { callback: original as () => void } } };
+        const first = moduleOver(registry);
+
+        first.swapSaveCommand();
+        const firstWrapper = registry.commands["editor:save-file"].callback;
+        expect(firstWrapper).not.toBe(original);
+        expect(first.initialCallback).toBe(original);
+
+        await first.restoreSaveCommand();
+        expect(registry.commands["editor:save-file"].callback).toBe(original);
+
+        // The second instance, loaded after the first has unloaded, captures the true original.
+        const second = moduleOver(registry);
+        second.swapSaveCommand();
+        expect(second.initialCallback).toBe(original);
+        expect(registry.commands["editor:save-file"].callback).not.toBe(original);
+    });
+
+    it("leaves a newer instance's wrapper in place when the old instance unloads after it", async () => {
+        const original = vi.fn();
+        const registry = { commands: { "editor:save-file": { callback: original as () => void } } };
+        const first = moduleOver(registry);
+        first.swapSaveCommand();
+        const second = moduleOver(registry);
+        second.swapSaveCommand();
+        const secondWrapper = registry.commands["editor:save-file"].callback;
+
+        // The first instance unloads after the second has already replaced its wrapper.
+        await first.restoreSaveCommand();
+
+        expect(registry.commands["editor:save-file"].callback).toBe(secondWrapper);
     });
 });

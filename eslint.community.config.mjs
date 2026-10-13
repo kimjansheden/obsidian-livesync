@@ -30,6 +30,7 @@ export default defineConfig(
                 MANIFEST_VERSION: "readonly",
                 PACKAGE_VERSION: "readonly",
                 UPDATE_INFO: "readonly",
+                SECURITY_RELEASE_MARKER: "readonly",
                 hostPlatform: "readonly",
             },
             parserOptions: {

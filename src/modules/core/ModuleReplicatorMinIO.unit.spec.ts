@@ -83,6 +83,15 @@ describe("ModuleReplicatorMinIO synchronisation when the application starts or r
         expect(replicate).toHaveBeenCalledOnce();
     });
 
+    it("does not synchronise when an unloaded plug-in is resumed", async () => {
+        const { module, replicate } = createModule({ syncOnStart: true }, { ready: false, suspended: true });
+
+        await module._everyAfterResumeProcess();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        expect(replicate).not.toHaveBeenCalled();
+    });
+
     it("counts the start-up only once the application is ready", async () => {
         const { module, replicate, state } = createModule(
             { syncOnStart: true },
@@ -172,6 +181,18 @@ describe("ModuleReplicatorMinIO continuing after a synchronisation which receive
 
         expect(replicate).toHaveBeenCalledOnce();
         expect(takeDeferredReceiveContinuation).toHaveBeenCalledOnce();
+    });
+
+    it("starts nothing once the plug-in has unloaded, which leaves it suspended and not ready", async () => {
+        const { replicate, runSynchronisation, state, takeDeferredReceiveContinuation } = createBoundModule();
+        state.ready = false;
+        state.suspended = true;
+
+        runSynchronisation();
+        await settle();
+
+        expect(takeDeferredReceiveContinuation).not.toHaveBeenCalled();
+        expect(replicate).not.toHaveBeenCalled();
     });
 
     it("stops once a synchronisation received none", async () => {

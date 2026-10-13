@@ -5,6 +5,7 @@ import type { IStorageAdapter } from "@vrtmrz/livesync-commonlib/compat/serviceM
 import { toArrayBuffer } from "@vrtmrz/livesync-commonlib/compat/serviceModules/FileAccessBase";
 import type { Stat, App } from "obsidian";
 import { toIntegerTimestamps } from "./sanitizeWriteOptions";
+import { createPathAliasGuard, type PathAliasGuard } from "./pathAliasGuard";
 
 function assertVaultRelativePath(path: string, allowRoot = false): void {
     const unsafe =
@@ -25,8 +26,25 @@ function assertVaultRelativePath(path: string, allowRoot = false): void {
 
 export class ObsidianStorageAdapter implements IStorageAdapter<Stat> {
     private readonly staged: StagedBinaryPublication;
-    constructor(private app: App) {
+    /**
+     * @param isWriteProtected Tells whether a path addresses a file which nothing may create, change or remove
+     * through this adapter. Every writer and remover of synchronised content ends here, so this is where the file
+     * of trusted release keys is kept out of their reach.
+     * @param aliasGuard Refuses a path which reaches an existing entry by a name its folder does not list, so that
+     * the rules which decide by the spelling of a path hold for the name the file system uses.
+     */
+    constructor(
+        private app: App,
+        private readonly isWriteProtected: (path: string) => boolean = () => false,
+        private readonly aliasGuard: PathAliasGuard = createPathAliasGuard(app)
+    ) {
         this.staged = new StagedBinaryPublication(app.vault.adapter);
+    }
+
+    /** What every operation which creates, changes or removes something checks before it reaches storage. */
+    private async assertMayChange(path: string): Promise<void> {
+        if (this.isWriteProtected(path)) throw new Error("Refusing to change a write-protected file.");
+        await this.aliasGuard.assertNoAlias(path);
     }
 
     async writeBinaryInParts(
@@ -36,6 +54,7 @@ export class ObsidianStorageAdapter implements IStorageAdapter<Stat> {
         options?: UXDataWriteOptions
     ): Promise<boolean> {
         assertVaultRelativePath(path);
+        await this.assertMayChange(path);
         if (path === ".trash" || path.startsWith(".trash/")) throw new Error("A staging path cannot be a sync target");
         return this.staged.write(path, parts, publication, options);
     }
@@ -58,11 +77,13 @@ export class ObsidianStorageAdapter implements IStorageAdapter<Stat> {
 
     async mkdir(path: string): Promise<void> {
         assertVaultRelativePath(path, true);
+        await this.assertMayChange(path);
         await this.app.vault.adapter.mkdir(path);
     }
 
     async remove(path: string): Promise<void> {
         assertVaultRelativePath(path);
+        await this.assertMayChange(path);
         await this.app.vault.adapter.remove(path);
     }
 
@@ -78,16 +99,19 @@ export class ObsidianStorageAdapter implements IStorageAdapter<Stat> {
 
     async write(path: string, data: string, options?: UXDataWriteOptions): Promise<void> {
         assertVaultRelativePath(path);
+        await this.assertMayChange(path);
         return await this.app.vault.adapter.write(path, data, toIntegerTimestamps(options));
     }
 
     async writeBinary(path: string, data: ArrayBuffer, options?: UXDataWriteOptions): Promise<void> {
         assertVaultRelativePath(path);
+        await this.assertMayChange(path);
         return await this.app.vault.adapter.writeBinary(path, toArrayBuffer(data), toIntegerTimestamps(options));
     }
 
     async append(path: string, data: string, options?: UXDataWriteOptions): Promise<void> {
         assertVaultRelativePath(path);
+        await this.assertMayChange(path);
         return await this.app.vault.adapter.append(path, data, toIntegerTimestamps(options));
     }
 

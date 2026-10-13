@@ -46,6 +46,9 @@ describe("ObsidianVaultAdapter", () => {
                 modifyBinary,
                 create,
                 createBinary,
+                // A created file at the root is new, so the alias guard allows it without listing anything.
+                getAbstractFileByPath: () => null,
+                adapter: { exists: vi.fn(async () => false) },
             },
         } as unknown as App;
         const file = { path: "note.md" } as TFile;

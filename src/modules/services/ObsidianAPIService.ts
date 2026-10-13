@@ -6,6 +6,8 @@ import { ObsidianConfirm } from "./ObsidianConfirm";
 import type { Confirm } from "@vrtmrz/livesync-commonlib/compat/interfaces/Confirm";
 import { requestUrl, type RequestUrlParam } from "@/deps";
 import { compatGlobal } from "@vrtmrz/livesync-commonlib/compat/common/coreEnvFunctions";
+import type { RunningBuild } from "@vrtmrz/livesync-commonlib/compat/services/base/IService";
+import { RUNNING_RELEASE_NUMBER } from "@/serviceFeatures/releaseInstall/runningRelease";
 // All Services will be migrated to be based on Plain Services, not Injectable Services.
 // This is a migration step.
 
@@ -112,6 +114,18 @@ export class ObsidianAPIService extends InjectableAPIService<ObsidianServiceCont
 
     override getPluginVersion(): string {
         return this.context.plugin.manifest.version;
+    }
+
+    private loadedMainJsSha256: string | undefined;
+
+    /** Record the SHA-256 (lower-case hexadecimal) of the `main.js` which this instance was loaded from. */
+    setLoadedMainJsSha256(sha256: string): void {
+        this.loadedMainJsSha256 = sha256;
+    }
+
+    /** The build which this device reports in the remote milestone. */
+    override getRunningBuild(): RunningBuild {
+        return { mainJsSha256: this.loadedMainJsSha256, releaseNumber: RUNNING_RELEASE_NUMBER };
     }
 
     get confirm(): Confirm {

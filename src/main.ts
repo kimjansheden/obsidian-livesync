@@ -1,6 +1,7 @@
 import { getLanguage, Notice, Plugin, type App, type PluginManifest } from "./deps";
 import { setGetLanguage } from "@vrtmrz/livesync-commonlib/compat/common/coreEnvFunctions";
 setGetLanguage(getLanguage);
+import { LOG_LEVEL_NOTICE, LOG_LEVEL_VERBOSE, Logger } from "octagonal-wheels/common/logger";
 import { LiveSyncCommands } from "./features/LiveSyncCommands.ts";
 import { HiddenFileSync } from "./features/HiddenFileSync/CmdHiddenFileSync.ts";
 import { ConfigSync } from "./features/ConfigSync/CmdConfigSync.ts";
@@ -48,9 +49,32 @@ import { createOpenReplicationUI, createOpenRebuildUI } from "./features/P2PSync
 import { useCompatibilityReview } from "./serviceFeatures/compatibilityReview.ts";
 import { createObsidianCompatibilityReviewUi } from "./serviceFeatures/compatibilityReviewObsidian.ts";
 import { createFileReflectionProvenance } from "./serviceModules/FileReflectionProvenance.ts";
+import { useReleaseInstall } from "./serviceFeatures/releaseInstall/useReleaseInstall.ts";
+import { deviceLocalStorageOf } from "./serviceFeatures/releaseInstall/deviceLocalStorageObsidian.ts";
+import { RUNNING_RELEASE_NUMBER } from "./serviceFeatures/releaseInstall/runningRelease.ts";
+import { trackLoadState, type SecurityReleaseStatus } from "./serviceFeatures/releaseInstall/releaseInstaller.ts";
+import {
+    createTrustedReleaseKeysPathMatcher,
+    pluginDirectoryOf,
+} from "./serviceFeatures/releaseInstall/trustedReleaseKeys.ts";
+import type { ObsidianAPIService } from "./modules/services/ObsidianAPIService.ts";
 export type LiveSyncCore = LiveSyncBaseCore<ObsidianServiceContext, LiveSyncCommands>;
+/** How long a notice about an installed release stays; notices about a failure stay until dismissed. */
+const RELEASE_NOTICE_DURATION_MS = 15_000;
+
 export default class ObsidianLiveSyncPlugin extends Plugin {
     core: LiveSyncCore;
+
+    /**
+     * The release number which this build carries, and how far this instance has loaded.
+     *
+     * A build which installs a newer one from a release package reads this from the instance it has just loaded,
+     * so the name and the shape of this property are part of that protocol and must stay as they are.
+     */
+    readonly securityRelease: SecurityReleaseStatus = { releaseNumber: RUNNING_RELEASE_NUMBER, loadState: "loading" };
+
+    /** Settles when the teardown which `onunload` started has ended, however it ended. */
+    private teardown: Promise<void> | undefined;
 
     /**
      * Initialise service modules.
@@ -61,13 +85,18 @@ export default class ObsidianLiveSyncPlugin extends Plugin {
     ): ServiceModules {
         const storageAccessManager = new StorageAccessManager();
         // If we want to implement to the other platform, implement ObsidianXXXXXService.
-        const vaultAccess = new FileAccessObsidian(this.app, {
-            storageAccessManager: storageAccessManager,
-            vaultService: services.vault,
-            settingService: services.setting,
-            APIService: services.API,
-            pathService: services.path,
-        });
+        const vaultAccess = new FileAccessObsidian(
+            this.app,
+            {
+                storageAccessManager: storageAccessManager,
+                vaultService: services.vault,
+                settingService: services.setting,
+                APIService: services.API,
+                pathService: services.path,
+            },
+            // The keys which release packages are verified against are never written, replaced or removed here.
+            createTrustedReleaseKeysPathMatcher(pluginDirectoryOf(this))
+        );
         const storageEventManager = new StorageEventManagerObsidian(this, core, {
             fileProcessing: services.fileProcessing,
             setting: services.setting,
@@ -203,6 +232,15 @@ export default class ObsidianLiveSyncPlugin extends Plugin {
                 );
                 waitForCompatibilityReview = () => compatibilityReview.openReview();
                 useReviewHarness(core, this, replicator, compatibilityReview);
+                useReleaseInstall(core, this, {
+                    showNotice: (message, lasting) =>
+                        void new Notice(message, lasting ? 0 : RELEASE_NOTICE_DURATION_MS),
+                    reportLoadedMainJs: (sha256) =>
+                        (core.services.API as ObsidianAPIService).setLoadedMainJsSha256(sha256),
+                    waitForTeardown: () => this.teardown ?? Promise.resolve(),
+                    isAppHidden: () => activeWindow.document.hidden,
+                    deviceLocalStorage: (key) => deviceLocalStorageOf(this.app, key),
+                });
                 // p2pReplicatorResult = useP2PReplicator(core, [
                 //     VIEW_TYPE_P2P,
                 //     (leaf: any) => new P2PReplicatorPaneView(leaf, core, p2pReplicatorResult!),
@@ -212,7 +250,7 @@ export default class ObsidianLiveSyncPlugin extends Plugin {
     }
 
     private async _startUp() {
-        if (!(await this.core.services.control.onLoad())) return;
+        if (!(await trackLoadState(this.securityRelease, () => this.core.services.control.onLoad()))) return;
         const onReady = this.core.services.control.onReady.bind(this.core.services.control);
         this.app.workspace.onLayoutReady(onReady);
     }
@@ -220,6 +258,10 @@ export default class ObsidianLiveSyncPlugin extends Plugin {
         void this._startUp();
     }
     override onunload(): void {
-        return void this.core.services.control.onUnload();
+        // Whoever waits for the teardown waits for its end; a failure is logged like any other.
+        this.teardown = this.core.services.control.onUnload().catch((error: unknown) => {
+            Logger("Unloading did not complete", LOG_LEVEL_NOTICE);
+            Logger(error, LOG_LEVEL_VERBOSE);
+        });
     }
 }

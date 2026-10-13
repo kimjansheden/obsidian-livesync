@@ -271,7 +271,7 @@ export class HiddenFileSync extends LiveSyncCommands {
 
     async _anyProcessOptionalSyncFiles(doc: LoadedEntry): Promise<boolean> {
         if (isInternalMetadata(doc._id)) {
-            if (this.isThisModuleEnabled()) {
+            if (this.isThisModuleEnabled() && !this.services.appLifecycle.hasUnloaded()) {
                 //system file
                 const filename = this.getPath(doc);
                 const unprefixedPath = stripAllPrefixes(filename);
@@ -1057,6 +1057,8 @@ Offline Changed files: ${processFiles.length}`;
     }
 
     async isTargetFile(path: FilePath): Promise<boolean> {
+        // The trust anchor of release installation never travels with synchronised content, in either direction.
+        if (this.isTrustedReleaseKeysPath(path)) return false;
         const result =
             this.isTargetFileInPatterns(path) &&
             this.isNotIgnoredByCustomisationSync(path) &&
@@ -1775,6 +1777,10 @@ Offline Changed files: ${files.length}`;
         requiredLiveRevision?: string
     ) {
         const prefixedFileName = addPrefix(storageFilePath, ICHeader);
+        // Nothing is written from the database once the host has unloaded, and the trusted release keys never are.
+        if (this.services.appLifecycle.hasUnloaded() || this.isTrustedReleaseKeysPath(storageFilePath)) {
+            return undefined;
+        }
         if (await this.services.vault.isIgnoredByIgnoreFile(storageFilePath)) {
             return undefined;
         }

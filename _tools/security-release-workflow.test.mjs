@@ -4,6 +4,12 @@ const { describe, it } = process.getBuiltinModule("node:test");
 import commonlibIdentity from "../docs/security/commonlib-release.json" with { type: "json" };
 import { normaliseCycloneDxSbom } from "../scripts/security/generate-sbom.mjs";
 import { validateCommonlibSourceReceipt } from "../scripts/security/verify-commonlib-source-receipt.mjs";
+import securityRelease from "../security-release.json" with { type: "json" };
+import {
+    evaluateReleaseMarker,
+    readReleaseNumber,
+    releaseMarkerText,
+} from "../scripts/security/verify-release-marker.mjs";
 
 const releaseWorkflow = await readFile(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");
 const validCommonlibReceipt = {
@@ -81,6 +87,41 @@ describe("attested security release workflow", () => {
         assert.notEqual(workflowTests, -1, "release workflow contract tests are missing");
         assert.ok(workflowTests < artefactCreation, "workflow tests must precede artefact creation");
         assert.ok(workflowTests < publication, "workflow tests must precede publication");
+    });
+
+    it("refuses a tag which does not name the declared release before anything is installed or built", () => {
+        const tagCheck = releaseWorkflow.indexOf('verify-release-marker.mjs --tag "$TAG"');
+        const installation = releaseWorkflow.indexOf("name: Install locked dependencies");
+
+        assert.notEqual(tagCheck, -1, "the release tag is not checked against the declared release number");
+        assert.ok(tagCheck < installation, "the release tag must be checked before dependencies are installed");
+    });
+
+    it("refuses a release number which is not above every earlier security tag", () => {
+        assert.match(releaseWorkflow, /git tag --list '\*-security\.\*'/u);
+        assert.match(releaseWorkflow, /"\$new_number" -gt "\$earlier_number"/u);
+    });
+
+    it("verifies the release marker of the built plug-in before any artefact is created", () => {
+        const build = releaseWorkflow.indexOf("name: Build release artefacts");
+        const markerCheck = releaseWorkflow.indexOf('verify-release-marker.mjs --main main.js --tag "$TAG"');
+        const artefactCreation = releaseWorkflow.indexOf("name: Create SBOM, licence inventory, and source receipt");
+
+        assert.notEqual(markerCheck, -1, "the built main.js is not checked for its release marker");
+        assert.ok(build < markerCheck, "the release marker must be checked in the built main.js");
+        assert.ok(markerCheck < artefactCreation, "the release marker must be checked before artefacts are created");
+    });
+
+    it("declares a release number which the marker check accepts in a build which carries it once", () => {
+        const releaseNumber = readReleaseNumber(securityRelease);
+        const marker = new TextEncoder().encode(`var m = "${releaseMarkerText(securityRelease)}";`);
+
+        assert.deepEqual(evaluateReleaseMarker({ mainJs: marker, releaseNumber }), { ok: true, errors: [] });
+        assert.equal(
+            evaluateReleaseMarker({ mainJs: new Uint8Array([...marker, ...marker]), releaseNumber }).ok,
+            false
+        );
+        assert.equal(evaluateReleaseMarker({ mainJs: marker, releaseNumber: releaseNumber + 1 }).ok, false);
     });
 
     it("creates the release SBOM through the repository generator", () => {

@@ -78,5 +78,8 @@ jobs:
       - name: Build the plugin
         run: npm run build
 
+      - name: Verify the release marker of the built plug-in
+        run: npm run security:release-marker
+
       - name: Verify generated plugin files exist
         run: test -s main.js && test -s manifest.json && test -s styles.css

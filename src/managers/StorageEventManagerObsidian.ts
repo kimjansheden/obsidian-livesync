@@ -12,7 +12,8 @@ export class StorageEventManagerObsidian extends StorageEventManagerBase<Obsidia
 
     constructor(plugin: ObsidianLiveSyncPlugin, core: LiveSyncCore, dependencies: StorageEventManagerBaseDependencies) {
         const adapter = new ObsidianStorageEventManagerAdapter(plugin, core, dependencies.fileProcessing);
-        super(adapter, dependencies);
+        // Events which arrive, or are still queued, after the plug-in has unloaded are left to the next start.
+        super(adapter, { ...dependencies, appLifecycle: core.services.appLifecycle });
         this.core = core;
     }
 

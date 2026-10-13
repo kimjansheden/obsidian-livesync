@@ -82,6 +82,7 @@ function createStartupHarness(options: StartupOptions) {
         },
         appLifecycle: {
             onLayoutReady: vi.fn(async () => true),
+            hasUnloaded: vi.fn(() => false),
             resetIsReady: vi.fn(),
             markIsReady: vi.fn(() => {
                 phases.push("markIsReady");
@@ -214,6 +215,16 @@ const COMPLETE_STARTUP = [
 ];
 
 describe("ModuleLiveSyncMain start-up", () => {
+    it("does not open or scan the database when the host was unloaded while the layout became ready", async () => {
+        const { module, phases, services } = createStartupHarness({ chunksArrived: true });
+        vi.mocked(services.appLifecycle.hasUnloaded).mockReturnValue(true);
+
+        await expect(module._onLiveSyncReady()).resolves.toBe(false);
+
+        expect(services.databaseEvents.initialiseDatabase).not.toHaveBeenCalled();
+        expect(phases).not.toContain("onFirstInitialise");
+    });
+
     it("completes start-up when only a file whose chunks have not arrived could not be written", async () => {
         const { module, phases, dbToStorage, parseSynchroniseResult, startupLog } = createStartupHarness({
             chunksArrived: false,

@@ -3,12 +3,21 @@ import type { IVaultAdapter } from "@vrtmrz/livesync-commonlib/compat/serviceMod
 import { toArrayBuffer } from "@vrtmrz/livesync-commonlib/compat/serviceModules/FileAccessBase";
 import type { TFile, App, TFolder } from "obsidian";
 import { toIntegerTimestamps } from "./sanitizeWriteOptions";
+import { createPathAliasGuard, type PathAliasGuard } from "./pathAliasGuard";
 
 /**
  * Vault adapter implementation for Obsidian
  */
 export class ObsidianVaultAdapter implements IVaultAdapter<TFile, TFolder> {
-    constructor(private app: App) {}
+    /**
+     * @param aliasGuard Refuses a path which reaches an existing entry by a name its folder does not list. A file
+     * which the vault index holds is addressed by the name it is listed under; a path which is not in the index
+     * yet, the one of a file to create or the target of a rename, is checked here.
+     */
+    constructor(
+        private app: App,
+        private readonly aliasGuard: PathAliasGuard = createPathAliasGuard(app)
+    ) {}
 
     async read(file: TFile): Promise<string> {
         // Vault.read strips a leading UTF-8 BOM, leaving the content size inconsistent with TFile.stat.
@@ -32,14 +41,17 @@ export class ObsidianVaultAdapter implements IVaultAdapter<TFile, TFolder> {
     }
 
     async create(path: string, data: string, options?: UXDataWriteOptions): Promise<TFile> {
+        await this.aliasGuard.assertNoAlias(path);
         return await this.app.vault.create(path, data, toIntegerTimestamps(options));
     }
 
     async createBinary(path: string, data: ArrayBuffer, options?: UXDataWriteOptions): Promise<TFile> {
+        await this.aliasGuard.assertNoAlias(path);
         return await this.app.vault.createBinary(path, toArrayBuffer(data), toIntegerTimestamps(options));
     }
 
     async rename(file: TFile, newPath: string): Promise<void> {
+        await this.aliasGuard.assertNoAlias(newPath);
         return await this.app.vault.rename(file, newPath);
     }
 

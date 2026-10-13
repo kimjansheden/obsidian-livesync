@@ -10,6 +10,12 @@ import { minify } from "terser";
 import inlineWorkerPlugin from "esbuild-plugin-inline-worker";
 import { terserOption } from "./terser.config.mjs";
 import path from "node:path";
+import {
+    RELEASE_MARKER_CONSTANT,
+    enforceReleaseMarker,
+    readReleaseNumber,
+    releaseMarkerText,
+} from "./scripts/security/verify-release-marker.mjs";
 
 const prod = process.argv[2] === "production" || process.env?.BUILD_MODE === "production";
 const keepTest = true; //!prod;
@@ -17,6 +23,7 @@ const keepTest = true; //!prod;
 const manifestJson = JSON.parse(fs.readFileSync("./manifest.json") + "");
 const packageJson = JSON.parse(fs.readFileSync("./package.json") + "");
 const updateInfo = JSON.stringify(fs.readFileSync("./updates.md") + "");
+const securityRelease = JSON.parse(fs.readFileSync("./security-release.json") + "");
 
 const PATHS_TEST_INSTALL = process.env?.PATHS_TEST_INSTALL || "";
 const PATH_TEST_INSTALL = PATHS_TEST_INSTALL.split(path.delimiter)
@@ -138,6 +145,14 @@ const plugins = [
                 } else {
                     fs.copyFileSync("./main_org.js", "./main.js");
                 }
+                // A production build must carry the release marker exactly once before main.js is copied anywhere,
+                // so a test-install path never receives a build which the release gate would reject.
+                if (prod) {
+                    enforceReleaseMarker({
+                        mainJs: fs.readFileSync("./main.js"),
+                        releaseNumber: readReleaseNumber(securityRelease),
+                    });
+                }
                 if (PATH_TEST_INSTALL) {
                     for (const installPath of PATH_TEST_INSTALL) {
                         const realPath = path.resolve(installPath);
@@ -184,6 +199,7 @@ const context = await esbuild.context({
         MANIFEST_VERSION: `"${manifestJson.version}"`,
         PACKAGE_VERSION: `"${packageJson.version}"`,
         UPDATE_INFO: `${updateInfo}`,
+        [RELEASE_MARKER_CONSTANT]: JSON.stringify(releaseMarkerText(securityRelease)),
         global: "window",
     },
     external: externals,
@@ -220,6 +236,16 @@ const context = await esbuild.context({
 
 if (prod) {
     await context.rebuild();
+    // A release package is accepted only if its main.js carries the release marker exactly once.
+    try {
+        enforceReleaseMarker({
+            mainJs: fs.readFileSync("./main.js"),
+            releaseNumber: readReleaseNumber(securityRelease),
+        });
+    } catch (error) {
+        console.error(error instanceof Error ? error.message : error);
+        process.exit(1);
+    }
     process.exit(0);
 } else {
     await context.watch();

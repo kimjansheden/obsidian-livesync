@@ -94,8 +94,13 @@ function setup(options: SetupOptions = {}) {
     const setSnapshot = vi.fn(options.setSnapshot ?? (async () => undefined));
     const getSnapshot = vi.fn(options.getSnapshot ?? (async () => undefined));
     const runBoundedLocalApplicationActivity = vi.fn(async (task: () => Promise<void>) => await task());
-    const lifecycle = { ready: options.applicationReady ?? true, databaseReady: options.databaseReady ?? true };
-    const isReady = vi.fn(() => lifecycle.ready);
+    // As in the lifecycle service, an unloaded plug-in is suspended and not ready.
+    const lifecycle = {
+        ready: options.applicationReady ?? true,
+        databaseReady: options.databaseReady ?? true,
+        unloaded: false,
+    };
+    const isReady = vi.fn(() => lifecycle.ready && !lifecycle.unloaded);
     const isDatabaseReady = vi.fn(() => lifecycle.databaseReady);
     const getDBEntryFromMeta = vi.fn(async (entry: { _id: string; _rev: string }, ..._options: unknown[]) =>
         state.chunksArrived ? { ...entry, data: "x" } : false
@@ -105,7 +110,7 @@ function setup(options: SetupOptions = {}) {
     );
     const core = {
         services: {
-            appLifecycle: { isReady, isSuspended: () => false },
+            appLifecycle: { isReady, isSuspended: () => lifecycle.unloaded },
             database: { isDatabaseReady },
             path: { getPath: (entry: { path: string }) => entry.path },
             replication: {
@@ -181,6 +186,42 @@ function waitingInLatestSnapshot(setSnapshot: ReturnType<typeof vi.fn>): string[
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe("ReplicateResultProcessor", () => {
+    it("applies no replicated document once the plug-in has unloaded", async () => {
+        const { lifecycle, processor, processSynchroniseResult, runBoundedLocalApplicationActivity } = setup();
+        lifecycle.unloaded = true;
+
+        processor.enqueueAll([note("one")]);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        expect(processor.isSuspended).toBe(true);
+        expect(processSynchroniseResult).not.toHaveBeenCalled();
+        expect(runBoundedLocalApplicationActivity).not.toHaveBeenCalled();
+    });
+
+    it("applies none after unloading in remediation mode either, which does not wait for readiness", async () => {
+        const { lifecycle, processor, processSynchroniseResult } = setup({
+            applicationReady: false,
+            maxMTimeForReflectEvents: Date.parse("2026-09-01T00:00:00Z"),
+        });
+        lifecycle.unloaded = true;
+
+        processor.enqueueAll([note("one")]);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        expect(processSynchroniseResult).not.toHaveBeenCalled();
+    });
+
+    it("does not try waiting documents again once the plug-in has unloaded", async () => {
+        const { lifecycle, processor, processSynchroniseResult } = setup();
+        lifecycle.unloaded = true;
+        processor.enqueueAll([note("one")]);
+
+        processor.retryWaitingChanges();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        expect(processSynchroniseResult).not.toHaveBeenCalled();
+    });
+
     it("holds replicated documents while the application is not ready", async () => {
         const { isReady, processor, processSynchroniseResult, runBoundedLocalApplicationActivity } = setup({
             applicationReady: false,

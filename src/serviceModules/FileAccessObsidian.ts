@@ -7,8 +7,12 @@ import { ObsidianFileSystemAdapter } from "./FileSystemAdapters/ObsidianFileSyst
  * Uses ObsidianFileSystemAdapter for platform-specific operations
  */
 export class FileAccessObsidian extends FileAccessBase<ObsidianFileSystemAdapter> {
-    constructor(app: App, dependencies: FileAccessBaseDependencies) {
-        const adapter = new ObsidianFileSystemAdapter(app);
+    /**
+     * @param isWriteProtected Tells whether a path addresses a file which nothing may create, change or remove
+     * through this access layer.
+     */
+    constructor(app: App, dependencies: FileAccessBaseDependencies, isWriteProtected: (path: string) => boolean) {
+        const adapter = new ObsidianFileSystemAdapter(app, isWriteProtected);
         super(adapter, dependencies);
     }
 }

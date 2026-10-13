@@ -1,0 +1,91 @@
+/**
+ * The trust anchor of release installation: the file `trusted-release-keys.json` in the plug-in's own folder.
+ *
+ * Whoever can write that folder can already replace the plug-in's code, so the keys are exactly as protected as
+ * the code they gate. The plug-in only ever reads the file; it never writes, replaces or removes it.
+ */
+import { decodeCanonicalBase64, decodeStrictUtf8, hasExactKeys, isPlainObject } from "./releaseBytes";
+import { importReleaseKey, releaseKeyId, type TrustedReleaseKey } from "./releasePackage";
+
+export const TRUSTED_RELEASE_KEYS_FILE = "trusted-release-keys.json";
+
+const TRUSTED_KEYS_FORMAT = 1;
+const TRUSTED_KEYS_FIELDS = ["format", "keys"];
+const MAX_TRUSTED_KEYS = 8;
+
+export type TrustedReleaseKeysResult =
+    | { status: "valid"; keys: TrustedReleaseKey[] }
+    /** `reason` names what is wrong with the file. It never quotes the file's content. */
+    | { status: "invalid"; reason: string };
+
+/**
+ * Parse the trusted-keys file strictly: `{ "format": 1, "keys": [...] }` with exactly those two fields and one to
+ * eight keys, each the base64 of the SPKI DER form of an ECDSA P-256 public key, in the single accepted spelling.
+ */
+export async function parseTrustedReleaseKeys(
+    fileBytes: Uint8Array,
+    subtle: SubtleCrypto
+): Promise<TrustedReleaseKeysResult> {
+    const invalid = (reason: string): TrustedReleaseKeysResult => ({ status: "invalid", reason });
+    let parsed: unknown;
+    try {
+        parsed = JSON.parse(decodeStrictUtf8(fileBytes));
+    } catch {
+        return invalid("it is not JSON in UTF-8");
+    }
+    if (!isPlainObject(parsed) || !hasExactKeys(parsed, TRUSTED_KEYS_FIELDS)) {
+        return invalid('it must hold exactly the fields "format" and "keys"');
+    }
+    if (parsed.format !== TRUSTED_KEYS_FORMAT) return invalid(`"format" must be ${TRUSTED_KEYS_FORMAT}`);
+    const encodedKeys: unknown = parsed.keys;
+    if (!Array.isArray(encodedKeys) || encodedKeys.length < 1 || encodedKeys.length > MAX_TRUSTED_KEYS) {
+        return invalid(`"keys" must list 1 to ${MAX_TRUSTED_KEYS} keys`);
+    }
+    const keys: TrustedReleaseKey[] = [];
+    for (const [index, encoded] of encodedKeys.entries()) {
+        const der = decodeCanonicalBase64(encoded);
+        if (der === null || der.length === 0)
+            return invalid(`key ${index + 1} is not base64 in its canonical spelling`);
+        try {
+            keys.push({ keyId: await releaseKeyId(subtle, der), key: await importReleaseKey(subtle, der) });
+        } catch {
+            return invalid(`key ${index + 1} is not an ECDSA P-256 public key in SPKI form`);
+        }
+    }
+    return { status: "valid", keys };
+}
+
+/**
+ * Bring a vault-relative path into one spelling for comparison on a case-insensitive file system: forward
+ * slashes, no empty or `.` segments, `..` resolved, Unicode NFC, lower case, and per segment neither the trailing
+ * dots and spaces nor the stream suffix which some file systems ignore.
+ */
+function normaliseForComparison(path: string): string {
+    const segments: string[] = [];
+    for (const raw of path.split("\\").join("/").split("/")) {
+        if (raw === "..") {
+            segments.pop();
+            continue;
+        }
+        const segment = raw.split(":")[0].replace(/[. ]+$/u, "");
+        if (segment !== "") segments.push(segment);
+    }
+    return segments.join("/").normalize("NFC").toLowerCase();
+}
+
+/**
+ * Create the test which every writer and remover of the plug-in applies: does `path` address the trusted-keys
+ * file of the plug-in in `pluginDirectory`?
+ */
+export function createTrustedReleaseKeysPathMatcher(pluginDirectory: string): (path: string) => boolean {
+    const protectedPath = normaliseForComparison(`${pluginDirectory}/${TRUSTED_RELEASE_KEYS_FILE}`);
+    return (path) => typeof path === "string" && normaliseForComparison(path) === protectedPath;
+}
+
+/** The plug-in's own folder, relative to the vault: the folder which the host loaded it from. */
+export function pluginDirectoryOf(plugin: {
+    manifest: { id: string; dir?: string };
+    app: { vault: { configDir: string } };
+}): string {
+    return plugin.manifest.dir ?? `${plugin.app.vault.configDir}/plugins/${plugin.manifest.id}`;
+}

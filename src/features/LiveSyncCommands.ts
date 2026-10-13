@@ -12,6 +12,10 @@ import { MARK_DONE } from "@/modules/features/ModuleLog.ts";
 import type { LiveSyncCore } from "@/main.ts";
 // import { __$checkInstanceBinding } from "@vrtmrz/livesync-commonlib/compat/dev/checks";
 import { createInstanceLogFunction } from "@vrtmrz/livesync-commonlib/compat/services/lib/logUtils";
+import {
+    createTrustedReleaseKeysPathMatcher,
+    pluginDirectoryOf,
+} from "@/serviceFeatures/releaseInstall/trustedReleaseKeys.ts";
 
 let noticeIndex = 0;
 export abstract class LiveSyncCommands {
@@ -45,6 +49,19 @@ export abstract class LiveSyncCommands {
     }
     abstract onunload(): void;
     abstract onload(): void | Promise<void>;
+
+    private trustedReleaseKeysPathMatcher?: (path: string) => boolean;
+
+    /**
+     * Whether `path` addresses the file of trusted release keys in this plug-in's own folder. No add-on stores that
+     * file into the database or writes it from there.
+     */
+    protected isTrustedReleaseKeysPath(path: string): boolean {
+        this.trustedReleaseKeysPathMatcher ??= createTrustedReleaseKeysPathMatcher(
+            pluginDirectoryOf(this.services.context.plugin)
+        );
+        return this.trustedReleaseKeysPathMatcher(path);
+    }
 
     _isMainReady() {
         return this.services.appLifecycle.isReady();
