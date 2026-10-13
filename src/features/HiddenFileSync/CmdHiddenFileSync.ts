@@ -1057,8 +1057,10 @@ Offline Changed files: ${processFiles.length}`;
     }
 
     async isTargetFile(path: FilePath): Promise<boolean> {
-        // The trust anchor of release installation never travels with synchronised content, in either direction.
-        if (this.isTrustedReleaseKeysPath(path)) return false;
+        // This plug-in's own installed files never travel with synchronised content, in either direction: its signed
+        // executable files and its trust anchor change only through the signed-release install path, not Hidden File
+        // Sync. Hard-excluded here rather than left to the user-editable ignore patterns. Other plug-ins unaffected.
+        if (this.isOwnPluginProtectedPath(path)) return false;
         const result =
             this.isTargetFileInPatterns(path) &&
             this.isNotIgnoredByCustomisationSync(path) &&
@@ -1777,8 +1779,9 @@ Offline Changed files: ${files.length}`;
         requiredLiveRevision?: string
     ) {
         const prefixedFileName = addPrefix(storageFilePath, ICHeader);
-        // Nothing is written from the database once the host has unloaded, and the trusted release keys never are.
-        if (this.services.appLifecycle.hasUnloaded() || this.isTrustedReleaseKeysPath(storageFilePath)) {
+        // Nothing is written from the database once the host has unloaded, and this plug-in's own installed files
+        // (its signed executables and trust anchor) never are: they change only through the signed-release path.
+        if (this.services.appLifecycle.hasUnloaded() || this.isOwnPluginProtectedPath(storageFilePath)) {
             return undefined;
         }
         if (await this.services.vault.isIgnoredByIgnoreFile(storageFilePath)) {

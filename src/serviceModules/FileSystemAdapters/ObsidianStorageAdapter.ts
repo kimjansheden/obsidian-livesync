@@ -29,8 +29,11 @@ export class ObsidianStorageAdapter implements IStorageAdapter<Stat> {
     private readonly staged: StagedBinaryPublication;
     /**
      * @param isWriteProtected Tells whether a path addresses a file which nothing may create, change or remove
-     * through this adapter. Every writer and remover of synchronised content ends here, so this is where the file
-     * of trusted release keys is kept out of their reach.
+     * through this adapter. Every writer and remover of synchronised content ends here, so this is the single choke
+     * point which keeps this plug-in's own installed files — its signed executables (`main.js`, `manifest.json`,
+     * `styles.css`) and its trusted-keys file — out of the reach of any synchronised write, whichever feature made
+     * it. Those files change only through the signed-release installer, which writes the raw host adapter directly,
+     * never this one.
      * @param aliasGuard Refuses a path which reaches an existing entry by a name its folder does not list, so that
      * the rules which decide by the spelling of a path hold for the name the file system uses.
      * @param linkGuard Refuses a path which a symbolic link or junction resolves into the plug-in folder or its

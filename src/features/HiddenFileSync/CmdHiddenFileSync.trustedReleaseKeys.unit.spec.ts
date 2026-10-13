@@ -30,6 +30,17 @@ const KEYS_FILE_SPELLINGS = [
 ] as FilePath[];
 /** Another file in the same folder, which Hidden File Sync handles as before. */
 const OTHER_FILE = `${PLUGIN_DIRECTORY}/data.json` as FilePath;
+/** This plug-in's own executable files, which installation owns; spellings a file system folds to them too. */
+const OWN_EXECUTABLE_SPELLINGS = [
+    `${PLUGIN_DIRECTORY}/main.js`,
+    `${PLUGIN_DIRECTORY}/manifest.json`,
+    `${PLUGIN_DIRECTORY}/styles.css`,
+    ".obsidian/plugins/Obsidian-LiveSync/MAIN.JS",
+    ".obsidian/plugins/obsidian-livesync/manifest.json.",
+] as FilePath[];
+/** Another plug-in's executable, and an ordinary hidden file, which Hidden File Sync must still handle. */
+const ANOTHER_PLUGIN_MAIN = ".obsidian/plugins/another-plugin/main.js" as FilePath;
+const ORDINARY_HIDDEN_FILE = ".obsidian/app.json" as FilePath;
 
 const documentOf = (path: FilePath) =>
     ({ _id: `i:${path.toLowerCase()}` as DocumentID, path: `i:${path}` as FilePathWithPrefix }) as LoadedEntry;
@@ -113,6 +124,47 @@ describe("Hidden File Sync and the trusted release keys", () => {
         expect(storageAccess.writeHiddenFileAuto).not.toHaveBeenCalled();
         expect(storageAccess.removeHidden).not.toHaveBeenCalled();
     });
+});
+
+describe("Hidden File Sync and this plug-in's own executable files", () => {
+    it.each(OWN_EXECUTABLE_SPELLINGS)("does not take %s for a file to store", async (path) => {
+        const { hiddenFileSync, isIgnoredByIgnoreFile, statHidden } = createHiddenFileSync();
+
+        await expect(hiddenFileSync.isTargetFile(path)).resolves.toBe(false);
+        await expect(hiddenFileSync.trackStorageFileModification(path)).resolves.toBe(false);
+
+        expect(isIgnoredByIgnoreFile).not.toHaveBeenCalled();
+        expect(statHidden).not.toHaveBeenCalled();
+    });
+
+    it.each(OWN_EXECUTABLE_SPELLINGS)("does not write %s from a received document", async (path) => {
+        const { hiddenFileSync, processReplicationResult, storageAccess } = createHiddenFileSync();
+
+        await expect(hiddenFileSync._anyProcessOptionalSyncFiles(documentOf(path))).resolves.toBe(true);
+
+        expect(processReplicationResult).not.toHaveBeenCalled();
+        expect(storageAccess.writeHiddenFileAuto).not.toHaveBeenCalled();
+    });
+
+    it.each(OWN_EXECUTABLE_SPELLINGS)("neither writes nor removes %s when a database entry is extracted", async (path) => {
+        const { hiddenFileSync, isIgnoredByIgnoreFile, storageAccess } = createHiddenFileSync();
+
+        await expect(hiddenFileSync.extractInternalFileFromDatabase(path, true)).resolves.toBeUndefined();
+
+        expect(isIgnoredByIgnoreFile).not.toHaveBeenCalled();
+        expect(storageAccess.ensureDir).not.toHaveBeenCalled();
+        expect(storageAccess.writeHiddenFileAuto).not.toHaveBeenCalled();
+        expect(storageAccess.removeHidden).not.toHaveBeenCalled();
+    });
+
+    it.each([ANOTHER_PLUGIN_MAIN, ORDINARY_HIDDEN_FILE])(
+        "still synchronises %s, another plug-in's or an ordinary hidden file",
+        async (path) => {
+            const { hiddenFileSync } = createHiddenFileSync();
+
+            await expect(hiddenFileSync.isTargetFile(path)).resolves.toBe(true);
+        }
+    );
 });
 
 describe("Hidden File Sync after the plug-in has unloaded", () => {

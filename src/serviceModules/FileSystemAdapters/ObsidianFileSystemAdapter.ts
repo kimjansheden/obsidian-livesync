@@ -48,7 +48,7 @@ export class ObsidianFileSystemAdapter implements IFileSystemAdapter<TAbstractFi
         // listed is not listed again for the other, and both refuse a link into a protected path alike.
         const aliasGuard = createPathAliasGuard(app);
         this.storage = new ObsidianStorageAdapter(app, isWriteProtected, aliasGuard, linkGuard);
-        this.vault = new ObsidianVaultAdapter(app, aliasGuard, linkGuard);
+        this.vault = new ObsidianVaultAdapter(app, aliasGuard, linkGuard, isWriteProtected);
     }
 
     getAbstractFileByPath(path: FilePath | string): Promise<TAbstractFile | null> {

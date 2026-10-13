@@ -14,7 +14,10 @@ import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import type { App, TFile } from "obsidian";
-import { createTrustedReleaseKeysPathMatcher } from "@/serviceFeatures/releaseInstall/trustedReleaseKeys";
+import {
+    createOwnPluginProtectedPathMatcher,
+    createTrustedReleaseKeysPathMatcher,
+} from "@/serviceFeatures/releaseInstall/trustedReleaseKeys";
 import { ObsidianStorageAdapter } from "./ObsidianStorageAdapter";
 import { ObsidianVaultAdapter } from "./ObsidianVaultAdapter";
 import { PathAliasGuard, createPathAliasGuard } from "./pathAliasGuard";
@@ -469,5 +472,90 @@ describe("a path which a symbolic link or junction resolves into the plug-in fol
         } finally {
             rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
         }
+    });
+});
+
+describe("this plug-in's own installed files at the storage adapter", () => {
+    const MANIFEST = `${PLUGIN_DIRECTORY}/manifest.json`;
+    const STYLES = `${PLUGIN_DIRECTORY}/styles.css`;
+    const PROTECTED = [MAIN_JS, MANIFEST, STYLES, KEYS_FILE];
+    const WRITE_PROTECTED = "write-protected";
+
+    // The production wiring: the one write-protection matcher at the synchronised-content adapter covers all of this
+    // plug-in's own installed files, so no synchronised write of any feature can reach them, whichever added it.
+    function protectedAdapterOver(files: SyntheticFileSystem) {
+        const app = files.app() as unknown as App;
+        return new ObsidianStorageAdapter(
+            app,
+            createOwnPluginProtectedPathMatcher(PLUGIN_DIRECTORY),
+            createPathAliasGuard(app)
+        );
+    }
+
+    it.each(PROTECTED)("refuses write, append, writeBinary, removal and directory creation of %s", async (path) => {
+        const files = createSyntheticVault();
+        const adapter = protectedAdapterOver(files);
+        const before = files.snapshot();
+
+        await expect(adapter.write(path, "replaced")).rejects.toThrow(WRITE_PROTECTED);
+        await expect(adapter.append(path, "more")).rejects.toThrow(WRITE_PROTECTED);
+        await expect(adapter.writeBinary(path, new ArrayBuffer(2))).rejects.toThrow(WRITE_PROTECTED);
+        await expect(adapter.writeBinaryInParts(path, parts(), publication)).rejects.toThrow(WRITE_PROTECTED);
+        await expect(adapter.remove(path)).rejects.toThrow(WRITE_PROTECTED);
+        await expect(adapter.mkdir(path)).rejects.toThrow(WRITE_PROTECTED);
+
+        expect(files.changes()).toEqual([]);
+        expect(files.snapshot()).toEqual(before);
+    });
+
+    it.each([
+        [`${PLUGIN_DIRECTORY}/MAIN.JS`, "a different case"],
+        [`${PLUGIN_DIRECTORY}/main.js.`, "a trailing dot the file system drops"],
+        [`${PLUGIN_DIRECTORY}/manifest.json:stream`, "a stream suffix the file system ignores"],
+    ])("refuses %s (%s) which folds to a protected file", async (path) => {
+        const files = createSyntheticVault();
+        const adapter = protectedAdapterOver(files);
+
+        await expect(adapter.write(path, "replaced")).rejects.toThrow(WRITE_PROTECTED);
+    });
+
+    it.each(ALIAS_PATHS)("refuses %s, an aliased spelling, through the alias guard", async (_kind, aliasPath) => {
+        const files = createSyntheticVault();
+        const adapter = protectedAdapterOver(files);
+
+        // Aliased spellings do not fold to a listed name, so the alias guard refuses them; the write never lands.
+        await expect(adapter.write(aliasPath, "replaced")).rejects.toThrow();
+        expect(files.changes()).toEqual([]);
+    });
+
+    it("refuses create, createBinary and rename of a protected file through the vault adapter", async () => {
+        const files = createSyntheticVault();
+        const app = files.app() as unknown as App;
+        const vault = new ObsidianVaultAdapter(
+            app,
+            createPathAliasGuard(app),
+            undefined,
+            createOwnPluginProtectedPathMatcher(PLUGIN_DIRECTORY)
+        );
+
+        await expect(vault.create(MAIN_JS, "replaced")).rejects.toThrow(WRITE_PROTECTED);
+        await expect(vault.createBinary(MANIFEST, new ArrayBuffer(2))).rejects.toThrow(WRITE_PROTECTED);
+        await expect(vault.rename({ path: "notes/a.md" } as TFile, STYLES)).rejects.toThrow(WRITE_PROTECTED);
+
+        expect(app.vault.create).not.toHaveBeenCalled();
+        expect(app.vault.rename).not.toHaveBeenCalled();
+    });
+
+    it("still lets another plug-in's executables, ordinary files, and this plug-in's data.json through", async () => {
+        const files = createSyntheticVault().add(".obsidian/plugins/another-plugin/main.js", "other code");
+        const adapter = protectedAdapterOver(files);
+
+        await adapter.write(".obsidian/plugins/another-plugin/main.js", "updated");
+        await adapter.write("notes/b.md", "a note");
+        await adapter.write(`${PLUGIN_DIRECTORY}/data.json`, "new settings");
+
+        expect(await files.read(".obsidian/plugins/another-plugin/main.js")).toBe("updated");
+        expect(await files.read("notes/b.md")).toBe("a note");
+        expect(await files.read(`${PLUGIN_DIRECTORY}/data.json`)).toBe("new settings");
     });
 });

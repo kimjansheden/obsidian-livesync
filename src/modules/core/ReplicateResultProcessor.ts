@@ -577,6 +577,12 @@ export class ReplicateResultProcessor {
      */
     public async reprocessStoredDocuments(): Promise<number> {
         const store = this.core.kvDB as unknown as SnapshotStore | undefined;
+        // Reprocessing works on the restored queue and persists each batch through _takeSnapshot, which does nothing
+        // until the restore has set _snapshotRestored. Wait for the restore to finish before beginning, so a batch is
+        // really persisted before its position advances; a reprocess triggered mid-restore would otherwise move the
+        // position past a batch no snapshot kept, and a stop then would lose it. Awaited only where there is a store
+        // to restore from and advance a position in.
+        if (store) await this.restoreFromSnapshotOnce();
         // A run interrupted by a restart left how far it had come; this one continues after that id, so no stored
         // document is processed twice and none is left out. The documents stream a page at a time, so the memory in
         // use does not grow with how many are stored.
@@ -597,7 +603,12 @@ export class ReplicateResultProcessor {
                 // with the throttled ones. The position is stored only once the batch is persisted, so what is on
                 // disk never runs ahead of it.
                 await this._takeSnapshot();
-                await store.set(KV_KEY_REPLICATION_RESULT_REPROCESS_POSITION, position);
+                // Advance the durable position only when the snapshot actually persisted. _takeSnapshot does nothing
+                // until the restore has completed, so without this a reprocess racing the restore would move the
+                // position past a batch that was never written; the batch stays re-reprocessable until it is kept.
+                if (this._snapshotRestored) {
+                    await store.set(KV_KEY_REPLICATION_RESULT_REPROCESS_POSITION, position);
+                }
             }
             // Keep the queue bounded: wait for it to drain below the limit before more is read and queued. A
             // suspended processor never drains, so stop the pass instead of spinning; it resumes from the stored

@@ -54,7 +54,7 @@ import { deviceLocalStorageOf } from "./serviceFeatures/releaseInstall/deviceLoc
 import { RUNNING_RELEASE_NUMBER } from "./serviceFeatures/releaseInstall/runningRelease.ts";
 import { trackLoadState, type SecurityReleaseStatus } from "./serviceFeatures/releaseInstall/releaseInstaller.ts";
 import {
-    createTrustedReleaseKeysPathMatcher,
+    createOwnPluginProtectedPathMatcher,
     pluginDirectoryOf,
 } from "./serviceFeatures/releaseInstall/trustedReleaseKeys.ts";
 import { createObsidianProtectedPathLinkGuard } from "./serviceModules/FileSystemAdapters/protectedPathLinkGuardObsidian.ts";
@@ -95,8 +95,10 @@ export default class ObsidianLiveSyncPlugin extends Plugin {
                 APIService: services.API,
                 pathService: services.path,
             },
-            // The keys which release packages are verified against are never written, replaced or removed here.
-            createTrustedReleaseKeysPathMatcher(pluginDirectoryOf(this)),
+            // This plug-in's own installed files — its signed executables and the keys releases are verified
+            // against — are never written, replaced or removed through the synchronised-content adapter; only the
+            // installer touches them, through the raw host adapter.
+            createOwnPluginProtectedPathMatcher(pluginDirectoryOf(this)),
             // Nor may a symbolic link or junction resolve a synchronised write into the plug-in folder or those keys.
             createObsidianProtectedPathLinkGuard(this.app, pluginDirectoryOf(this))
         );

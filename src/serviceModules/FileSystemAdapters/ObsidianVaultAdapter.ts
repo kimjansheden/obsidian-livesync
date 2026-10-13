@@ -16,12 +16,20 @@ export class ObsidianVaultAdapter implements IVaultAdapter<TFile, TFolder> {
      * yet, the one of a file to create or the target of a rename, is checked here.
      * @param linkGuard Refuses a create or rename target which a symbolic link or junction resolves into the
      * plug-in folder or its keys file. A no-op where links cannot arise (mobile).
+     * @param isWriteProtected Tells whether a path addresses a file which nothing may create or rename to through
+     * this adapter: this plug-in's own installed files, kept out of every synchronised write at this choke point as
+     * on the storage adapter. The installer writes the raw host adapter directly, never this one.
      */
     constructor(
         private app: App,
         private readonly aliasGuard: PathAliasGuard = createPathAliasGuard(app),
-        private readonly linkGuard: ProtectedPathLinkGuard = noProtectedPathLinkGuard()
+        private readonly linkGuard: ProtectedPathLinkGuard = noProtectedPathLinkGuard(),
+        private readonly isWriteProtected: (path: string) => boolean = () => false
     ) {}
+
+    private assertMayCreate(path: string): void {
+        if (this.isWriteProtected(path)) throw new Error("Refusing to change a write-protected file.");
+    }
 
     async read(file: TFile): Promise<string> {
         // Vault.read strips a leading UTF-8 BOM, leaving the content size inconsistent with TFile.stat.
@@ -45,18 +53,21 @@ export class ObsidianVaultAdapter implements IVaultAdapter<TFile, TFolder> {
     }
 
     async create(path: string, data: string, options?: UXDataWriteOptions): Promise<TFile> {
+        this.assertMayCreate(path);
         await this.linkGuard.assertNoLinkEscape(path);
         await this.aliasGuard.assertNoAlias(path);
         return await this.app.vault.create(path, data, toIntegerTimestamps(options));
     }
 
     async createBinary(path: string, data: ArrayBuffer, options?: UXDataWriteOptions): Promise<TFile> {
+        this.assertMayCreate(path);
         await this.linkGuard.assertNoLinkEscape(path);
         await this.aliasGuard.assertNoAlias(path);
         return await this.app.vault.createBinary(path, toArrayBuffer(data), toIntegerTimestamps(options));
     }
 
     async rename(file: TFile, newPath: string): Promise<void> {
+        this.assertMayCreate(newPath);
         await this.linkGuard.assertNoLinkEscape(newPath);
         await this.aliasGuard.assertNoAlias(newPath);
         return await this.app.vault.rename(file, newPath);

@@ -2044,6 +2044,54 @@ describe("ReplicateResultProcessor reprocessing a changed filter", () => {
             expect(restored.has(allIds[i]), `first-batch id ${allIds[i]} lost`).toBe(true);
         }
     });
+
+    it("waits for the restore to finish before it begins reprocessing", async () => {
+        const { store } = memoryStore();
+        const { processor } = setup({ restore: false, applicationReady: false, kv: store });
+        const gate = promiseWithResolvers<void>();
+        let started = false;
+        vi.spyOn(processor, "restoreFromSnapshotOnce").mockImplementation(async () => {
+            await gate.promise;
+            (processor as unknown as { _snapshotRestored: boolean })._snapshotRestored = true;
+        });
+        (
+            processor.core as unknown as { localDatabase: { findAllNormalDocs: () => AsyncGenerator<unknown> } }
+        ).localDatabase.findAllNormalDocs = async function* () {
+            started = true;
+            yield storedDoc(padId("file", 0));
+        };
+
+        const pass = processor.reprocessStoredDocuments();
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        // Still blocked on the restore: the database has not been read, so no batch and no position advance yet.
+        expect(started).toBe(false);
+        expect(await store.get(REPROCESS_POSITION_KEY)).toBeUndefined();
+
+        gate.resolve();
+        await pass;
+        expect(started).toBe(true);
+    });
+
+    it("does not advance the position while the snapshot cannot persist, so the batch is not lost", async () => {
+        const { store } = memoryStore();
+        const total = REPROCESS_BATCH * 2;
+        const allIds = Array.from({ length: total }, (_, i) => padId("file", i));
+        const { processor } = setup({ restore: false, applicationReady: false, kv: store });
+        // A restore which resolves but leaves the run not restored, so _takeSnapshot stays a no-op for the whole pass.
+        vi.spyOn(processor, "restoreFromSnapshotOnce").mockResolvedValue(undefined);
+        (processor as unknown as { _snapshotRestored: boolean })._snapshotRestored = false;
+        (
+            processor.core as unknown as { localDatabase: { findAllNormalDocs: () => AsyncGenerator<unknown> } }
+        ).localDatabase.findAllNormalDocs = async function* () {
+            for (const id of allIds) yield storedDoc(id);
+        };
+
+        await processor.reprocessStoredDocuments();
+
+        // No snapshot persisted the batches, so the position never advanced: a stop re-reads them from the start.
+        expect(store.set).not.toHaveBeenCalledWith(REPROCESS_POSITION_KEY, expect.anything());
+        expect(await store.get(REPROCESS_POSITION_KEY)).toBeUndefined();
+    });
 });
 
 describe("ReplicateResultProcessor queue holding one entry per id", () => {
