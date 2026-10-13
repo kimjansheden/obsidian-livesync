@@ -16,8 +16,9 @@ import {
     RESTORE_SLICE_SIZE,
     REPROCESS_QUEUE_LIMIT,
     SNAPSHOT_INLINE_LIMIT,
-    SNAPSHOT_PAGE_SIZE,
 } from "./ReplicateResultProcessor";
+
+const FIXTURE_GROUP_SIZE = 1000;
 
 function note(id: string): PouchDB.Core.ExistingDocument<EntryDoc> {
     return {
@@ -62,6 +63,7 @@ type SetupOptions = {
         get(key: string): Promise<unknown>;
         set(key: string, value: unknown): Promise<unknown>;
         del?(key: string): Promise<void>;
+        keys?(): Promise<IDBValidKey[]>;
     };
 };
 
@@ -111,6 +113,7 @@ function setup(options: SetupOptions = {}) {
     const core = {
         services: {
             appLifecycle: { isReady, isSuspended: () => lifecycle.unloaded },
+            control: { hasUnloaded: () => lifecycle.unloaded },
             database: { isDatabaseReady },
             path: { getPath: (entry: { path: string }) => entry.path },
             replication: {
@@ -1261,6 +1264,7 @@ function memoryStore() {
     const map = new Map<string, unknown>();
     const store = {
         get: vi.fn(async (key: string) => map.get(key)),
+        keys: vi.fn(async () => [...map.keys()]),
         set: vi.fn(async (key: string, value: unknown) => void map.set(key, structuredClone(value))),
         del: vi.fn(async (key: string) => void map.delete(key)),
     };
@@ -1293,6 +1297,7 @@ function crashingStore(seed?: Map<string, unknown>) {
     };
     const store = {
         get: vi.fn(async (key: string) => map.get(key)),
+        keys: vi.fn(async () => [...map.keys()]),
         set: vi.fn(async (key: string, value: unknown) => {
             guard();
             map.set(key, structuredClone(value));
@@ -1320,6 +1325,32 @@ function crashingStore(seed?: Map<string, unknown>) {
 const padId = (prefix: string, index: number) => `${prefix}-${index.toString().padStart(7, "0")}`;
 
 describe("ReplicateResultProcessor enqueue without scanning the queue", () => {
+    it("does the same number of document-id reads for two large queues", async () => {
+        const measure = async (length: number) => {
+            const { store } = memoryStore();
+            const { processor } = setup({ applicationReady: false, kv: store });
+            await processor.restoreFromSnapshotOnce();
+            (processor as unknown as { triggerTakeSnapshot(): void }).triggerTakeSnapshot = () => undefined;
+            let reads = 0;
+            for (let i = 0; i < length; i++) {
+                const id = padId("doc", i);
+                const doc = note(id);
+                Object.defineProperty(doc, "_id", {
+                    get: () => {
+                        reads++;
+                        return id;
+                    },
+                });
+                queueOf(processor)._queuedChanges.enqueue(doc);
+            }
+            reads = 0;
+            processor.enqueueAll([note(padId("doc", length - 1))]);
+            return reads;
+        };
+        expect(await measure(20_000)).toBe(0);
+        expect(await measure(60_000)).toBe(0);
+    });
+
     async function measureSkip(length: number): Promise<number> {
         const { store } = memoryStore();
         const { processor } = setup({ applicationReady: false, kv: store });
@@ -1355,7 +1386,61 @@ describe("ReplicateResultProcessor enqueue without scanning the queue", () => {
     });
 });
 
-describe("ReplicateResultProcessor hybrid snapshot", () => {
+describe("ReplicateResultProcessor bounded document snapshots", () => {
+    it("restores the processing document before documents which were still queued", async () => {
+        const { store } = memoryStore();
+        const { processor } = setup({ restore: false, applicationReady: false, kv: store });
+        (processor as unknown as { triggerTakeSnapshot(): void }).triggerTakeSnapshot = () => undefined;
+        await processor.restoreFromSnapshotOnce();
+        for (let i = 0; i < SNAPSHOT_INLINE_LIMIT + 2; i++)
+            queueOf(processor)._queuedChanges.enqueue(note(padId("doc", i)));
+        const first = queueOf(processor)._queuedChanges.dequeue()!;
+        const state = processor as unknown as { _processingChanges: unknown[]; _processingById: Map<string, unknown> };
+        state._processingChanges.push(first);
+        state._processingById.set(first._id, first);
+        await queueOf(processor)._takeSnapshot();
+
+        const restored = setup({ restore: false, applicationReady: false, kv: store });
+        await restored.processor.restoreFromSnapshotOnce();
+        expect([...queueOf(restored.processor)._queuedChanges.values()].map((doc) => doc._id)).toEqual(
+            Array.from({ length: SNAPSHOT_INLINE_LIMIT + 2 }, (_, i) => padId("doc", i))
+        );
+    });
+
+    it("writes the same complete record for a changed waiting document at two waiting-list lengths", async () => {
+        const measure = async (length: number) => {
+            const { store, map } = memoryStore();
+            const { processor } = setup({ restore: false, applicationReady: false, kv: store });
+            (processor as unknown as { triggerTakeSnapshot(): void }).triggerTakeSnapshot = () => undefined;
+            await processor.restoreFromSnapshotOnce();
+            const waiting = processor as unknown as {
+                _waitingChanges: Map<string, PouchDB.Core.ExistingDocument<EntryDoc>>;
+                keepWaiting(doc: PouchDB.Core.ExistingDocument<EntryDoc>, reason: string): void;
+            };
+            for (let i = 0; i < length; i++) waiting._waitingChanges.set(padId("doc", i), note(padId("doc", i)));
+            await queueOf(processor)._takeSnapshot();
+            store.set.mockClear();
+            store.keys.mockClear();
+            waiting.keepWaiting(note("one-more"), "content is pending");
+            await queueOf(processor)._takeSnapshot();
+            const written = store.set.mock.calls.map(([, value]) => JSON.stringify(value).length);
+            const marker = JSON.stringify(map.get(SNAPSHOT_KEY)).length;
+            expect(store.keys).not.toHaveBeenCalled();
+            store.get.mockClear();
+            const restored = setup({ restore: false, applicationReady: false, kv: store });
+            await restored.processor.restoreFromSnapshotOnce();
+            expect(store.get.mock.calls.filter(([key]) => key.startsWith(`${SNAPSHOT_KEY}:d:`))).toHaveLength(
+                length + 1
+            );
+            expect(store.keys).toHaveBeenCalledTimes(1);
+            const state = restored.processor as unknown as { _waitingChanges: Map<string, unknown> };
+            expect(state._waitingChanges.size).toBe(length + 1);
+            expect(state._waitingChanges.has("one-more")).toBe(true);
+            return { written, marker };
+        };
+        expect(await measure(20_000)).toEqual(await measure(60_000));
+    });
+
     /** Fill a suspended processor's queue to `length`, persist it, then measure persisting one more document. */
     async function measureOneMore(length: number) {
         const { store } = memoryStore();
@@ -1373,14 +1458,13 @@ describe("ReplicateResultProcessor hybrid snapshot", () => {
     }
 
     it("writes no document data proportional to the queue length for one more queued document", async () => {
-        const shorter = await measureOneMore(SNAPSHOT_INLINE_LIMIT + SNAPSHOT_PAGE_SIZE + 5);
-        const longer = await measureOneMore(SNAPSHOT_INLINE_LIMIT + SNAPSHOT_PAGE_SIZE * 5 + 5);
-        // The same number of store writes whatever the length: the one changed page, and the base record.
-        expect(shorter.writes).toBe(longer.writes);
-        // No document data grows with the length. The base names one key per overflow page, so a longer queue adds
-        // only those extra short keys, not any re-serialised documents: the per-change bytes differ by far less than
-        // even a single page of documents would occupy, where re-serialising the queue would differ by the lot.
-        expect(longer.bytes - shorter.bytes).toBeLessThan(SNAPSHOT_PAGE_SIZE);
+        const shorter = await measureOneMore(20_005);
+        const longer = await measureOneMore(60_005);
+        // The changed document is the only write; the constant base marker is not rewritten.
+        expect(shorter.writes).toBe(3);
+        expect(longer.writes).toBe(3);
+        // The complete serialised values have the same size, including all metadata, for both queue lengths.
+        expect(longer.bytes).toBe(shorter.bytes);
     });
 
     it("writes one record of the released shape while the queue is within the inline bound", async () => {
@@ -1396,23 +1480,41 @@ describe("ReplicateResultProcessor hybrid snapshot", () => {
         expect([...map.keys()]).toEqual([SNAPSHOT_KEY]);
     });
 
-    it("pages the queue above the bound, keeping the head in the base record and the rest under derived keys", async () => {
+    it("stores each queued document under its own key above the inline bound", async () => {
         const { store, map } = memoryStore();
         const { processor } = setup({ applicationReady: false, kv: store });
         await processor.restoreFromSnapshotOnce();
         const queue = queueOf(processor);
-        const length = SNAPSHOT_PAGE_SIZE * 3;
+        const length = FIXTURE_GROUP_SIZE * 3;
         for (let i = 0; i < length; i++) queue._queuedChanges.enqueue(note(padId("doc", i)));
         await queue._takeSnapshot();
         const record = map.get(SNAPSHOT_KEY) as { queued: unknown[]; overflow: string[] };
-        expect(record.queued.length).toBe(SNAPSHOT_PAGE_SIZE);
-        // The base names, in queue order, one generation-tagged key per overflow page, and each key holds a page.
-        expect(record.overflow).toEqual([`${SNAPSHOT_KEY}:q:1:1`, `${SNAPSHOT_KEY}:q:1:2`]);
-        for (const key of record.overflow) expect(map.has(key)).toBe(true);
+        expect(record.queued).toEqual([]);
+        expect(record.overflow).toBeUndefined();
+        expect(map.get(SNAPSHOT_KEY)).toMatchObject({ documentRecords: true });
+        expect([...map.keys()].filter((key) => key.startsWith(`${SNAPSHOT_KEY}:d:`))).toHaveLength(length);
     });
 });
 
 describe("ReplicateResultProcessor snapshot that survives a crash at any point", () => {
+    it("keeps the complete legacy queue until conversion commits, including a crash on the base marker", async () => {
+        const docs = Array.from({ length: SNAPSHOT_INLINE_LIMIT + 2 }, (_, i) => note(padId("legacy", i)));
+        const legacy = new Map<string, unknown>([[SNAPSHOT_KEY, { queued: docs, processing: [], waiting: [] }]]);
+        // The original record is authoritative until every document and then the marker have been written.
+        for (const crashAfter of [0, 1, docs.length - 1, docs.length, docs.length + 1]) {
+            const run = crashingStore(legacy);
+            const { processor } = setup({ restore: false, applicationReady: false, kv: run.store });
+            (processor as unknown as { triggerTakeSnapshot(): void }).triggerTakeSnapshot = () => undefined;
+            await processor.restoreFromSnapshotOnce();
+            run.crashAfter(crashAfter);
+            await queueOf(processor)
+                ._takeSnapshot()
+                .catch(() => undefined);
+            const restored = await restoredIds(run.map);
+            expect([...restored].sort()).toEqual(docs.map((doc) => doc._id).sort());
+        }
+    });
+
     /** A processor whose snapshots may be taken directly, with no auto-restore and no throttled writes to race. */
     function directProcessor(kv: unknown) {
         const { processor } = setup({ restore: false, applicationReady: false, kv: kv as never });
@@ -1423,8 +1525,9 @@ describe("ReplicateResultProcessor snapshot that survives a crash at any point",
     async function restoredIds(map: Map<string, unknown>): Promise<Set<string>> {
         const store = {
             get: async (key: string) => map.get(key),
-            set: async () => undefined,
-            del: async () => undefined,
+            keys: async () => [...map.keys()],
+            set: async (key: string, value: unknown) => void map.set(key, structuredClone(value)),
+            del: async (key: string) => void map.delete(key),
         };
         const { processor } = setup({ applicationReady: false, kv: store });
         await processor.restoreFromSnapshotOnce();
@@ -1437,8 +1540,9 @@ describe("ReplicateResultProcessor snapshot that survives a crash at any point",
     /**
      * Take a committed snapshot of the filled state, mutate it, then take a second snapshot which crashes after
      * each store operation; assert every id that was committed and is still live is restored (duplicates allowed,
-     * losses not). Each run uses its own processor which itself took the committed snapshot, so its stored-overflow
-     * bookkeeping matches the disk, and the queue is driven directly so no throttled snapshot races the crash.
+     * losses not). Each run starts from a committed snapshot and drives the queue directly, so a throttled
+     * snapshot cannot race the deliberate failure. Small write sets cover every boundary; large drains cover
+     * their first, middle, and last boundaries to keep this verification linear in the fixture size.
      */
     async function assertNoLossAtEveryCrash(
         fill: (queue: ReturnType<typeof queueOf>) => void,
@@ -1460,7 +1564,11 @@ describe("ReplicateResultProcessor snapshot that survives a crash at any point",
         const totalOps = probeRun.operations - opsBeforeMutation;
         expect(totalOps).toBeGreaterThan(0);
 
-        for (let crashAfter = 0; crashAfter <= totalOps; crashAfter++) {
+        const crashPoints =
+            totalOps <= 20
+                ? Array.from({ length: totalOps + 1 }, (_, n) => n)
+                : [0, 1, Math.floor(totalOps / 2), totalOps - 1, totalOps];
+        for (const crashAfter of crashPoints) {
             const run = crashingStore();
             const processor = directProcessor(run.store);
             fill(queueOf(processor));
@@ -1481,18 +1589,16 @@ describe("ReplicateResultProcessor snapshot that survives a crash at any point",
         }
     }
 
-    it("loses nothing when a paged snapshot crashes while a re-enqueue moves an id to a new page", async () => {
-        // Exactly full pages, so moving an id out of an overflow page appends it to a brand-new page. The old page
-        // loses the id and the new page gains it; each is rewritten under its own fresh-generation key before the
-        // base flips to name them, so no key the committed base still relies on is overwritten mid-rewrite.
-        const length = SNAPSHOT_PAGE_SIZE * 3;
+    it("loses nothing when a snapshot crashes while a replaced id moves to the end of the queue", async () => {
+        // Replace a queued revision and dequeue another while the changed document record is being saved.
+        const length = FIXTURE_GROUP_SIZE * 3;
         await assertNoLossAtEveryCrash(
             (queue) => {
                 for (let i = 0; i < length; i++) queue._queuedChanges.enqueue(note(padId("doc", i)));
             },
             (queue) => {
                 queue._queuedChanges.enqueue({
-                    ...note(padId("doc", SNAPSHOT_PAGE_SIZE + 5)),
+                    ...note(padId("doc", FIXTURE_GROUP_SIZE + 5)),
                     _rev: "2-moved",
                 } as never);
                 queue._queuedChanges.dequeue();
@@ -1500,27 +1606,18 @@ describe("ReplicateResultProcessor snapshot that survives a crash at any point",
         );
     });
 
-    // A document on the second overflow page: the head holds docs 0..N-1, the first overflow page the next N, the
-    // second overflow page the next N after that (N = SNAPSHOT_PAGE_SIZE).
-    const onPageTwo = (index: number) => padId("doc", SNAPSHOT_PAGE_SIZE * 2 + index);
+    // A committed document beyond the first two fixture groups.
+    const onPageTwo = (index: number) => padId("doc", FIXTURE_GROUP_SIZE * 2 + index);
 
-    /**
-     * Fill, then re-enqueue an id off a full in-range overflow page so it spills to a brand-new page, while that same
-     * page is topped up to full by a freshly received id. The page is at once a source (it loses the moved id, a hole)
-     * and a destination (it gains the received id). A whole-page write that reused the page's existing key would, on a
-     * crash after that write but before the base flips, leave the committed base naming a page from which the moved id
-     * is gone while its new page is not yet named: the fresh-generation key is what keeps the old page readable until
-     * the base no longer needs it. The received id is post-commit, so only the moved id must survive.
-     */
+    /** Append a received document and replace a committed document in the same snapshot. */
     function moveOutToNewPageWhileGaining(interleave?: (queue: ReturnType<typeof queueOf>) => void) {
-        const length = SNAPSHOT_PAGE_SIZE * 2 + (SNAPSHOT_PAGE_SIZE - 1);
+        const length = FIXTURE_GROUP_SIZE * 2 + (FIXTURE_GROUP_SIZE - 1);
         return assertNoLossAtEveryCrash(
             (queue) => {
                 for (let i = 0; i < length; i++) queue._queuedChanges.enqueue(note(padId("doc", i)));
             },
             (queue) => {
-                // Top the partially full second overflow page up to full with a received id (it gains), then move an
-                // id already on it to a brand-new page (it loses). The page is both source and destination.
+                // Both a newly received id and a replacement must survive the next snapshot.
                 queue._queuedChanges.enqueue(note("received-fill"));
                 queue._queuedChanges.enqueue({ ...note(onPageTwo(0)), _rev: "2-moved" } as never);
             },
@@ -1528,7 +1625,7 @@ describe("ReplicateResultProcessor snapshot that survives a crash at any point",
         );
     }
 
-    it("loses nothing when an id moves off a full in-range page that is also gaining a received id", async () => {
+    it("loses nothing when a replacement and a received document are saved together", async () => {
         await moveOutToNewPageWhileGaining();
     });
 
@@ -1540,20 +1637,15 @@ describe("ReplicateResultProcessor snapshot that survives a crash at any point",
         });
     });
 
-    /**
-     * Fill, then re-enqueue an id off the head page into a partially full in-range overflow page, while that same page
-     * also gains a freshly received id. The moved id leaves the base record (a head hole) for an overflow page, so the
-     * overflow page that gains it must be written and named before the base drops it from the head.
-     */
+    /** Append a received document and move the queue head to the end with a new revision. */
     function moveFromHeadIntoInRangePage(interleave?: (queue: ReturnType<typeof queueOf>) => void) {
-        const length = SNAPSHOT_PAGE_SIZE * 2 + SNAPSHOT_PAGE_SIZE / 2;
+        const length = FIXTURE_GROUP_SIZE * 2 + FIXTURE_GROUP_SIZE / 2;
         return assertNoLossAtEveryCrash(
             (queue) => {
                 for (let i = 0; i < length; i++) queue._queuedChanges.enqueue(note(padId("doc", i)));
             },
             (queue) => {
-                // A received id lands on the partially full in-range page (it gains), and an id from the head page
-                // moves onto it too (the head loses it): the in-range page gains two, one of them off the head.
+                // A received document and a replacement of an early queued document arrive together.
                 queue._queuedChanges.enqueue(note("received-into"));
                 queue._queuedChanges.enqueue({ ...note(padId("doc", 3)), _rev: "2-from-head" } as never);
             },
@@ -1561,7 +1653,7 @@ describe("ReplicateResultProcessor snapshot that survives a crash at any point",
         );
     }
 
-    it("loses nothing when an id moves from the head into an in-range page that is also gaining a received id", async () => {
+    it("loses nothing when a replacement of the head and a received document are saved together", async () => {
         await moveFromHeadIntoInRangePage();
     });
 
@@ -1573,17 +1665,17 @@ describe("ReplicateResultProcessor snapshot that survives a crash at any point",
         });
     });
 
-    it("loses nothing when dequeues and an enqueue interleave with a paged snapshot, at any crash point", async () => {
-        const length = SNAPSHOT_PAGE_SIZE * 3;
+    it("loses nothing when dequeues and an enqueue interleave with a document snapshot", async () => {
+        const length = FIXTURE_GROUP_SIZE * 3;
         let interleaved = 0;
         await assertNoLossAtEveryCrash(
             (queue) => {
                 for (let i = 0; i < length; i++) queue._queuedChanges.enqueue(note(padId("doc", i)));
             },
             (queue) => {
-                // A change that makes the second snapshot a real paged write, with several store operations.
+                // A replacement whose document record must be saved by the second snapshot.
                 queue._queuedChanges.enqueue({
-                    ...note(padId("doc", SNAPSHOT_PAGE_SIZE + 5)),
+                    ...note(padId("doc", FIXTURE_GROUP_SIZE + 5)),
                     _rev: "2-moved",
                 } as never);
             },
@@ -1595,21 +1687,25 @@ describe("ReplicateResultProcessor snapshot that survives a crash at any point",
         );
     });
 
-    it("loses nothing when a snapshot after a restore crashes while it re-pages the queue", async () => {
-        const length = SNAPSHOT_PAGE_SIZE * 2 + 40;
-        // A committed paged state, with a document in processing. A restore prepends processing to the queue, so
-        // re-paging shifts every page by one: new content under the same page numbers but a fresh generation. The
-        // fresh-generation key keeps a crash mid-rewrite from overwriting a key the stored base still names.
+    it("loses nothing when a snapshot after a restore crashes while it saves the restored documents", async () => {
+        const length = FIXTURE_GROUP_SIZE * 2 + 40;
+        // Restore queued documents and a document left in processing, then interrupt their next snapshot.
         const old = crashingStore();
         const op = directProcessor(old.store);
         for (let i = 0; i < length; i++) queueOf(op)._queuedChanges.enqueue(note(padId("doc", i)));
         await queueOf(op)._takeSnapshot();
         const baseRecord = old.map.get(SNAPSHOT_KEY) as { processing: unknown[] };
-        old.map.set(SNAPSHOT_KEY, { ...baseRecord, processing: [note("proc-0")] });
+        old.map.set(`${SNAPSHOT_KEY}:d:proc-0`, {
+            doc: note("proc-0"),
+            order: "0000000000000000",
+            waiting: false,
+            withoutNotice: false,
+        });
+        old.map.set(SNAPSHOT_KEY, { ...baseRecord, documentCount: (length + 1).toString(16).padStart(16, "0") });
         const committedIds = new Set(["proc-0", ...[...queueOf(op)._queuedChanges.values()].map((doc) => doc._id)]);
 
-        // A fresh processor restores from that state and re-pages it; no throttled snapshot races, so the first
-        // snapshot is the full rewrite under fresh page numbers. Crash after each of its operations.
+        // A fresh processor restores from that state, with automatic snapshots held back. Interrupt its first
+        // snapshot at the first, middle, and last document writes.
         const buildRestored = async (kv: {
             get(k: string): Promise<unknown>;
             set(k: string, v: unknown): Promise<unknown>;
@@ -1618,6 +1714,7 @@ describe("ReplicateResultProcessor snapshot that survives a crash at any point",
             const { processor } = setup({ restore: false, applicationReady: false, kv });
             (processor as unknown as { triggerTakeSnapshot(): void }).triggerTakeSnapshot = () => undefined;
             await processor.restoreFromSnapshotOnce();
+            queueOf(processor)._queuedChanges.enqueue(note("post-restore"));
             return processor;
         };
         const counter = crashingStore(old.map);
@@ -1627,7 +1724,7 @@ describe("ReplicateResultProcessor snapshot that survives a crash at any point",
         const totalOps = counter.operations - opsBefore;
         expect(totalOps).toBeGreaterThan(0);
 
-        for (let crashAfter = 0; crashAfter <= totalOps; crashAfter++) {
+        for (const crashAfter of [0, 1, Math.floor(totalOps / 2), totalOps - 1, totalOps]) {
             const run = crashingStore(old.map);
             const processor = await buildRestored(run.store);
             run.crashAfter(crashAfter);
@@ -1652,14 +1749,14 @@ describe("ReplicateResultProcessor snapshot that survives a crash at any point",
         );
     });
 
-    it("loses nothing when a paged queue shrinks back under the inline bound and crashes", async () => {
-        const length = SNAPSHOT_PAGE_SIZE * 2 + 10;
+    it("loses nothing when a queue stored by document shrinks and its deletions are interrupted", async () => {
+        const length = FIXTURE_GROUP_SIZE * 2 + 10;
         await assertNoLossAtEveryCrash(
             (queue) => {
                 for (let i = 0; i < length; i++) queue._queuedChanges.enqueue(note(padId("doc", i)));
             },
             (queue) => {
-                // Drain most of the queue so the next snapshot is inline and must clear the overflow keys.
+                // Drain most of the queue so the next snapshot removes completed document records.
                 for (let i = 0; i < length - 5; i++) queue._queuedChanges.dequeue();
             }
         );
@@ -1667,8 +1764,8 @@ describe("ReplicateResultProcessor snapshot that survives a crash at any point",
 
     it("takes no snapshot until the whole restore has completed, so a snapshot mid-restore keeps every document", async () => {
         const { store, map } = memoryStore();
-        // A complete paged snapshot of several pages.
-        const length = SNAPSHOT_PAGE_SIZE * 2 + 25;
+        // A complete snapshot of several thousand document records.
+        const length = FIXTURE_GROUP_SIZE * 2 + 25;
         const seed = setup({ applicationReady: false, kv: store });
         await seed.processor.restoreFromSnapshotOnce();
         for (let i = 0; i < length; i++) queueOf(seed.processor)._queuedChanges.enqueue(note(padId("doc", i)));
@@ -1716,13 +1813,14 @@ describe("ReplicateResultProcessor snapshot that survives a crash at any point",
     });
 
     /** A memory store which fails the next write whose key matches, once, then behaves normally; before it throws it
-     *  may run a hook, to model a page dirtied concurrently with the failing snapshot. */
+     *  may run a hook, to model a document changed concurrently with the failing snapshot. */
     function failableStore() {
         const map = new Map<string, unknown>();
         let failOnKey: ((key: string) => boolean) | undefined;
         let beforeThrow: (() => void) | undefined;
         const store = {
             get: vi.fn(async (key: string) => map.get(key)),
+            keys: vi.fn(async () => [...map.keys()]),
             set: vi.fn(async (key: string, value: unknown) => {
                 if (failOnKey?.(key)) {
                     failOnKey = undefined;
@@ -1746,52 +1844,61 @@ describe("ReplicateResultProcessor snapshot that survives a crash at any point",
     /** Restore a fresh processor from the store map and return its queued documents by id to revision. */
     async function restoredRevs(map: Map<string, unknown>): Promise<Map<string, string | undefined>> {
         const get = async (key: string) => map.get(key);
-        const { processor } = setup({ applicationReady: false, kv: { get, set: async () => undefined } });
+        const { processor } = setup({
+            applicationReady: false,
+            kv: {
+                get,
+                set: async (key, value) => void map.set(key, structuredClone(value)),
+                del: async (key) => void map.delete(key),
+                keys: async () => [...map.keys()],
+            },
+        });
         await processor.restoreFromSnapshotOnce();
         const docs = [...queueOf(processor)._queuedChanges.values()] as { _id: string; _rev?: string }[];
         return new Map(docs.map((doc) => [doc._id, doc._rev]));
     }
 
-    const isOverflowPageKey = (key: string) => key.startsWith(`${SNAPSHOT_KEY}:q:`);
+    const isDocumentKey = (key: string) => key.startsWith(`${SNAPSHOT_KEY}:d:`);
 
     it.each([
-        ["a changed-page write", isOverflowPageKey],
-        ["the base write", (key: string) => key === SNAPSHOT_KEY],
-    ])("keeps a page dirty when %s fails, so the next snapshot persists the true queue", async (_which, failKey) => {
+        ["a changed-document write", isDocumentKey],
+        ["a redo-journal write", (key: string) => key === `${SNAPSHOT_KEY}:pending`],
+    ])(
+        "keeps a document dirty when %s fails, so the next snapshot persists the true queue",
+        async (_which, failKey) => {
+            const { store, map, failNextWrite } = failableStore();
+            const length = FIXTURE_GROUP_SIZE * 2 + 5;
+            const onLastPage = padId("doc", FIXTURE_GROUP_SIZE * 2); // a document near the end of the queue
+            const processor = directProcessor(store);
+            for (let i = 0; i < length; i++) queueOf(processor)._queuedChanges.enqueue(note(padId("doc", i)));
+            await queueOf(processor)._takeSnapshot(); // a committed document snapshot
+
+            // Edit a queued document, then fail its record write before it is committed.
+            queueOf(processor)._queuedChanges.enqueue({ ...note(onLastPage), _rev: "2-edited" } as never);
+            failNextWrite(failKey);
+            await expect(queueOf(processor)._takeSnapshot()).rejects.toThrow("transient");
+
+            // The next snapshot retries the changed document, so the edit is durably kept.
+            await queueOf(processor)._takeSnapshot();
+
+            const revs = await restoredRevs(map);
+            expect(revs.get(onLastPage)).toBe("2-edited");
+            for (let i = 0; i < length; i++) expect(revs.has(padId("doc", i)), `doc ${i} lost`).toBe(true);
+        }
+    );
+
+    it("keeps a document changed during a failed snapshot dirty too, so the next snapshot persists both", async () => {
         const { store, map, failNextWrite } = failableStore();
-        const length = SNAPSHOT_PAGE_SIZE * 2 + 5; // head + a full page + a partly-full last overflow page
-        const onLastPage = padId("doc", SNAPSHOT_PAGE_SIZE * 2); // a document on the partly-full last overflow page
+        const length = FIXTURE_GROUP_SIZE * 2 + 5;
+        const onLastPage = padId("doc", FIXTURE_GROUP_SIZE * 2); // near the end of the queue
+        const onFirstPage = padId("doc", FIXTURE_GROUP_SIZE + 1); // near the middle of the queue
         const processor = directProcessor(store);
         for (let i = 0; i < length; i++) queueOf(processor)._queuedChanges.enqueue(note(padId("doc", i)));
-        await queueOf(processor)._takeSnapshot(); // a committed paged snapshot
-
-        // Edit a document on the last overflow page in place (it stays on that page, which is dirtied, no new page),
-        // then let that snapshot's write fail.
-        queueOf(processor)._queuedChanges.enqueue({ ...note(onLastPage), _rev: "2-edited" } as never);
-        failNextWrite(failKey);
-        await expect(queueOf(processor)._takeSnapshot()).rejects.toThrow("transient");
-
-        // The next snapshot succeeds; because the page stayed dirty, it is rewritten with the edit.
         await queueOf(processor)._takeSnapshot();
 
-        const revs = await restoredRevs(map);
-        expect(revs.get(onLastPage)).toBe("2-edited");
-        for (let i = 0; i < length; i++) expect(revs.has(padId("doc", i)), `doc ${i} lost`).toBe(true);
-    });
-
-    it("keeps a page dirtied during a failed snapshot dirty too, so the next snapshot persists both", async () => {
-        const { store, map, failNextWrite } = failableStore();
-        const length = SNAPSHOT_PAGE_SIZE * 2 + 5;
-        const onLastPage = padId("doc", SNAPSHOT_PAGE_SIZE * 2); // last overflow page
-        const onFirstPage = padId("doc", SNAPSHOT_PAGE_SIZE + 1); // first overflow page
-        const processor = directProcessor(store);
-        for (let i = 0; i < length; i++) queueOf(processor)._queuedChanges.enqueue(note(padId("doc", i)));
-        await queueOf(processor)._takeSnapshot();
-
-        // Edit the last-page document, and as the snapshot's page write is about to fail, edit a first-page document
-        // in place too — a page dirtied while the snapshot is in flight. Both must stay dirty when the write fails.
+        // Change a second document while the first one's write is about to fail; both changes must be retried.
         queueOf(processor)._queuedChanges.enqueue({ ...note(onLastPage), _rev: "2-edited-last" } as never);
-        failNextWrite(isOverflowPageKey, () => {
+        failNextWrite(isDocumentKey, () => {
             queueOf(processor)._queuedChanges.enqueue({ ...note(onFirstPage), _rev: "2-edited-first" } as never);
         });
         await expect(queueOf(processor)._takeSnapshot()).rejects.toThrow("transient");
@@ -1805,9 +1912,226 @@ describe("ReplicateResultProcessor snapshot that survives a crash at any point",
 });
 
 describe("ReplicateResultProcessor restore of a large stored queue", () => {
+    it("does not resume or snapshot an unloaded processor when its export lease is cancelled", async () => {
+        const { store } = memoryStore();
+        const { processor, lifecycle } = setup({ restore: false, applicationReady: false, kv: store });
+        await processor.restoreFromSnapshotOnce();
+        processor.enqueueAll(Array.from({ length: 1200 }, (_, i) => note(padId("terminal", i))));
+        const lease = await processor.exportSnapshotForDowngrade();
+        const internals = processor as unknown as { _snapshotPinnedForDowngrade: boolean; triggerTakeSnapshot(): void };
+        const resume = vi.spyOn(processor, "resumeAfterApplicationReady");
+        const snapshot = vi.spyOn(internals, "triggerTakeSnapshot");
+        store.set.mockClear();
+        lifecycle.unloaded = true;
+        lease?.cancel();
+        lease?.cancel();
+        await queueOf(processor)._takeSnapshot();
+        expect(internals._snapshotPinnedForDowngrade).toBe(true);
+        expect(processor.isSuspended).toBe(true);
+        expect(resume).toHaveBeenCalledTimes(0);
+        expect(snapshot).toHaveBeenCalledTimes(0);
+        expect(store.set.mock.calls.length).toBe(0);
+    });
+
+    it("binds export leases to their own generation and cancels each lease only once", async () => {
+        const { store, map } = memoryStore();
+        const { processor } = setup({ restore: false, applicationReady: false, kv: store });
+        await processor.restoreFromSnapshotOnce();
+        processor.enqueueAll(Array.from({ length: 1200 }, (_, i) => note(padId("lease", i))));
+        const older = await processor.exportSnapshotForDowngrade();
+        const newer = await processor.exportSnapshotForDowngrade();
+        const pin = processor as unknown as { _snapshotPinnedForDowngrade: boolean; triggerTakeSnapshot(): void };
+        const resume = vi.spyOn(processor, "resumeAfterApplicationReady");
+        const snapshot = vi.spyOn(pin, "triggerTakeSnapshot");
+        expect(older?.isCurrent()).toBe(false);
+        older?.cancel();
+        older?.cancel();
+        expect(pin._snapshotPinnedForDowngrade).toBe(true);
+        expect(newer?.isCurrent()).toBe(true);
+        expect(resume).toHaveBeenCalledTimes(0);
+        expect(snapshot).toHaveBeenCalledTimes(0);
+        await queueOf(processor)._takeSnapshot();
+        expect((map.get(SNAPSHOT_KEY) as { documentRecords?: boolean }).documentRecords).toBeUndefined();
+        newer?.cancel();
+        newer?.cancel();
+        expect(pin._snapshotPinnedForDowngrade).toBe(false);
+        expect(newer?.isCurrent()).toBe(false);
+        expect(resume).toHaveBeenCalledTimes(1);
+        expect(snapshot).toHaveBeenCalledTimes(1);
+    });
+
+    it("converts legacy processing and queued arrays without changing their FIFO order", async () => {
+        const { store, map } = memoryStore();
+        const processing = [note("z-processing")];
+        const queued = Array.from({ length: 1200 }, (_, i) => note(padId("reverse", 1200 - i)));
+        map.set(SNAPSHOT_KEY, { processing, queued });
+        const first = setup({ restore: false, applicationReady: false, kv: store });
+        await first.processor.restoreFromSnapshotOnce();
+        await queueOf(first.processor)._takeSnapshot();
+        const second = setup({ restore: false, applicationReady: false, kv: store });
+        await second.processor.restoreFromSnapshotOnce();
+        expect([...queueOf(second.processor)._queuedChanges.values()]).toEqual([...processing, ...queued]);
+        const orders = [...map.entries()]
+            .filter(([key]) => key.startsWith(`${SNAPSHOT_KEY}:d:`))
+            .map(([, value]) => (value as { order: string }).order);
+        expect(new Set(orders).size).toBe(1201);
+    });
+
+    it("pins a legacy export against already pending and later throttled snapshots until cancelled", async () => {
+        const { store, map } = memoryStore();
+        const { processor } = setup({ restore: false, applicationReady: false, kv: store });
+        await processor.restoreFromSnapshotOnce();
+        const docs = Array.from({ length: 1200 }, (_, i) => note(padId("export", i)));
+        processor.enqueueAll(docs);
+        await queueOf(processor)._takeSnapshot();
+        const preparing = processor.exportSnapshotForDowngrade();
+        const pending = queueOf(processor)._takeSnapshot();
+        const lease = await preparing;
+        await pending;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        await queueOf(processor)._takeSnapshot();
+        expect((map.get(SNAPSHOT_KEY) as { queued: unknown[] }).queued).toEqual(docs);
+        expect(lease?.isCurrent()).toBe(true);
+        processor.enqueueAll([note("arrived-during-export")]);
+        expect(lease?.isCurrent()).toBe(false);
+        await queueOf(processor)._takeSnapshot();
+        expect((map.get(SNAPSHOT_KEY) as { queued: unknown[] }).queued).toEqual(docs);
+        lease?.cancel();
+        await queueOf(processor)._takeSnapshot();
+        const restarted = setup({ restore: false, applicationReady: false, kv: store });
+        await restarted.processor.restoreFromSnapshotOnce();
+        expect(queueOf(restarted.processor)._queuedChanges.size).toBe(1201);
+    });
+
+    it("allows rollback before this instance opened its queue store, but rejects a later store failure", async () => {
+        const first = setup({ restore: false, applicationReady: false });
+        Object.defineProperty(first.processor.core, "kvDB", {
+            get() {
+                throw new Error("database not initialised");
+            },
+        });
+        await expect(first.processor.exportSnapshotForDowngrade()).resolves.toBeUndefined();
+        const { store } = memoryStore();
+        const second = setup({ restore: false, applicationReady: false, kv: store });
+        await second.processor.restoreFromSnapshotOnce();
+        Object.defineProperty(second.processor.core, "kvDB", {
+            get() {
+                throw new Error("database closed");
+            },
+        });
+        await expect(second.processor.exportSnapshotForDowngrade()).rejects.toThrow("database closed");
+    });
+
+    it("keeps an arrival from before restore after saved documents through a second restart", async () => {
+        const { store } = memoryStore();
+        const first = setup({ restore: false, applicationReady: false, kv: store });
+        await first.processor.restoreFromSnapshotOnce();
+        const saved = Array.from({ length: 1200 }, (_, i) => note(padId("saved", i)));
+        first.processor.enqueueAll(saved);
+        await queueOf(first.processor)._takeSnapshot();
+        const second = setup({ restore: false, applicationReady: false, kv: store });
+        queueOf(second.processor)._queuedChanges.enqueue(note("new-arrival"));
+        await second.processor.restoreFromSnapshotOnce();
+        await queueOf(second.processor)._takeSnapshot();
+        const third = setup({ restore: false, applicationReady: false, kv: store });
+        await third.processor.restoreFromSnapshotOnce();
+        expect([...queueOf(third.processor)._queuedChanges.values()].map((doc) => doc._id)).toEqual([
+            ...saved.map((doc) => doc._id),
+            "new-arrival",
+        ]);
+    });
+
+    it("restores without dirtying saved records, then persists one addition at constant cost", async () => {
+        const costs: { writes: number; bytes: number }[] = [];
+        for (const length of [20_000, 60_000]) {
+            const { store } = memoryStore();
+            const first = setup({ restore: false, applicationReady: false, kv: store });
+            await first.processor.restoreFromSnapshotOnce();
+            for (let i = 0; i < length; i++) queueOf(first.processor)._queuedChanges.enqueue(note(padId("saved", i)));
+            await queueOf(first.processor)._takeSnapshot();
+            const restarted = setup({ restore: false, applicationReady: false, kv: store });
+            store.set.mockClear();
+            await restarted.processor.restoreFromSnapshotOnce();
+            await queueOf(restarted.processor)._takeSnapshot();
+            expect(store.set.mock.calls.length).toBe(0);
+            expect([...queueOf(restarted.processor)._queuedChanges.values()].map((doc) => doc._id)).toEqual(
+                Array.from({ length }, (_, i) => padId("saved", i))
+            );
+            restarted.processor.enqueueAll([note("new-document")]);
+            await queueOf(restarted.processor)._takeSnapshot();
+            costs.push({
+                writes: store.set.mock.calls.length,
+                bytes: store.set.mock.calls.reduce(
+                    (sum, [key, value]) => sum + key.length + JSON.stringify(value).length,
+                    0
+                ),
+            });
+        }
+        expect(costs[0].writes).toBe(3);
+        expect(costs[1]).toEqual(costs[0]);
+    });
+
+    it("exports the complete queue and waiting notices in the released readable format", async () => {
+        const { store, map } = memoryStore();
+        const { processor } = setup({ restore: false, applicationReady: false, kv: store });
+        await processor.restoreFromSnapshotOnce();
+        const docs = Array.from({ length: 1500 }, (_, i) => note(padId("rollback", i)));
+        processor.enqueueAll(docs);
+        await queueOf(processor)._takeSnapshot();
+        expect((map.get(SNAPSHOT_KEY) as { documentRecords: boolean }).documentRecords).toBe(true);
+        await processor.exportSnapshotForDowngrade();
+        expect(map.get(SNAPSHOT_KEY)).toEqual({ queued: docs, processing: [], waiting: [], waitingWithoutNotice: [] });
+        const restarted = setup({ restore: false, applicationReady: false, kv: store });
+        await restarted.processor.restoreFromSnapshotOnce();
+        expect([...queueOf(restarted.processor)._queuedChanges.values()]).toEqual(docs);
+    });
+
+    it.each([undefined, { invalid: true }])(
+        "preserves document records after a failed restore (%s), and retries without overwriting them",
+        async (unreadableRecord) => {
+            const { store, map } = memoryStore();
+            const marker = { queued: [], processing: [], documentRecords: true, documentCount: "0000000000000001" };
+            const key = `${SNAPSHOT_KEY}:d:one`;
+            map.set(SNAPSHOT_KEY, marker);
+            map.set(key, unreadableRecord);
+            const { processor } = setup({ restore: false, applicationReady: false, kv: store });
+            await expect(processor.restoreFromSnapshotOnce()).rejects.toThrow("document record");
+            await queueOf(processor)._takeSnapshot();
+            expect(store.set).not.toHaveBeenCalled();
+            expect(map.get(SNAPSHOT_KEY)).toEqual(marker);
+
+            map.set(key, { doc: note("one"), order: "0000000000000000", waiting: false, withoutNotice: false });
+            await processor.restoreFromSnapshotOnce();
+            expect([...queueOf(processor)._queuedChanges.values()].map((doc) => doc._id)).toEqual(["one"]);
+        }
+    );
+
+    it.each([undefined, { invalid: true }])(
+        "preserves the stored queue when a named overflow page cannot be restored (%s), and retries it",
+        async (unreadablePage) => {
+            const { store, map } = memoryStore();
+            const pageKey = `${SNAPSHOT_KEY}:q:1:1`;
+            const snapshot = { queued: [note("head")], processing: [], overflow: [pageKey] };
+            map.set(SNAPSHOT_KEY, snapshot);
+            map.set(pageKey, unreadablePage);
+            const { processor } = setup({ restore: false, applicationReady: false, kv: store });
+
+            await expect(processor.restoreFromSnapshotOnce()).rejects.toThrow("overflow page");
+            await queueOf(processor)._takeSnapshot();
+            expect(store.set).not.toHaveBeenCalled();
+            expect(map.get(SNAPSHOT_KEY)).toEqual(snapshot);
+
+            map.set(pageKey, [note("tail")]);
+            await processor.restoreFromSnapshotOnce();
+            expect([...queueOf(processor)._queuedChanges.values()].map((doc) => doc._id)).toEqual(["head", "tail"]);
+            await queueOf(processor)._takeSnapshot();
+            expect(store.set).toHaveBeenCalled();
+        }
+    );
+
     it("restores every waiting document, in operations proportional to the length and not its square", async () => {
         const { store } = memoryStore();
-        const length = SNAPSHOT_PAGE_SIZE * 3 + 7;
+        const length = FIXTURE_GROUP_SIZE * 3 + 7;
         const first = setup({ applicationReady: false, kv: store });
         await first.processor.restoreFromSnapshotOnce();
         const ids: string[] = [];
@@ -1819,7 +2143,7 @@ describe("ReplicateResultProcessor restore of a large stored queue", () => {
         }
         await queue._takeSnapshot();
 
-        const second = setup({ applicationReady: false, kv: store });
+        const second = setup({ restore: false, applicationReady: false, kv: store });
         const enqueueAll = vi.spyOn(second.processor, "enqueueAll");
         store.get.mock.calls.length = 0;
         await second.processor.restoreFromSnapshotOnce();
@@ -1831,8 +2155,8 @@ describe("ReplicateResultProcessor restore of a large stored queue", () => {
         expect(enqueued).toBe(length);
         // Linear, not quadratic: one slice of up to RESTORE_SLICE_SIZE at a time.
         expect(enqueueAll.mock.calls.length).toBe(Math.ceil(length / RESTORE_SLICE_SIZE));
-        // Reads do not grow per document: the base record and one read per overflow page.
-        expect(store.get.mock.calls.length).toBeLessThanOrEqual(1 + Math.ceil(length / SNAPSHOT_PAGE_SIZE));
+        // Each document is read once, in addition to the constant base marker.
+        expect(store.get.mock.calls.filter(([key]) => key.startsWith(`${SNAPSHOT_KEY}:d:`))).toHaveLength(length);
     });
 
     it("restores a record stored without an overflow field exactly as before", async () => {
@@ -1850,6 +2174,133 @@ describe("ReplicateResultProcessor restore of a large stored queue", () => {
 });
 
 describe("ReplicateResultProcessor reprocessing a changed filter", () => {
+    const pendingKey = "replicationResultProcessorReprocessPending";
+    it("frees excluded missing-content entries before checking the full waiting bound", async () => {
+        const { store, map } = memoryStore();
+        const { processor, state } = setup({ restore: false, kv: store });
+        state.chunksArrived = false;
+        state.deferredRemoteContent = true;
+        await processor.restoreFromSnapshotOnce();
+        setGenerator(processor, async function* () {
+            for (let i = 0; i < 1200; i++) yield note(padId("excluded", i));
+        });
+        await processor.reprocessStoredDocuments();
+        const waiting = processor as unknown as { _waitingChanges: Map<string, unknown> };
+        await vi.waitFor(() => expect(waiting._waitingChanges.size).toBe(1000));
+        state.isTargetFile = false;
+        await processor.reprocessStoredDocuments();
+        await vi.waitFor(() => expect(map.has(pendingKey)).toBe(false));
+        expect(waiting._waitingChanges.size).toBe(0);
+    });
+    const setGenerator = (
+        processor: ReplicateResultProcessor,
+        generate: () => AsyncGenerator<ReturnType<typeof note>>
+    ) => {
+        (processor.core.localDatabase as unknown as { findAllNormalDocs: typeof generate }).findAllNormalDocs =
+            generate;
+    };
+
+    it("runs a new full pass when the filter changes after documents have already passed", async () => {
+        const { store, map } = memoryStore();
+        const { processor } = setup({ restore: false, kv: store });
+        await processor.restoreFromSnapshotOnce();
+        const paused = promiseWithResolvers<void>();
+        const proceed = promiseWithResolvers<void>();
+        let passes = 0;
+        setGenerator(processor, async function* () {
+            const pass = ++passes;
+            for (let i = 0; i < 200; i++) {
+                if (pass === 1 && i === 110) {
+                    paused.resolve();
+                    await proceed.promise;
+                }
+                yield note(padId("filter", i));
+            }
+        });
+        const enqueued = vi.spyOn(processor, "enqueueAll");
+        const first = processor.reprocessStoredDocuments();
+        await paused.promise;
+        const second = processor.reprocessStoredDocuments();
+        await vi.waitFor(() => expect(map.get(pendingKey)).toEqual({ generation: 2, fromStart: true }));
+        proceed.resolve();
+        await Promise.all([first, second]);
+        expect(passes).toBe(2);
+        expect(
+            enqueued.mock.calls.flatMap(([docs]) => docs).filter((doc) => doc._id === padId("filter", 0))
+        ).toHaveLength(2);
+        expect(map.has(pendingKey)).toBe(false);
+    });
+
+    it("persists a full-pass request before a crash preceding the first batch", async () => {
+        const { store, map } = memoryStore();
+        const first = setup({ restore: false, kv: store });
+        await first.processor.restoreFromSnapshotOnce();
+        setGenerator(first.processor, async function* () {
+            expect(map.get(pendingKey)).toEqual({ generation: 1, fromStart: false });
+            for (let i = 0; i < 50; i++) yield note(padId("first", i));
+            throw new Error("before first batch");
+        });
+        await expect(first.processor.reprocessStoredDocuments()).rejects.toThrow("before first batch");
+        expect(map.has(REPROCESS_POSITION_KEY)).toBe(false);
+        first.processor.suspend();
+        const restarted = setup({ restore: false, kv: store });
+        setGenerator(restarted.processor, async function* () {
+            for (let i = 0; i < 150; i++) yield note(padId("first", i));
+        });
+        const enqueued = vi.spyOn(restarted.processor, "enqueueAll");
+        await restarted.processor.restoreFromSnapshotOnce();
+        await vi.waitFor(() => expect(map.has(pendingKey)).toBe(false));
+        expect(enqueued.mock.calls.flatMap(([docs]) => docs).map((doc) => doc._id)).toEqual(
+            Array.from({ length: 150 }, (_, i) => padId("first", i))
+        );
+    });
+
+    it("continues a pending pass when readiness arrives while its suspended predecessor is still returning", async () => {
+        const { store, map } = memoryStore();
+        map.set(pendingKey, { generation: 1, fromStart: true });
+        const { processor, lifecycle } = setup({ restore: false, applicationReady: false, kv: store });
+        const find = vi.fn(async function* () {
+            yield note("after-suspension");
+        });
+        setGenerator(processor, find);
+        await processor.restoreFromSnapshotOnce();
+        const predecessor = promiseWithResolvers<number>();
+        const internal = processor as unknown as { _reprocessRun: Promise<number> | undefined };
+        internal._reprocessRun = predecessor.promise.finally(() => {
+            internal._reprocessRun = undefined;
+        });
+        lifecycle.ready = true;
+        processor.resumeAfterApplicationReady();
+        expect(find).not.toHaveBeenCalled();
+        predecessor.resolve(0);
+        await vi.waitFor(() => expect(map.has(pendingKey)).toBe(false));
+        expect(find).toHaveBeenCalledTimes(1);
+    });
+
+    it("bounds queued, processing and missing-content documents together and resumes when content arrives", async () => {
+        const { store, map } = memoryStore();
+        const { processor, state, processSynchroniseResult } = setup({ restore: false, kv: store });
+        state.chunksArrived = false;
+        state.deferredRemoteContent = true;
+        await processor.restoreFromSnapshotOnce();
+        setGenerator(processor, async function* () {
+            for (let i = 0; i < 2500; i++) yield note(padId("missing", i));
+        });
+        await processor.reprocessStoredDocuments();
+        const internals = processor as unknown as {
+            _waitingChanges: Map<string, ReturnType<typeof note>>;
+            pendingDocumentCount(): number;
+        };
+        await vi.waitFor(() => expect(internals._waitingChanges.size).toBe(1000));
+        expect(internals.pendingDocumentCount()).toBeLessThanOrEqual(REPROCESS_QUEUE_LIMIT);
+        expect(map.has(pendingKey)).toBe(true);
+        expect(processSynchroniseResult).not.toHaveBeenCalled();
+        state.chunksArrived = true;
+        processor.enqueueAll([...internals._waitingChanges.values()]);
+        await vi.waitFor(() => expect(map.has(pendingKey)).toBe(false), { timeout: 10000 });
+        await vi.waitFor(() => expect(processSynchroniseResult).toHaveBeenCalledTimes(2500), { timeout: 10000 });
+    });
+
     const storedDoc = (id: string) =>
         ({
             _id: id,
@@ -1859,6 +2310,80 @@ describe("ReplicateResultProcessor reprocessing a changed filter", () => {
         }) as unknown as PouchDB.Core.ExistingDocument<EntryDoc>;
     // Mirrors REPROCESS_BATCH_SIZE in the processor: the reprocessing flushes and stores its position per batch.
     const REPROCESS_BATCH = 100;
+
+    it("continues a saved filter pass through startup alone, without a new filter event", async () => {
+        const { store, map } = memoryStore();
+        map.set(SNAPSHOT_KEY, { queued: [note("file-0000000")], processing: [] });
+        map.set(REPROCESS_POSITION_KEY, "file-0000000");
+        const { processor, lifecycle } = setup({ restore: false, applicationReady: false, kv: store });
+        const find = vi.fn(async function* () {
+            for (let i = 0; i < 4; i++) yield note(padId("file", i));
+        });
+        (
+            processor.core as unknown as { localDatabase: { findAllNormalDocs: typeof find } }
+        ).localDatabase.findAllNormalDocs = find;
+        const enqueued = vi.spyOn(processor, "enqueueAll");
+
+        await processor.restoreFromSnapshotOnce();
+        expect(find).not.toHaveBeenCalled();
+        lifecycle.ready = true;
+        processor.resumeAfterApplicationReady();
+
+        await vi.waitFor(async () => expect(await store.get(REPROCESS_POSITION_KEY)).toBeUndefined());
+        expect(find).toHaveBeenCalledTimes(1);
+        const ids = enqueued.mock.calls.flatMap(([docs]) => docs.map((doc) => doc._id));
+        expect(ids.sort()).toEqual(Array.from({ length: 4 }, (_, i) => padId("file", i)));
+    });
+
+    it.each([2_500, 10_000])(
+        "keeps operation counts linear and snapshots bounded for %s stored documents",
+        async (length) => {
+            const { store } = memoryStore();
+            let idReads = 0;
+            let maxSnapshotDocs = 0;
+            const realSet = store.set.getMockImplementation()!;
+            store.set.mockImplementation(async (key, value) => {
+                const snapshot = value as {
+                    doc?: unknown;
+                    queued?: unknown[];
+                    processing?: unknown[];
+                    waiting?: unknown[];
+                };
+                const count = snapshot.doc
+                    ? 1
+                    : (snapshot.queued?.length ?? 0) +
+                      (snapshot.processing?.length ?? 0) +
+                      (snapshot.waiting?.length ?? 0);
+                maxSnapshotDocs = Math.max(maxSnapshotDocs, count);
+                return await realSet(key, value);
+            });
+            const { processor } = setup({ restore: false, kv: store });
+            (processor as unknown as { triggerTakeSnapshot(): void }).triggerTakeSnapshot = () => undefined;
+            await processor.restoreFromSnapshotOnce();
+            (
+                processor.core as unknown as { localDatabase: { findAllNormalDocs(): AsyncGenerator<unknown> } }
+            ).localDatabase.findAllNormalDocs = async function* () {
+                for (let i = 0; i < length; i++) {
+                    const id = padId("filter", i);
+                    const doc = note(id);
+                    Object.defineProperty(doc, "_id", {
+                        get: () => {
+                            idReads++;
+                            return id;
+                        },
+                        enumerable: true,
+                    });
+                    yield doc;
+                }
+            };
+
+            await expect(processor.reprocessStoredDocuments()).resolves.toBe(length);
+            await vi.waitFor(() => expect(queueOf(processor)._queuedChanges.size).toBe(0));
+            expect(idReads).toBeLessThan(40 * length);
+            expect(maxSnapshotDocs).toBeLessThanOrEqual(SNAPSHOT_INLINE_LIMIT);
+            expect(await store.get(REPROCESS_POSITION_KEY)).toBeUndefined();
+        }
+    );
 
     it("resumes after a restart without reprocessing or missing any document, with a bounded queue", async () => {
         const { store } = memoryStore();
@@ -1870,7 +2395,10 @@ describe("ReplicateResultProcessor reprocessing a changed filter", () => {
         const recordEnqueues = (processor: ReplicateResultProcessor) => {
             const real = processor.enqueueAll.bind(processor);
             vi.spyOn(processor, "enqueueAll").mockImplementation((docs) => {
-                for (const doc of docs) enqueued.push(doc._id);
+                // Restoring a durable batch may apply it again; count the filter scan's own enqueues only.
+                if ((processor as unknown as { _snapshotRestored: boolean })._snapshotRestored) {
+                    for (const doc of docs) enqueued.push(doc._id);
+                }
                 real(docs);
             });
         };
@@ -1901,13 +2429,13 @@ describe("ReplicateResultProcessor reprocessing a changed filter", () => {
         expect(await store.get(REPROCESS_POSITION_KEY)).toBeDefined();
 
         // The next run reads the whole database and continues after the stored position.
-        const second = setup({ kv: store, processSynchroniseResult: async () => true });
-        await second.processor.restoreFromSnapshotOnce();
+        const second = setup({ restore: false, kv: store, processSynchroniseResult: async () => true });
         setFindAllNormalDocs(second.processor, async function* () {
             for (let i = 0; i < total; i++) yield storedDoc(allIds[i]);
         });
         recordEnqueues(second.processor);
-        await expect(second.processor.reprocessStoredDocuments()).resolves.toBeGreaterThan(0);
+        await second.processor.restoreFromSnapshotOnce();
+        await vi.waitFor(async () => expect(await store.get(REPROCESS_POSITION_KEY)).toBeUndefined());
 
         // Every stored document ends enqueued exactly once, and the position is cleared.
         expect(new Set(enqueued).size).toBe(total);
@@ -2014,6 +2542,7 @@ describe("ReplicateResultProcessor reprocessing a changed filter", () => {
         let snapshotBaseWrites = 0;
         const store = {
             get: vi.fn(async (key: string) => map.get(key)),
+            keys: vi.fn(async () => [...map.keys()]),
             set: vi.fn(async (key: string, value: unknown) => {
                 if (key === SNAPSHOT_KEY && ++snapshotBaseWrites >= 2) {
                     throw new Error("crash after the first batch's resume position was stored");

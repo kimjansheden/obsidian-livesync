@@ -10,6 +10,7 @@ import {
     type PreparedReleaseInstall,
     type ReleaseInstallEnvironment,
     type ReleaseInstallOutcome,
+    type PreparedDowngrade,
 } from "./releaseInstaller";
 import type { ReleaseInstallRecords } from "./releaseInstallRecords";
 import {
@@ -248,7 +249,38 @@ export class ReleaseInstallCoordinator {
             if (this.ports.hasUnloaded()) return undefined;
             const events = this.ports.storageEventCount();
             const idle = isIdleForInstall(this.ports.currentActivity());
-            if (idle && events === eventsAtLastIdleLook) return completeReleaseInstall(env, install);
+            if (idle && events === eventsAtLastIdleLook) {
+                let preparation: PreparedDowngrade | void = undefined;
+                try {
+                    if (env.prepareForDowngrade) {
+                        try {
+                            preparation = await env.prepareForDowngrade();
+                        } catch (error) {
+                            this.ports.notify(String(error), true);
+                            return undefined;
+                        }
+                        // Export may yield for a large queue. Recheck all activity and events, then unload in this turn.
+                        if (this.ports.hasUnloaded()) return undefined;
+                        if (
+                            (preparation && !preparation.isCurrent()) ||
+                            !isIdleForInstall(this.ports.currentActivity()) ||
+                            events !== this.ports.storageEventCount()
+                        ) {
+                            eventsAtLastIdleLook = undefined;
+                            continue;
+                        }
+                    }
+                    return await completeReleaseInstall(env, install);
+                } finally {
+                    // A refused unload or any earlier failure leaves this instance responsible for its queue.
+                    if (
+                        preparation &&
+                        !this.ports.hasUnloaded() &&
+                        env.host.getInstance(env.pluginId) === env.runningInstance
+                    )
+                        preparation.cancel();
+                }
+            }
             eventsAtLastIdleLook = idle ? events : undefined;
             await this.ports.wait(this.ports.timings.idlePollMs);
         }

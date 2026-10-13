@@ -1,5 +1,10 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { releasePluginHostOf, useReleaseInstall } from "./useReleaseInstall";
+import { createQueueDowngradePreparation, releasePluginHostOf, useReleaseInstall } from "./useReleaseInstall";
+import { ReplicateResultProcessor } from "../../modules/core/ReplicateResultProcessor";
+import { QUEUE_SNAPSHOT_KEY, type QueueSnapshotStore } from "../../modules/core/ReplicationQueuePersistence";
+import { mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, relative } from "node:path";
 import { RUNNING_RELEASE_NUMBER } from "./runningRelease";
 import { TRUSTED_RELEASE_KEYS_FILE } from "./trustedReleaseKeys";
 import {
@@ -40,6 +45,7 @@ function createHost(
         keysFile?: string | Uint8Array<ArrayBuffer>;
         isMobile?: boolean;
         withoutDeviceLocalStorage?: boolean;
+        getQueueProcessor?: () => ReplicateResultProcessor;
     } = {}
 ) {
     const adapter = new MemoryAdapter();
@@ -142,6 +148,11 @@ function createHost(
         showNotice: (message: string, lasting: boolean) => void notices.push({ message, lasting }),
         reportLoadedMainJs: (sha256: string) => void reported.push(sha256),
         waitForTeardown: () => Promise.resolve(),
+        prepareForDowngrade: vi.fn(
+            options.getQueueProcessor
+                ? createQueueDowngradePreparation(options.getQueueProcessor)
+                : async () => undefined
+        ),
         isAppHidden: vi.fn(() => false),
         deviceLocalStorage: (key: string) =>
             options.withoutDeviceLocalStorage
@@ -232,6 +243,245 @@ describe("with a trusted-keys file which is not valid", () => {
 });
 
 describe("with trusted keys", () => {
+    it.each([
+        "install",
+        "rollback-after-conversion",
+        "rollback-before-database",
+        "unload-throws",
+        "unload-stays",
+        "unloaded-registry-throws",
+        "unloaded-registry-stays",
+        "rollback-unload-throws",
+        "rollback-unload-stays",
+        "rollback-unloaded-registry-throws",
+        "rollback-unloaded-registry-stays",
+    ] as const)(
+        "preserves a legacy-readable queue through the production binding and persistent store (%s)",
+        async (outcome) => {
+            const unloadRefused = outcome.includes("unload");
+            const rollback = outcome.startsWith("rollback-");
+            const terminal = outcome.includes("unloaded-registry");
+            let storeClosed = false;
+            let writesAfterClose = 0;
+            const directory = mkdtempSync(join(tmpdir(), "livesync-release-queue-"));
+            const openStore = (): QueueSnapshotStore => ({
+                get: async <T>(key: string) => {
+                    try {
+                        return JSON.parse(readFileSync(join(directory, encodeURIComponent(key)), "utf8")) as T;
+                    } catch (error) {
+                        if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined as T;
+                        throw error;
+                    }
+                },
+                set: async (key, value) => {
+                    if (storeClosed) {
+                        writesAfterClose++;
+                        return;
+                    }
+                    const file = join(directory, encodeURIComponent(key));
+                    writeFileSync(`${file}.incoming`, JSON.stringify(value));
+                    renameSync(`${file}.incoming`, file);
+                },
+                del: async (key) => {
+                    rmSync(join(directory, encodeURIComponent(key)), { force: true });
+                },
+                keys: async () => readdirSync(directory).map(decodeURIComponent),
+            });
+            let processor!: ReplicateResultProcessor;
+            const host = createHost({ keysFile: keysFileOf(KEY), getQueueProcessor: () => processor });
+            const applied = vi.fn(async () => true);
+            const makeProcessor = (store: QueueSnapshotStore) => {
+                const services = {
+                    ...host.services,
+                    appLifecycle: {
+                        ...host.services.appLifecycle,
+                        isReady: () => host.lifecycle.ready && !host.lifecycle.unloaded,
+                        isSuspended: () => host.lifecycle.unloaded,
+                    },
+                    path: { getPath: (doc: { path: string }) => doc.path },
+                    vault: { isTargetFile: async () => true, isFileSizeTooLarge: () => false, isValidPath: () => true },
+                    replication: {
+                        ...host.services.replication,
+                        processVirtualDocument: async () => false,
+                        processOptionalSynchroniseResult: async () => false,
+                        processSynchroniseResult: applied,
+                    },
+                    replicator: { ...host.services.replicator, peekActiveReplicator: () => undefined },
+                };
+                const core = {
+                    services,
+                    kvDB: store,
+                    localDatabase: {
+                        getRaw: async (id: string) => ({ _id: id, _rev: "1-test" }),
+                        getDBEntryFromMeta: async (doc: object) => ({ ...doc, data: "synthetic" }),
+                    },
+                    serviceModules: { storageAccess: { stat: async () => null } },
+                };
+                const result = new ReplicateResultProcessor({ core, settings: {} } as never);
+                if (!unloadRefused) result.suspend();
+                return result;
+            };
+            const note = (index: number) => ({
+                _id: `waiting-${index}`,
+                _rev: "1-test",
+                path: `waiting-${index}.md`,
+                type: "plain",
+                datatype: "plain",
+                mtime: 2,
+                ctime: 1,
+                size: 1,
+                children: [],
+                eden: {},
+            });
+            const waiting = Array.from({ length: 1205 }, (_, index) => note(index));
+            const notices = waiting.slice(0, 5).map((doc) => doc._id);
+            const readLegacy = async () => {
+                const snapshot = await openStore().get<{
+                    queued: unknown[];
+                    processing: unknown[];
+                    waiting: typeof waiting;
+                    waitingWithoutNotice: string[];
+                    documentRecords?: boolean;
+                }>(QUEUE_SNAPSHOT_KEY);
+                expect(snapshot.documentRecords).toBeUndefined();
+                expect(snapshot.queued).toEqual([]);
+                expect(snapshot.processing).toEqual([]);
+                expect(snapshot.waiting).toEqual(waiting);
+                expect(snapshot.waitingWithoutNotice).toEqual(notices);
+            };
+            let candidate: ReplicateResultProcessor | undefined;
+            try {
+                await openStore().set(QUEUE_SNAPSHOT_KEY, {
+                    queued: [],
+                    processing: [],
+                    waiting,
+                    waitingWithoutNotice: notices,
+                });
+                processor = makeProcessor(openStore());
+                await processor.restoreFromSnapshotOnce();
+                const take = (queue: ReplicateResultProcessor) =>
+                    (queue as unknown as { _takeSnapshot(): Promise<void> })._takeSnapshot();
+                await take(processor);
+                expect((await openStore().get<{ documentRecords: boolean }>(QUEUE_SNAPSHOT_KEY)).documentRecords).toBe(
+                    true
+                );
+                host.manager.unloadPlugin.mockImplementation(async (id) => {
+                    await take(candidate ?? processor);
+                    await new Promise((resolve) => setTimeout(resolve, 70));
+                    await readLegacy();
+                    if (unloadRefused && (!rollback || candidate)) {
+                        if (terminal) {
+                            host.lifecycle.unloaded = true;
+                            storeClosed = true;
+                        }
+                        if (outcome.endsWith("throws")) throw new Error("synthetic unload refused");
+                        return;
+                    }
+                    delete host.plugins[id];
+                });
+                host.manager.loadPlugin.mockImplementation(async (id) => {
+                    await readLegacy();
+                    const instance = loadSyntheticBuild(
+                        host.adapter.files.get(pluginFile("main.js"))
+                    ) as SyntheticInstance;
+                    host.plugins[id] = instance;
+                    if (instance.securityRelease.releaseNumber === NEWER_RELEASE && rollback) {
+                        candidate = makeProcessor(openStore());
+                        if (outcome !== "rollback-before-database") {
+                            await candidate.restoreFromSnapshotOnce();
+                            await take(candidate);
+                            expect(
+                                (await openStore().get<{ documentRecords: boolean }>(QUEUE_SNAPSHOT_KEY))
+                                    .documentRecords
+                            ).toBe(true);
+                        } else
+                            Object.defineProperty(candidate.core, "kvDB", {
+                                get() {
+                                    throw new Error("database not initialised");
+                                },
+                            });
+                        Object.assign(instance.securityRelease, {
+                            loadState: "failed",
+                            prepareForDowngrade: createQueueDowngradePreparation(() => candidate!),
+                        });
+                    }
+                });
+                host.vaultFiles.set("releases/queue.livesync-release", await newerPackage());
+                await host.start();
+                await vi.waitFor(() => expect(host.notices.length).toBe(1), { timeout: 15000 });
+                if (unloadRefused) {
+                    const running = candidate ?? processor;
+                    if (terminal) {
+                        expect(
+                            (running as unknown as { _snapshotPinnedForDowngrade: boolean })._snapshotPinnedForDowngrade
+                        ).toBe(true);
+                        expect(running.isSuspended).toBe(true);
+                        await take(running);
+                        await new Promise((resolve) => setTimeout(resolve, 100));
+                        expect(writesAfterClose).toBe(0);
+                        expect(applied).toHaveBeenCalledTimes(0);
+                        await readLegacy();
+                        return;
+                    }
+                    expect(
+                        (running as unknown as { _snapshotPinnedForDowngrade: boolean })._snapshotPinnedForDowngrade
+                    ).toBe(false);
+                    expect(running.isSuspended).toBe(false);
+                    if (rollback)
+                        expect((host.plugins[TEST_PLUGIN_ID] as SyntheticInstance).securityRelease.releaseNumber).toBe(
+                            NEWER_RELEASE
+                        );
+                    else expect(host.plugins[TEST_PLUGIN_ID]).toBe(host.plugin);
+                    running.enqueueAll([note(9999)] as never);
+                    await vi.waitFor(() => expect(applied).toHaveBeenCalledTimes(1));
+                    await vi.waitFor(() =>
+                        expect(
+                            (running as unknown as { _processingChanges: unknown[] })._processingChanges.length
+                        ).toBe(0)
+                    );
+                    running.suspend();
+                    running.enqueueAll([note(9998)] as never);
+                    await take(running);
+                    const reopened = makeProcessor(openStore());
+                    reopened.suspend();
+                    await reopened.restoreFromSnapshotOnce();
+                    const queued = reopened as unknown as {
+                        _queuedChanges: { values(): IterableIterator<{ _id: string }> };
+                    };
+                    expect([...queued._queuedChanges.values()].map((doc) => doc._id)).toEqual(["waiting-9998"]);
+                    expect(
+                        (await openStore().get<{ documentRecords: boolean }>(QUEUE_SNAPSHOT_KEY)).documentRecords
+                    ).toBe(true);
+                    return;
+                }
+                await readLegacy();
+                expect((host.plugins[TEST_PLUGIN_ID] as SyntheticInstance).securityRelease.releaseNumber).toBe(
+                    outcome === "install" ? NEWER_RELEASE : RUNNING_RELEASE_NUMBER
+                );
+                expect(host.notices[0].message).toContain(
+                    outcome === "install" ? "installed release" : "previous release was put back"
+                );
+                expect(host.manager.unloadPlugin.mock.calls.length).toBe(outcome === "install" ? 1 : 2);
+            } finally {
+                processor?.suspend();
+                candidate?.suspend();
+                await new Promise((resolve) => setTimeout(resolve, 100));
+                const inside = relative(tmpdir(), directory);
+                expect(inside.startsWith("livesync-release-queue-")).toBe(true);
+                rmSync(directory, { recursive: true });
+            }
+        },
+        20000
+    );
+
+    it("exposes queue export for rollback before layout readiness and passes it to the installer", async () => {
+        const host = createHost({ keysFile: keysFileOf(KEY) });
+        expect(Reflect.get(host.plugin.securityRelease, "prepareForDowngrade")).toBe(host.bindings.prepareForDowngrade);
+        host.vaultFiles.set("releases/next.livesync-release", await newerPackage());
+        await host.start();
+        await vi.waitFor(() => expect(host.manager.unloadPlugin).toHaveBeenCalled(), { timeout: 10_000 });
+        expect(host.bindings.prepareForDowngrade).toHaveBeenCalledTimes(1);
+    });
     it("writes one log line with the state, the identifiers of the keys and the running release", async () => {
         const host = createHost({ keysFile: keysFileOf(KEY, OTHER_KEY) });
 

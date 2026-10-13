@@ -19,11 +19,18 @@ import {
     type ReleaseFileAdapter,
     type ReleaseInstallEnvironment,
     type ReleasePluginHost,
+    type PreparedDowngrade,
 } from "./releaseInstaller";
 import { createReleaseInstallRecords, type DeviceLocalStorage } from "./releaseInstallRecords";
 import { RELEASE_PACKAGE_EXTENSION, type TrustedReleaseKey } from "./releasePackage";
 import { RELEASE_MARKER_PREFIX, RUNNING_RELEASE_NUMBER } from "./runningRelease";
 import { parseTrustedReleaseKeys, pluginDirectoryOf, TRUSTED_RELEASE_KEYS_FILE } from "./trustedReleaseKeys";
+import type { ReplicateResultProcessor } from "@/modules/core/ReplicateResultProcessor";
+
+/** Shared by the production entry point and the installation contract test. */
+export const createQueueDowngradePreparation =
+    (getProcessor: () => Pick<ReplicateResultProcessor, "exportSnapshotForDowngrade">) => () =>
+        getProcessor().exportSnapshotForDowngrade();
 
 type ReleaseInstallHost = NecessaryServices<
     "API" | "appLifecycle" | "control" | "fileProcessing" | "replication" | "replicator",
@@ -39,6 +46,8 @@ export interface ReleaseInstallPlugin {
 }
 
 export interface ReleaseInstallHostBindings {
+    /** Exports pending documents in the snapshot shape understood by an earlier build. */
+    prepareForDowngrade?: () => Promise<PreparedDowngrade | void>;
     /** Shows a notice. `lasting` notices stay until dismissed. It must keep working after the plug-in unloads. */
     showNotice(message: string, lasting: boolean): void;
     /** Receives the SHA-256 of the `main.js` this instance was loaded from, for the report in the remote milestone. */
@@ -104,6 +113,10 @@ export function useReleaseInstall(
     plugin: ReleaseInstallPlugin,
     bindings: ReleaseInstallHostBindings
 ) {
+    const status = Reflect.get(plugin, "securityRelease") as
+        | { prepareForDowngrade?: () => Promise<PreparedDowngrade | void> }
+        | undefined;
+    if (status && bindings.prepareForDowngrade) status.prepareForDowngrade = bindings.prepareForDowngrade;
     const log = createInstanceLogFunction("SF:ReleaseInstall", host.services.API);
     const { app } = plugin;
     const adapter = app.vault.adapter;
@@ -118,7 +131,8 @@ export function useReleaseInstall(
      * The installer writes only its own three files, so it uses the adapter directly, past the guards which govern
      * synchronised content. On the desktop it renames through the native file system, which replaces an existing
      * file in one step, so the swap never leaves a file absent; a host without that (mobile) renames through the
-     * vault adapter, which refuses an existing destination, so the installer removes it first.
+     * vault adapter, which can refuse an existing destination. The installer then overwrites the installed file
+     * from the verified bytes without removing it first.
      */
     function installFileAdapter(): ReleaseFileAdapter {
         const native =
@@ -239,6 +253,7 @@ export function useReleaseInstall(
             runningReleaseNumber: RUNNING_RELEASE_NUMBER,
             runningInstance: plugin,
             waitForTeardown: () => bindings.waitForTeardown(),
+            prepareForDowngrade: bindings.prepareForDowngrade,
             records,
             notify,
             wait,

@@ -35,11 +35,19 @@ export interface ReleasePluginHost {
  * the build which installs a package reads it from the instance of the build it has just loaded, so its name and
  * shape must stay as they are.
  */
+export interface PreparedDowngrade {
+    /** Checked synchronously immediately before unloading; a changed queue requires another export. */
+    isCurrent(): boolean;
+    /** Releases the snapshot pin when installation has to wait for activity again. */
+    cancel(): void;
+}
 export interface SecurityReleaseStatus {
     /** The release number which the build carries. */
     readonly releaseNumber: number;
     /** `loaded` once the plug-in has finished loading, `failed` when loading ended without success. */
     loadState: "loading" | "loaded" | "failed";
+    /** Flushes the replicated-document queue to the snapshot shape an earlier build can read. */
+    prepareForDowngrade?: () => Promise<PreparedDowngrade | void>;
 }
 
 /**
@@ -101,6 +109,8 @@ export interface ReleaseInstallEnvironment {
     runningInstance: unknown;
     /** Resolves when the teardown of {@link runningInstance} has settled, once it has been unloaded. */
     waitForTeardown: () => Promise<unknown>;
+    /** Runs while the current key-value database is still open, before the final idle check and unload. */
+    prepareForDowngrade?: () => Promise<PreparedDowngrade | void>;
     records: FailedReleaseRecords;
     /** Tells the user. `lasting` messages stay until dismissed. */
     notify: (message: string, lasting: boolean) => void;
@@ -361,7 +371,7 @@ async function unloadQuietly(env: ReleaseInstallEnvironment): Promise<void> {
     try {
         await settlesWithin(env, env.host.disablePlugin(env.pluginId), env.timings.teardownTimeoutMs);
     } catch {
-        // Nothing was loaded, or the host refused; the files are put back regardless.
+        // A missing build needs no unload; the caller checks for a surviving instance before replacing files.
     }
 }
 
@@ -378,29 +388,51 @@ async function restorePreviousBuild(
     reason: string
 ): Promise<ReleaseInstallOutcome> {
     const rejectedInstance = env.host.getInstance(env.pluginId);
-    await unloadQuietly(env);
-    // Remembered before anything else can fail, so the package is not tried again after any restart.
+    // Remembered before export or teardown can fail, so the rejected package is not retried after a restart.
     env.records.rememberFailedToLoad(install.packageSha256);
-    const filesRestored = await restoreFiles(env, install);
-    await removeStagedFiles(env);
-    const problem = filesRestored
-        ? await loadAndCheck(env, env.runningReleaseNumber, [env.runningInstance, rejectedInstance])
-        : "its files could not be put back";
-    if (problem === undefined) {
+    let preparation: PreparedDowngrade | void = undefined;
+    try {
+        try {
+            preparation = await readSecurityRelease(rejectedInstance).prepareForDowngrade?.();
+            if (preparation && !preparation.isCurrent()) {
+                throw new Error("The replication queue changed while preparing the previous build");
+            }
+        } catch (error) {
+            // The previous build must never be loaded against a queue it cannot read.
+            const problem = describeError(error);
+            env.notify(problem, true);
+            return { status: "restore-failed", reason: problem };
+        }
+        await unloadQuietly(env);
+        if (rejectedInstance && env.host.getInstance(env.pluginId) === rejectedInstance) {
+            const problem = "the host did not unload the running build";
+            env.notify(problem, true);
+            return { status: "restore-failed", reason: problem };
+        }
+        const filesRestored = await restoreFiles(env, install);
+        await removeStagedFiles(env);
+        const problem = filesRestored
+            ? await loadAndCheck(env, env.runningReleaseNumber, [env.runningInstance, rejectedInstance])
+            : "its files could not be put back";
+        if (problem === undefined) {
+            env.notify(
+                `Release ${install.releaseName} from the vault was not installed: ${reason}. ` +
+                    `The previous release was put back and is running. This package will not be tried again.`,
+                true
+            );
+            return { status: "restored", reason };
+        }
         env.notify(
             `Release ${install.releaseName} from the vault was not installed: ${reason}. ` +
-                `The previous release was put back and is running. This package will not be tried again.`,
+                `The previous release could not be started again: ${problem}. ` +
+                `Self-hosted LiveSync is not running; reinstall it manually.`,
             true
         );
-        return { status: "restored", reason };
+        return { status: "restore-failed", reason };
+    } finally {
+        if (preparation && rejectedInstance && env.host.getInstance(env.pluginId) === rejectedInstance)
+            preparation.cancel();
     }
-    env.notify(
-        `Release ${install.releaseName} from the vault was not installed: ${reason}. ` +
-            `The previous release could not be started again: ${problem}. ` +
-            `Self-hosted LiveSync is not running; reinstall it manually.`,
-        true
-    );
-    return { status: "restore-failed", reason };
 }
 
 async function finishInstall(

@@ -116,6 +116,57 @@ const packageFiles = () =>
     Object.fromEntries(Object.entries(testFiles(NEW_RELEASE)).map(([n, b]) => [n, encodeBase64(b)]));
 
 describe("the load state which a build reports", () => {
+    it("rejects a stale queue export instead of loading an older build over changed documents", async () => {
+        const device = createDevice();
+        const install = await prepared(device);
+        const load = device.host.loadBuild;
+        const cancel = vi.fn();
+        device.host.loadBuild = (mainJs) => {
+            const instance = load(mainJs) as SyntheticInstance;
+            if (instance.securityRelease.releaseNumber === NEW_RELEASE)
+                Object.assign(instance.securityRelease, {
+                    loadState: "failed",
+                    prepareForDowngrade: async () => ({ isCurrent: () => false, cancel }),
+                });
+            return instance;
+        };
+        expect((await completeReleaseInstall(device.env, install)).status).toBe("restore-failed");
+        expect(cancel).toHaveBeenCalledTimes(1);
+        expect(device.pluginFiles()).toEqual(packageFiles());
+        expect(device.failedToLoad).toEqual([PACKAGE_SHA256]);
+    });
+
+    it.each([false, true])(
+        "exports a rejected build's queue before rollback, failing closed when export fails (%s)",
+        async (fails) => {
+            const device = createDevice();
+            const install = await prepared(device);
+            const load = device.host.loadBuild;
+            const exportQueue = vi.fn(async () => {
+                expect((device.host.instance as SyntheticInstance).securityRelease.releaseNumber).toBe(NEW_RELEASE);
+                if (fails) throw new Error("synthetic queue export crash");
+            });
+            device.host.loadBuild = (mainJs) => {
+                const instance = load(mainJs) as SyntheticInstance;
+                if (instance.securityRelease.releaseNumber === NEW_RELEASE) {
+                    Object.assign(instance.securityRelease, { loadState: "failed", prepareForDowngrade: exportQueue });
+                }
+                return instance;
+            };
+            const outcome = await completeReleaseInstall(device.env, install);
+            expect(exportQueue).toHaveBeenCalledTimes(1);
+            expect(device.failedToLoad).toEqual([PACKAGE_SHA256]);
+            if (fails) {
+                expect(outcome.status).toBe("restore-failed");
+                expect(device.pluginFiles()).toEqual(packageFiles());
+                expect((device.host.instance as SyntheticInstance).securityRelease.releaseNumber).toBe(NEW_RELEASE);
+            } else {
+                expect(device.pluginFiles()).toEqual(device.filesBefore);
+                expect((device.host.instance as SyntheticInstance).securityRelease.releaseNumber).toBe(RUNNING_RELEASE);
+            }
+        }
+    );
+
     const status = (): SecurityReleaseStatus => ({ releaseNumber: NEW_RELEASE, loadState: "loading" });
 
     it("is loading until the plug-in has loaded, and loaded afterwards", async () => {

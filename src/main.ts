@@ -49,7 +49,11 @@ import { createOpenReplicationUI, createOpenRebuildUI } from "./features/P2PSync
 import { useCompatibilityReview } from "./serviceFeatures/compatibilityReview.ts";
 import { createObsidianCompatibilityReviewUi } from "./serviceFeatures/compatibilityReviewObsidian.ts";
 import { createFileReflectionProvenance } from "./serviceModules/FileReflectionProvenance.ts";
-import { useReleaseInstall } from "./serviceFeatures/releaseInstall/useReleaseInstall.ts";
+import {
+    createQueueDowngradePreparation,
+    useReleaseInstall,
+} from "./serviceFeatures/releaseInstall/useReleaseInstall.ts";
+import { ModuleReplicator } from "./modules/core/ModuleReplicator.ts";
 import { deviceLocalStorageOf } from "./serviceFeatures/releaseInstall/deviceLocalStorageObsidian.ts";
 import { RUNNING_RELEASE_NUMBER } from "./serviceFeatures/releaseInstall/runningRelease.ts";
 import { trackLoadState, type SecurityReleaseStatus } from "./serviceFeatures/releaseInstall/releaseInstaller.ts";
@@ -242,6 +246,9 @@ export default class ObsidianLiveSyncPlugin extends Plugin {
                 waitForCompatibilityReview = () => compatibilityReview.openReview();
                 useReviewHarness(core, this, replicator, compatibilityReview);
                 useReleaseInstall(core, this, {
+                    prepareForDowngrade: createQueueDowngradePreparation(
+                        () => core.getModule(ModuleReplicator).processor
+                    ),
                     showNotice: (message, lasting) =>
                         void new Notice(message, lasting ? 0 : RELEASE_NOTICE_DURATION_MS),
                     reportLoadedMainJs: (sha256) =>

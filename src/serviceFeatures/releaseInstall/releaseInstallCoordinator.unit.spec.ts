@@ -149,6 +149,62 @@ function expectUntouched(device: ReturnType<typeof createDevice>) {
 }
 
 describe("a valid newer package", () => {
+    it("cancels an outdated queue export and prepares again before unload", async () => {
+        const device = createDevice();
+        device.vault.set("releases/new.livesync-release", await packageOf(7));
+        let exports = 0;
+        const cancel = vi.fn(() => expect(device.host.instance).toBe(device.runningInstance));
+        device.ports.install!.prepareForDowngrade = async () => {
+            const current = ++exports;
+            return { isCurrent: () => current > 1, cancel };
+        };
+        expect(await device.coordinator.scan()).toEqual({ status: "installed" });
+        expect(exports).toBe(2);
+        expect(cancel).toHaveBeenCalledTimes(1);
+    });
+
+    it("exports pending documents before the first unload", async () => {
+        const device = createDevice();
+        device.vault.set("releases/new.livesync-release", await packageOf(7));
+        const exportQueue = vi.fn(async () => {
+            expect(device.host.instance).toBe(device.runningInstance);
+            expect(device.adapter.operations).not.toContain("disablePlugin");
+        });
+        device.ports.install!.prepareForDowngrade = exportQueue;
+        expect(await device.coordinator.scan()).toEqual({ status: "installed" });
+        expect(exportQueue).toHaveBeenCalledTimes(1);
+    });
+
+    it("leaves the running build intact when its queue export crashes", async () => {
+        const device = createDevice();
+        device.vault.set("releases/new.livesync-release", await packageOf(7));
+        device.ports.install!.prepareForDowngrade = async () => {
+            throw new Error("synthetic export crash");
+        };
+        await device.coordinator.scan();
+        expect(device.pluginFiles()).toEqual(device.filesBefore);
+        expect(device.host.instance).toBe(device.runningInstance);
+        expect(device.adapter.operations).not.toContain("disablePlugin");
+    });
+
+    it("rechecks activity and storage events after an export yielded", async () => {
+        const device = createDevice();
+        device.vault.set("releases/new.livesync-release", await packageOf(7));
+        let exports = 0;
+        device.ports.install!.prepareForDowngrade = async () => {
+            if (++exports === 1) {
+                device.state.storageEvents++;
+                device.state.activity.fileEvents = 1;
+            }
+        };
+        device.state.onWait = () => {
+            if (exports < 2) expect(device.host.instance).toBe(device.runningInstance);
+            device.state.activity.fileEvents = 0;
+        };
+        expect(await device.coordinator.scan()).toEqual({ status: "installed" });
+        expect(exports).toBe(2);
+    });
+
     it("is installed without any action on the device, and a notice says so", async () => {
         const device = createDevice();
         device.vault.set("releases/0.0.1-security.7.livesync-release", await packageOf(7));
