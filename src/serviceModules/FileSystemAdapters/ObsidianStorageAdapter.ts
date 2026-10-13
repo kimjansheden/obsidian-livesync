@@ -6,6 +6,7 @@ import { toArrayBuffer } from "@vrtmrz/livesync-commonlib/compat/serviceModules/
 import type { Stat, App } from "obsidian";
 import { toIntegerTimestamps } from "./sanitizeWriteOptions";
 import { createPathAliasGuard, type PathAliasGuard } from "./pathAliasGuard";
+import { noProtectedPathLinkGuard, type ProtectedPathLinkGuard } from "./protectedPathLinkGuard";
 
 function assertVaultRelativePath(path: string, allowRoot = false): void {
     const unsafe =
@@ -32,11 +33,14 @@ export class ObsidianStorageAdapter implements IStorageAdapter<Stat> {
      * of trusted release keys is kept out of their reach.
      * @param aliasGuard Refuses a path which reaches an existing entry by a name its folder does not list, so that
      * the rules which decide by the spelling of a path hold for the name the file system uses.
+     * @param linkGuard Refuses a path which a symbolic link or junction resolves into the plug-in folder or its
+     * keys file, which the spelling and alias checks cannot see. A no-op where links cannot arise (mobile).
      */
     constructor(
         private app: App,
         private readonly isWriteProtected: (path: string) => boolean = () => false,
-        private readonly aliasGuard: PathAliasGuard = createPathAliasGuard(app)
+        private readonly aliasGuard: PathAliasGuard = createPathAliasGuard(app),
+        private readonly linkGuard: ProtectedPathLinkGuard = noProtectedPathLinkGuard()
     ) {
         this.staged = new StagedBinaryPublication(app.vault.adapter);
     }
@@ -44,6 +48,7 @@ export class ObsidianStorageAdapter implements IStorageAdapter<Stat> {
     /** What every operation which creates, changes or removes something checks before it reaches storage. */
     private async assertMayChange(path: string): Promise<void> {
         if (this.isWriteProtected(path)) throw new Error("Refusing to change a write-protected file.");
+        await this.linkGuard.assertNoLinkEscape(path);
         await this.aliasGuard.assertNoAlias(path);
     }
 

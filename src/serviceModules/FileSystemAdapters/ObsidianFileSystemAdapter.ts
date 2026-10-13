@@ -14,6 +14,7 @@ import { ObsidianStorageAdapter } from "./ObsidianStorageAdapter";
 import { ObsidianTypeGuardAdapter } from "./ObsidianTypeGuardAdapter";
 import { ObsidianVaultAdapter } from "./ObsidianVaultAdapter";
 import { createPathAliasGuard } from "./pathAliasGuard";
+import { noProtectedPathLinkGuard, type ProtectedPathLinkGuard } from "./protectedPathLinkGuard";
 
 declare module "obsidian" {
     interface Vault {
@@ -37,16 +38,17 @@ export class ObsidianFileSystemAdapter implements IFileSystemAdapter<TAbstractFi
 
     constructor(
         private app: App,
-        isWriteProtected?: (path: string) => boolean
+        isWriteProtected?: (path: string) => boolean,
+        linkGuard: ProtectedPathLinkGuard = noProtectedPathLinkGuard()
     ) {
         this.path = new ObsidianPathAdapter();
         this.typeGuard = new ObsidianTypeGuardAdapter();
         this.conversion = new ObsidianConversionAdapter();
-        // One guard for both routes to storage, so that a folder which one of them has just found listed is
-        // not listed again for the other.
+        // One guard of each kind for both routes to storage, so that a folder which one of them has just found
+        // listed is not listed again for the other, and both refuse a link into a protected path alike.
         const aliasGuard = createPathAliasGuard(app);
-        this.storage = new ObsidianStorageAdapter(app, isWriteProtected, aliasGuard);
-        this.vault = new ObsidianVaultAdapter(app, aliasGuard);
+        this.storage = new ObsidianStorageAdapter(app, isWriteProtected, aliasGuard, linkGuard);
+        this.vault = new ObsidianVaultAdapter(app, aliasGuard, linkGuard);
     }
 
     getAbstractFileByPath(path: FilePath | string): Promise<TAbstractFile | null> {

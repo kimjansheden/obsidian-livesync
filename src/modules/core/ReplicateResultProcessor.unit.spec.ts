@@ -1714,6 +1714,94 @@ describe("ReplicateResultProcessor snapshot that survives a crash at any point",
         const ids = new Set([...queueOf(after.processor)._queuedChanges.values()].map((doc) => doc._id));
         for (let i = 0; i < length; i++) expect(ids.has(padId("doc", i)), `doc ${i} lost`).toBe(true);
     });
+
+    /** A memory store which fails the next write whose key matches, once, then behaves normally; before it throws it
+     *  may run a hook, to model a page dirtied concurrently with the failing snapshot. */
+    function failableStore() {
+        const map = new Map<string, unknown>();
+        let failOnKey: ((key: string) => boolean) | undefined;
+        let beforeThrow: (() => void) | undefined;
+        const store = {
+            get: vi.fn(async (key: string) => map.get(key)),
+            set: vi.fn(async (key: string, value: unknown) => {
+                if (failOnKey?.(key)) {
+                    failOnKey = undefined;
+                    beforeThrow?.();
+                    beforeThrow = undefined;
+                    throw new Error("transient write failure");
+                }
+                map.set(key, structuredClone(value));
+            }),
+            del: vi.fn(async (key: string) => void map.delete(key)),
+        };
+        return {
+            store,
+            map,
+            failNextWrite(predicate: (key: string) => boolean, hook?: () => void) {
+                failOnKey = predicate;
+                beforeThrow = hook;
+            },
+        };
+    }
+    /** Restore a fresh processor from the store map and return its queued documents by id to revision. */
+    async function restoredRevs(map: Map<string, unknown>): Promise<Map<string, string | undefined>> {
+        const get = async (key: string) => map.get(key);
+        const { processor } = setup({ applicationReady: false, kv: { get, set: async () => undefined } });
+        await processor.restoreFromSnapshotOnce();
+        const docs = [...queueOf(processor)._queuedChanges.values()] as { _id: string; _rev?: string }[];
+        return new Map(docs.map((doc) => [doc._id, doc._rev]));
+    }
+
+    const isOverflowPageKey = (key: string) => key.startsWith(`${SNAPSHOT_KEY}:q:`);
+
+    it.each([
+        ["a changed-page write", isOverflowPageKey],
+        ["the base write", (key: string) => key === SNAPSHOT_KEY],
+    ])("keeps a page dirty when %s fails, so the next snapshot persists the true queue", async (_which, failKey) => {
+        const { store, map, failNextWrite } = failableStore();
+        const length = SNAPSHOT_PAGE_SIZE * 2 + 5; // head + a full page + a partly-full last overflow page
+        const onLastPage = padId("doc", SNAPSHOT_PAGE_SIZE * 2); // a document on the partly-full last overflow page
+        const processor = directProcessor(store);
+        for (let i = 0; i < length; i++) queueOf(processor)._queuedChanges.enqueue(note(padId("doc", i)));
+        await queueOf(processor)._takeSnapshot(); // a committed paged snapshot
+
+        // Edit a document on the last overflow page in place (it stays on that page, which is dirtied, no new page),
+        // then let that snapshot's write fail.
+        queueOf(processor)._queuedChanges.enqueue({ ...note(onLastPage), _rev: "2-edited" } as never);
+        failNextWrite(failKey);
+        await expect(queueOf(processor)._takeSnapshot()).rejects.toThrow("transient");
+
+        // The next snapshot succeeds; because the page stayed dirty, it is rewritten with the edit.
+        await queueOf(processor)._takeSnapshot();
+
+        const revs = await restoredRevs(map);
+        expect(revs.get(onLastPage)).toBe("2-edited");
+        for (let i = 0; i < length; i++) expect(revs.has(padId("doc", i)), `doc ${i} lost`).toBe(true);
+    });
+
+    it("keeps a page dirtied during a failed snapshot dirty too, so the next snapshot persists both", async () => {
+        const { store, map, failNextWrite } = failableStore();
+        const length = SNAPSHOT_PAGE_SIZE * 2 + 5;
+        const onLastPage = padId("doc", SNAPSHOT_PAGE_SIZE * 2); // last overflow page
+        const onFirstPage = padId("doc", SNAPSHOT_PAGE_SIZE + 1); // first overflow page
+        const processor = directProcessor(store);
+        for (let i = 0; i < length; i++) queueOf(processor)._queuedChanges.enqueue(note(padId("doc", i)));
+        await queueOf(processor)._takeSnapshot();
+
+        // Edit the last-page document, and as the snapshot's page write is about to fail, edit a first-page document
+        // in place too — a page dirtied while the snapshot is in flight. Both must stay dirty when the write fails.
+        queueOf(processor)._queuedChanges.enqueue({ ...note(onLastPage), _rev: "2-edited-last" } as never);
+        failNextWrite(isOverflowPageKey, () => {
+            queueOf(processor)._queuedChanges.enqueue({ ...note(onFirstPage), _rev: "2-edited-first" } as never);
+        });
+        await expect(queueOf(processor)._takeSnapshot()).rejects.toThrow("transient");
+
+        await queueOf(processor)._takeSnapshot();
+
+        const revs = await restoredRevs(map);
+        expect(revs.get(onLastPage)).toBe("2-edited-last");
+        expect(revs.get(onFirstPage)).toBe("2-edited-first");
+    });
 });
 
 describe("ReplicateResultProcessor restore of a large stored queue", () => {

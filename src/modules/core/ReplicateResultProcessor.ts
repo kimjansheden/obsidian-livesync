@@ -186,6 +186,15 @@ class PagedDocumentQueue {
         this.changedOverflow.clear();
         return changed;
     }
+
+    /**
+     * Mark overflow pages changed again, to restore the dirty set when a snapshot's writes did not all succeed. A
+     * page which has since left the overflow (drained, or promoted into the head) is skipped: it is no longer there
+     * to rewrite, and a later snapshot stops naming its key in any case.
+     */
+    markChangedPages(pages: Iterable<number>): void {
+        for (const page of pages) if (page > this.basePage) this.changedOverflow.add(page);
+    }
 }
 
 type ReplicateResultProcessorState = {
@@ -361,8 +370,13 @@ export class ReplicateResultProcessor {
         const currentPages: number[] = [];
         if (range) for (let n = range.fromPage; n <= range.toPage; n++) currentPages.push(n);
         const currentPageSet = new Set(currentPages);
-        const changed = new Set(this._queuedChanges.drainChangedPages());
-        const generation = ++this._snapshotGeneration;
+        // Clearing the dirty set and choosing the generation are the only in-memory steps taken before the writes;
+        // both are undone if a write fails, so a failed snapshot leaves the bookkeeping exactly as it was committed.
+        const drainedPages = this._queuedChanges.drainChangedPages();
+        const changed = new Set(drainedPages);
+        // A tentative generation: it only becomes the committed one once every write of this snapshot has succeeded,
+        // so a failed attempt reuses the same number (overwriting its own unreferenced orphans) rather than leaking.
+        const generation = this._snapshotGeneration + 1;
         const newKeys = new Map(this._overflowKeys);
         const toWrite: { key: string; docs: QueueDoc[] }[] = [];
         for (const n of currentPages) {
@@ -385,8 +399,19 @@ export class ReplicateResultProcessor {
             overflow,
         } satisfies ReplicateResultProcessorState;
         // From here only the captured values are used; the queue is never read again across an await.
-        for (const page of toWrite) await store.set(page.key, page.docs);
-        await store.set(baseKey, snapshot);
+        try {
+            for (const page of toWrite) await store.set(page.key, page.docs);
+            await store.set(baseKey, snapshot);
+        } catch (error) {
+            // Nothing is committed: the base write did not land, so the stored base still names the previous keys. The
+            // pages this snapshot meant to persist are marked dirty again (joining any dirtied since the cut), and the
+            // key map and generation stay at the last committed state, so the next snapshot rewrites them and persists
+            // the true queue. A partial page write leaves only an unreferenced orphan the fresh key guarantees.
+            this._queuedChanges.markChangedPages(drainedPages);
+            throw error;
+        }
+        // Every write succeeded; only now does the new state become the committed one.
+        this._snapshotGeneration = generation;
         const named = new Set(overflow);
         const stale = this._storedOverflowKeys.filter((key) => !named.has(key));
         this._overflowKeys = newKeys;

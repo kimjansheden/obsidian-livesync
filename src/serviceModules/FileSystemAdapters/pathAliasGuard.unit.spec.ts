@@ -4,18 +4,21 @@ import {
     mkdtempSync,
     readdirSync,
     readFileSync,
+    realpathSync,
     rmSync,
     statSync,
+    symlinkSync,
     writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import type { App, TFile } from "obsidian";
 import { createTrustedReleaseKeysPathMatcher } from "@/serviceFeatures/releaseInstall/trustedReleaseKeys";
 import { ObsidianStorageAdapter } from "./ObsidianStorageAdapter";
 import { ObsidianVaultAdapter } from "./ObsidianVaultAdapter";
 import { PathAliasGuard, createPathAliasGuard } from "./pathAliasGuard";
+import { createProtectedPathLinkGuard } from "./protectedPathLinkGuard";
 import {
     ALIAS_PATHS,
     CONFIG_DIRECTORY,
@@ -355,4 +358,116 @@ describe("on the file system of this machine", () => {
             expect(readdirSync(join(realRoot, REAL_FOLDER)).sort()).toEqual(["new-folder", REAL_FILE].sort());
         }
     );
+});
+
+describe("a path which a symbolic link or junction resolves into the plug-in folder", () => {
+    const PLUGIN_REL = ".obsidian/plugins/obsidian-livesync";
+    const KEYS_REL = `${PLUGIN_REL}/trusted-release-keys.json`;
+    const REFUSAL = "symbolic link or junction";
+
+    /** A real vault whose `updates` is a junction into the plug-in folder, which holds main.js and the keys file. */
+    function realVaultWithJunction(): string {
+        const root = realpathSync(mkdtempSync(join(tmpdir(), "link-guard-")));
+        mkdirSync(join(root, PLUGIN_REL), { recursive: true });
+        writeFileSync(join(root, PLUGIN_REL, "main.js"), "the real plug-in code");
+        writeFileSync(join(root, KEYS_REL), "the trusted keys");
+        mkdirSync(join(root, "notes"));
+        writeFileSync(join(root, "notes", "a.md"), "a note");
+        // A junction needs no privilege on Windows, where a file symlink would; on Linux a directory symlink is made.
+        symlinkSync(join(root, PLUGIN_REL), join(root, "updates"), "junction");
+        return root;
+    }
+
+    function appOver(root: string) {
+        const full = (path: string) => join(root, path === "/" ? "" : path);
+        return {
+            vault: {
+                getAbstractFileByPath: () => null,
+                adapter: {
+                    exists: async (path: string) => await Promise.resolve(existsSync(full(path))),
+                    list: async (path: string) => {
+                        const prefix = path === "/" || path === "" ? "" : `${path}/`;
+                        const names = readdirSync(full(path));
+                        const isFile = (name: string) => statSync(join(full(path), name)).isFile();
+                        return await Promise.resolve({
+                            files: names.filter(isFile).map((name) => `${prefix}${name}`),
+                            folders: names.filter((name) => !isFile(name)).map((name) => `${prefix}${name}`),
+                        });
+                    },
+                    write: async (path: string, data: string) => await Promise.resolve(writeFileSync(full(path), data)),
+                    writeBinary: async () => await Promise.resolve(),
+                    append: async (path: string, data: string) =>
+                        await Promise.resolve(writeFileSync(full(path), data, { flag: "a" })),
+                    remove: async (path: string) => await Promise.resolve(rmSync(full(path))),
+                    mkdir: async (path: string) => await Promise.resolve(void mkdirSync(full(path))),
+                },
+            },
+        };
+    }
+
+    function guardOver(root: string, onRealpath?: () => void) {
+        return createProtectedPathLinkGuard({
+            vaultBasePath: root,
+            protectedPaths: [PLUGIN_REL, KEYS_REL],
+            fs: {
+                exists: async (path) => await Promise.resolve(existsSync(path)),
+                realpath: async (path) => {
+                    onRealpath?.();
+                    return await Promise.resolve((realpathSync.native ?? realpathSync)(path));
+                },
+            },
+            path: { resolve, relative, isAbsolute },
+        });
+    }
+
+    it("refuses every write a junction resolves into the plug-in folder or its keys file", async () => {
+        const root = realVaultWithJunction();
+        try {
+            const app = appOver(root) as unknown as App;
+            const adapter = new ObsidianStorageAdapter(app, () => false, createPathAliasGuard(app), guardOver(root));
+
+            // The junction really does reach the protected files through a path no rule spells as hidden.
+            expect(readFileSync(join(root, "updates/main.js"), "utf8")).toBe("the real plug-in code");
+
+            await expect(adapter.write("updates/main.js", "evil")).rejects.toThrow(REFUSAL);
+            await expect(adapter.writeBinary("updates/main.js", new ArrayBuffer(2))).rejects.toThrow(REFUSAL);
+            await expect(adapter.append("updates/main.js", "evil")).rejects.toThrow(REFUSAL);
+            await expect(adapter.remove("updates/main.js")).rejects.toThrow(REFUSAL);
+            await expect(adapter.mkdir("updates/made")).rejects.toThrow(REFUSAL);
+            await expect(adapter.write("updates/trusted-release-keys.json", "evil")).rejects.toThrow(REFUSAL);
+
+            const vault = new ObsidianVaultAdapter(app, createPathAliasGuard(app), guardOver(root));
+            await expect(vault.rename({ path: "notes/a.md" } as TFile, "updates/main.js")).rejects.toThrow(REFUSAL);
+            await expect(vault.create("updates/new.js", "evil")).rejects.toThrow(REFUSAL);
+
+            // Nothing reached the real files.
+            expect(readFileSync(join(root, PLUGIN_REL, "main.js"), "utf8")).toBe("the real plug-in code");
+            expect(readFileSync(join(root, KEYS_REL), "utf8")).toBe("the trusted keys");
+        } finally {
+            rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+        }
+    });
+
+    it("allows an ordinary path and resolves a real path only when a segment exists, never for a brand-new file", async () => {
+        const root = realVaultWithJunction();
+        try {
+            let realpaths = 0;
+            const app = appOver(root) as unknown as App;
+            const guard = guardOver(root, () => realpaths++);
+            const adapter = new ObsidianStorageAdapter(app, () => false, createPathAliasGuard(app), guard);
+
+            // A brand-new top-level file: nothing on its path exists, so no real path is resolved at all.
+            await adapter.write("fresh.md", "content");
+            expect(realpaths).toBe(0);
+            expect(readFileSync(join(root, "fresh.md"), "utf8")).toBe("content");
+
+            // A file in an existing ordinary folder: one realpath of the existing prefix, not a link, so allowed.
+            realpaths = 0;
+            await adapter.write("notes/b.md", "more");
+            expect(realpaths).toBe(1);
+            expect(readFileSync(join(root, "notes/b.md"), "utf8")).toBe("more");
+        } finally {
+            rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+        }
+    });
 });

@@ -57,6 +57,7 @@ import {
     createTrustedReleaseKeysPathMatcher,
     pluginDirectoryOf,
 } from "./serviceFeatures/releaseInstall/trustedReleaseKeys.ts";
+import { createObsidianProtectedPathLinkGuard } from "./serviceModules/FileSystemAdapters/protectedPathLinkGuardObsidian.ts";
 import type { ObsidianAPIService } from "./modules/services/ObsidianAPIService.ts";
 export type LiveSyncCore = LiveSyncBaseCore<ObsidianServiceContext, LiveSyncCommands>;
 /** How long a notice about an installed release stays; notices about a failure stay until dismissed. */
@@ -95,7 +96,9 @@ export default class ObsidianLiveSyncPlugin extends Plugin {
                 pathService: services.path,
             },
             // The keys which release packages are verified against are never written, replaced or removed here.
-            createTrustedReleaseKeysPathMatcher(pluginDirectoryOf(this))
+            createTrustedReleaseKeysPathMatcher(pluginDirectoryOf(this)),
+            // Nor may a symbolic link or junction resolve a synchronised write into the plug-in folder or those keys.
+            createObsidianProtectedPathLinkGuard(this.app, pluginDirectoryOf(this))
         );
         const storageEventManager = new StorageEventManagerObsidian(this, core, {
             fileProcessing: services.fileProcessing,
