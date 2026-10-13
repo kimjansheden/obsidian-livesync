@@ -257,10 +257,13 @@ export async function prepareReleaseInstall(
 /**
  * Put the staged file in the place of the installed one and make sure the result is the package's file.
  *
- * A rename which replaces an existing file in one step (the native desktop rename the host passes) leaves no
- * moment in which the file is absent. A rename which refuses an existing destination (the mobile vault adapter)
- * gets the target removed first, so that one file is briefly absent. Whatever a rename leaves behind is checked: a
- * target which is not the package's file afterwards is written from the verified bytes in memory.
+ * A rename which replaces an existing file in one step (the native desktop rename the host passes) leaves no moment
+ * in which the file is absent. A rename which refuses an existing destination (the mobile adapter) is let fail, and
+ * the installed file is then overwritten in place from the verified bytes in memory — never removed first. So no
+ * kill point during the swap ever leaves the file absent: a crash before a file's write leaves the old file whole,
+ * a crash during it leaves a partial but verified file the `.incoming`/`.previous` companions can recover, and a
+ * crash after it leaves the whole new file. Whatever a rename leaves behind is checked, and a target which is not
+ * yet the package's file is written from the verified bytes.
  */
 async function replaceWithStaged(env: ReleaseInstallEnvironment, file: PreparedFile): Promise<void> {
     const target = targetPath(env, file.name);
@@ -269,12 +272,8 @@ async function replaceWithStaged(env: ReleaseInstallEnvironment, file: PreparedF
         try {
             await env.adapter.rename(staged, target);
         } catch {
-            try {
-                await env.adapter.remove(target);
-                await env.adapter.rename(staged, target);
-            } catch {
-                // The direct write below decides.
-            }
+            // A rename which refuses an existing destination leaves the installed file in place; it is overwritten
+            // below from the verified bytes, never removed first, so no crash point leaves the file missing.
         }
         if (await fileMatches(env, target, file.sha256)) return;
     }

@@ -297,6 +297,27 @@ describe("swapping, reloading and verifying", () => {
         }
     );
 
+    it("never leaves main.js absent at any step of the swap on a mobile-style adapter", async () => {
+        const device = createDevice();
+        // The documented mobile path: a rename onto an existing file is refused, so the file is overwritten in place.
+        device.adapter.renameOntoExisting = "refuse";
+        const install = await prepared(device);
+        const mainJs = pluginFile("main.js");
+
+        // The state at the start of every mutating operation is a point the device could stop at. Record whether
+        // main.js is present at each; it must never be missing, so no stop during the swap loses the only code file.
+        const presentAtEachStep: boolean[] = [];
+        const record = () => void presentAtEachStep.push(device.adapter.files.has(mainJs));
+        device.adapter.intercept = { write: record, remove: record, rename: record };
+
+        const outcome = await completeReleaseInstall(device.env, install);
+
+        expect(outcome).toEqual({ status: "installed" });
+        expect(presentAtEachStep.length).toBeGreaterThan(0);
+        expect(presentAtEachStep.every((present) => present)).toBe(true);
+        expect(device.pluginFiles()).toEqual(packageFiles());
+    });
+
     it("installs by writing directly where the adapter cannot rename at all", async () => {
         const device = createDevice();
         device.adapter.intercept.rename = () => {
@@ -467,18 +488,19 @@ describe("a new build which is not accepted", () => {
     it("remembers the package before it puts any file back", async () => {
         const device = createDevice();
         const install = await prepared(device, mainJsOf(`throw 1; ${markerOf(NEW_RELEASE)}`));
+        const mainJsWrites = () =>
+            device.adapter.operations.filter((op) => op === `write ${pluginFile("main.js")}`).length;
         const writesWhenRemembered: number[] = [];
         device.env.records = {
-            rememberFailedToLoad: () =>
-                void writesWhenRemembered.push(
-                    device.adapter.operations.filter((op) => op === `write ${pluginFile("main.js")}`).length
-                ),
+            rememberFailedToLoad: () => void writesWhenRemembered.push(mainJsWrites()),
         };
 
         await completeReleaseInstall(device.env, install);
 
-        // The swap wrote or renamed main.js once; the restoring write had not happened yet.
-        expect(writesWhenRemembered).toEqual([0]);
+        // The package is remembered once, before the previous main.js is written back: the restoring write is one
+        // more than the writes which had happened when it was remembered (the mobile swap overwrites main.js once).
+        expect(writesWhenRemembered).toHaveLength(1);
+        expect(writesWhenRemembered[0]).toBeLessThan(mainJsWrites());
         expectPreviousBuildRestored(device);
     });
 
