@@ -79,6 +79,12 @@ function setup(state: LifecycleState) {
             services: {
                 appLifecycle,
                 API: { getSystemConfigDir: () => ".obsidian" },
+                context: {
+                    plugin: {
+                        manifest: { id: "obsidian-livesync", dir: ".obsidian/plugins/obsidian-livesync" },
+                        app: { vault: { configDir: ".obsidian" } },
+                    },
+                },
             },
             storageAccess: { statHidden },
         },

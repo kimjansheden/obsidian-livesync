@@ -465,6 +465,9 @@ export class ConfigSync extends LiveSyncCommands {
     getFileCategory(
         filePath: string
     ): "CONFIG" | "THEME" | "SNIPPET" | "PLUGIN_MAIN" | "PLUGIN_ETC" | "PLUGIN_DATA" | "" {
+        // This plug-in's own installed files belong to no category: its signed executable files and its trust
+        // anchor change only through the signed-release install path, never stored or applied through this sync.
+        if (this.isOwnPluginProtectedPath(filePath)) return "";
         if (filePath.split("/").length == 2 && filePath.endsWith(".json")) return "CONFIG";
         if (filePath.split("/").length == 4 && filePath.startsWith(`${this.configDir}/themes/`)) return "THEME";
         if (filePath.startsWith(`${this.configDir}/snippets/`) && filePath.endsWith(".css")) return "SNIPPET";
@@ -1004,6 +1007,13 @@ export class ConfigSync extends LiveSyncCommands {
                 const filename = data.files[0].filename;
                 this._log(`Applying ${filename} of ${data.displayName || data.name}..`);
                 const path = `${baseDir}/${filename}` as FilePath;
+                if (this.isOwnPluginProtectedPath(path)) {
+                    this._log(
+                        `Not applying ${filename}: this plug-in's own files are never synchronised`,
+                        LOG_LEVEL_NOTICE
+                    );
+                    return false;
+                }
                 await this.core.storageAccess.ensureDir(path);
                 // If the content has applied, modified time will be updated to the current time.
                 await this.core.storageAccess.writeHiddenFileAuto(path, content);
@@ -1014,6 +1024,13 @@ export class ConfigSync extends LiveSyncCommands {
                     // If files have applied, modified time will be updated to the current time.
                     const stat = { mtime: f.mtime, ctime: f.ctime };
                     const path = `${baseDir}/${f.filename}` as FilePath;
+                    if (this.isOwnPluginProtectedPath(path)) {
+                        this._log(
+                            `Not applying ${f.filename}: this plug-in's own files are never synchronised`,
+                            LOG_LEVEL_NOTICE
+                        );
+                        continue;
+                    }
                     this._log(`Applying ${f.filename} of ${data.displayName || data.name}..`);
                     // const contentEach = createBlob(f.data);
                     await this.core.storageAccess.ensureDir(path);
@@ -1079,6 +1096,9 @@ export class ConfigSync extends LiveSyncCommands {
                 try {
                     // console.dir(f);
                     const path = `${baseDir}/${f.filename}`;
+                    if (this.isOwnPluginProtectedPath(path)) {
+                        throw new LiveSyncError("This plug-in's own files are never synchronised");
+                    }
                     await this.core.storageAccess.ensureDir(path);
                     if (!content) {
                         const dt = decodeBinary(f.data);
@@ -1207,6 +1227,7 @@ export class ConfigSync extends LiveSyncCommands {
 
     recentProcessedInternalFiles = [] as string[];
     async makeEntryFromFile(path: FilePath): Promise<false | PluginDataExFile> {
+        if (this.isOwnPluginProtectedPath(path)) return false;
         const stat = await this.core.storageAccess.statHidden(path);
         let version: string | undefined;
         let displayName: string | undefined;
@@ -1254,6 +1275,7 @@ export class ConfigSync extends LiveSyncCommands {
     }
 
     async storeCustomisationFileV2(path: FilePath, term: string, force = false) {
+        if (this.isOwnPluginProtectedPath(path)) return false;
         const vf = this.filenameWithUnifiedKey(path, term);
         return await serialized(`plugin-${vf}`, async () => {
             const prefixedFileName = vf;
@@ -1482,6 +1504,7 @@ export class ConfigSync extends LiveSyncCommands {
         if (!this._isMainReady()) return false;
         if (this._isMainSuspended()) return false;
         if (!this.isThisModuleEnabled()) return false;
+        if (this.isOwnPluginProtectedPath(path)) return false;
         // if (!this.isTargetPath(path)) return false;
         const stat = await this.core.storageAccess.statHidden(path);
         // Make sure that target is a file.

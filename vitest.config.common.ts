@@ -12,12 +12,14 @@ import path from "path";
 import { fileURLToPath } from "node:url";
 import fs from "node:fs";
 import { platform } from "node:process";
+import { RELEASE_MARKER_CONSTANT, releaseMarkerText } from "./scripts/security/verify-release-marker.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const manifestJson = JSON.parse(fs.readFileSync("./manifest.json") + "");
 const packageJson = JSON.parse(fs.readFileSync("./package.json") + "");
 const updateInfo = JSON.stringify(fs.readFileSync("./updates.md") + "");
+const securityRelease = JSON.parse(fs.readFileSync("./security-release.json") + "");
 const prod = false;
 const moduleAliasPlugin = {
     name: "module-alias",
@@ -78,6 +80,7 @@ const define = {
     MANIFEST_VERSION: `"${manifestJson.version}"`,
     PACKAGE_VERSION: `"${packageJson.version}"`,
     UPDATE_INFO: `${updateInfo}`,
+    [RELEASE_MARKER_CONSTANT]: JSON.stringify(releaseMarkerText(securityRelease)),
     global: "globalThis",
     hostPlatform: `"${platform}"`,
 };
@@ -105,6 +108,9 @@ export default defineConfig({
         platform: "browser",
     },
     // define,
+    // The transformer in use ignores the `esbuild` options above, so the constant which the release marker module
+    // reads is defined here.
+    define: { [RELEASE_MARKER_CONSTANT]: define[RELEASE_MARKER_CONSTANT] },
     server: {
         headers: {
             "Service-Worker-Allowed": "/",

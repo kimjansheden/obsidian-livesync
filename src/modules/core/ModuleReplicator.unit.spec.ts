@@ -67,7 +67,7 @@ function createResultApplicationHarness(options: {
             processSynchroniseResult,
             processVirtualDocument: vi.fn(async () => false),
         },
-        replicator: { onReplicatorInitialised: handler() },
+        replicator: { onReplicatorInitialised: handler(), peekActiveReplicator: () => undefined },
         setting: { currentSettings: () => settings },
         vault: {
             isFileSizeTooLarge: vi.fn(() => false),

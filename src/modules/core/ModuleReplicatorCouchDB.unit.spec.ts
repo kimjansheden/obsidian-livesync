@@ -43,6 +43,24 @@ function createModule(settings: { liveSync: boolean; syncOnStart: boolean }, isR
 }
 
 describe("ModuleReplicatorCouchDB resume replication activity", () => {
+    it.each([
+        ["continuous", { liveSync: true, syncOnStart: false }],
+        ["one-shot", { liveSync: false, syncOnStart: true }],
+    ])("opens no %s replication when an unloaded plug-in is resumed", async (_, settings) => {
+        const { module, openReplication, runFiniteReplicationActivity } = createModule(settings);
+        // An unloaded plug-in is suspended and not ready.
+        const { appLifecycle, replication } = module.core.services as any;
+        appLifecycle.isSuspended.mockReturnValue(true);
+        appLifecycle.isReady.mockReturnValue(false);
+
+        await module._everyAfterResumeProcess();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        expect(replication.isReplicationReady).not.toHaveBeenCalled();
+        expect(runFiniteReplicationActivity).not.toHaveBeenCalled();
+        expect(openReplication).not.toHaveBeenCalled();
+    });
+
     it("exposes start-up one-shot replication as finite replication activity", async () => {
         const { module, openReplication, runFiniteReplicationActivity } = createModule({
             liveSync: false,

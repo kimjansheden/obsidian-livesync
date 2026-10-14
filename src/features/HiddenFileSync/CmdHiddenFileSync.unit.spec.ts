@@ -25,6 +25,13 @@ vi.mock("@/features/LiveSyncCommands.ts", () => ({
         get settings() {
             return this.core.settings;
         }
+        // None of the paths in these tests is one of this plug-in's own protected files.
+        isTrustedReleaseKeysPath() {
+            return false;
+        }
+        isOwnPluginProtectedPath() {
+            return false;
+        }
     },
 }));
 vi.mock("./configureHiddenFileSyncMode.ts", () => ({
@@ -77,6 +84,7 @@ function createHiddenRevisionOperation() {
     Object.assign(hiddenFileSync, {
         core: {
             services: {
+                appLifecycle: { hasUnloaded: () => false },
                 vault: {
                     isIgnoredByIgnoreFile: vi.fn(async () => false),
                 },

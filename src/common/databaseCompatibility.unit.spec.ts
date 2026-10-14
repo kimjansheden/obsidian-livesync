@@ -173,6 +173,7 @@ describe("packaged Commonlib compatibility gate", () => {
             APIService: { isOnline: true, addLog: vi.fn(), isMobile: vi.fn(() => false) },
             appLifecycleService: {
                 isReady: () => true,
+                hasUnloaded: () => false,
                 onLoaded: { addHandler: vi.fn() },
                 onResumed: { addHandler: vi.fn() },
                 getUnresolvedMessages: Object.assign(vi.fn().mockResolvedValue([]), { addHandler: vi.fn() }),

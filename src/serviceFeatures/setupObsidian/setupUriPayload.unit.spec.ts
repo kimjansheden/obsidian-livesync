@@ -3,7 +3,12 @@ import { DEFAULT_SETTINGS, type ObsidianLiveSyncSettings } from "@vrtmrz/livesyn
 import { encodeSettingsToSetupURI } from "@vrtmrz/livesync-commonlib/compat/API/processSetting";
 import { encryptString } from "@vrtmrz/livesync-commonlib/compat/encryption/stringEncryption";
 import { configURIBase } from "@/common/types";
-import { DEVICE_LOCAL_SETUP_SETTING_KEYS, decryptSetupURISettings, isSetupURI } from "./setupUriPayload";
+import {
+    DEVICE_LOCAL_SETUP_SETTING_KEYS,
+    decryptSetupURISettings,
+    isSetupURI,
+    withoutDeviceLocalSettings,
+} from "./setupUriPayload";
 
 const passphrase = "synthetic-setup-passphrase-0001";
 const deviceLocalKeys = [
@@ -11,6 +16,7 @@ const deviceLocalKeys = [
     "deviceAndVaultName",
     "P2P_DevicePeerName",
     "configPassphraseStore",
+    "removeUnreferencedJournalData",
 ];
 
 function sourceSettings(): ObsidianLiveSyncSettings {
@@ -32,6 +38,7 @@ function sourceSettings(): ObsidianLiveSyncSettings {
         encryptedPassphrase: "%synthetic-local-ciphertext",
         encryptedCouchDBConnection: "%synthetic-local-connection",
         configPassphraseStore: "ASK_AT_LAUNCH",
+        removeUnreferencedJournalData: true,
     } as ObsidianLiveSyncSettings;
 }
 
@@ -71,6 +78,28 @@ describe("Setup URI payload", () => {
         const imported = await decryptSetupURISettings(uri, passphrase);
 
         for (const key of deviceLocalKeys) expect(imported).not.toHaveProperty(key);
+    });
+
+    it("strips the device-local journal-cleanup preference, keeping settings which travel", () => {
+        const stripped = withoutDeviceLocalSettings({
+            removeUnreferencedJournalData: true,
+            usePathObfuscation: true,
+        } as ObsidianLiveSyncSettings);
+
+        expect(stripped).not.toHaveProperty("removeUnreferencedJournalData");
+        expect(stripped.usePathObfuscation).toBe(true);
+    });
+
+    it("does not let a received payload set the device-local journal-cleanup preference on this device", async () => {
+        // A payload which carries the preference (as a P2P config or a hand-built URI could), not run through the
+        // Commonlib encoder which would strip it, so the decoder's own stripping is what must keep it out.
+        const payload = JSON.stringify({ remoteType: "MINIO", removeUnreferencedJournalData: true });
+        const uri = `${configURIBase}${encodeURIComponent(await encryptString(payload, passphrase))}`;
+
+        const imported = await decryptSetupURISettings(uri, passphrase);
+
+        expect(imported.remoteType).toBe("MINIO");
+        expect(imported).not.toHaveProperty("removeUnreferencedJournalData");
     });
 
     it("rejects a wrong passphrase", async () => {

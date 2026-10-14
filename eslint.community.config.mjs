@@ -30,6 +30,7 @@ export default defineConfig(
                 MANIFEST_VERSION: "readonly",
                 PACKAGE_VERSION: "readonly",
                 UPDATE_INFO: "readonly",
+                SECURITY_RELEASE_MARKER: "readonly",
                 hostPlatform: "readonly",
             },
             parserOptions: {
@@ -46,6 +47,16 @@ export default defineConfig(
         },
     },
     ...obsidianmd.configs.recommended,
+    {
+        files: ["src/serviceFeatures/releaseInstall/bootstrap.ts"],
+        rules: {
+            // The permanent loader implements the host's CommonJS boundary for authenticated local code only.
+            // CSS is taken from the same authenticated package; reading the root styles.css would mix builds.
+            "no-eval": "off",
+            "obsidianmd/no-forbidden-elements": "off",
+            "obsidianmd/prefer-create-el": "off",
+        },
+    },
     {
         rules: {
             // The directory review reports console usage as guidance rather than a release blocker.

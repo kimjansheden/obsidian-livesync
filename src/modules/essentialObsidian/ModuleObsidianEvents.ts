@@ -76,6 +76,8 @@ export class ModuleObsidianEvents extends AbstractObsidianModule {
     }
 
     initialCallback: (() => void) | undefined = undefined;
+    /** The wrapper this instance installed on the save command, so only it is removed again at unload. */
+    private installedSaveCallback: (() => void) | undefined = undefined;
 
     swapSaveCommand() {
         this._log("Modifying callback of the save command", LOG_LEVEL_VERBOSE);
@@ -84,21 +86,21 @@ export class ModuleObsidianEvents extends AbstractObsidianModule {
         const save = saveCommandDefinition?.callback;
         if (saveCommandDefinition && typeof save === "function") {
             this.initialCallback = save;
-            saveCommandDefinition.callback = () => {
+            const wrapper = () => {
                 scheduleTask("syncOnEditorSave", 250, () => {
-                    if (this.services.control.hasUnloaded()) {
-                        this._log("Unload and remove the handler.", LOG_LEVEL_VERBOSE);
-                        saveCommandDefinition.callback = this.initialCallback;
-                        this.initialCallback = undefined;
-                    } else {
-                        if (this.settings.syncOnEditorSave) {
-                            this._log("Sync on Editor Save.", LOG_LEVEL_VERBOSE);
-                            fireAndForget(() => this.services.replication.replicateByEvent());
-                        }
+                    // The wrapper is removed at unload (restoreSaveCommand). An unloaded instance which still fires
+                    // here only saves; it synchronises nothing and does not restore, so it cannot remove a newer
+                    // instance's wrapper which has since replaced ours.
+                    if (this.services.control.hasUnloaded()) return;
+                    if (this.settings.syncOnEditorSave) {
+                        this._log("Sync on Editor Save.", LOG_LEVEL_VERBOSE);
+                        fireAndForget(() => this.services.replication.replicateByEvent());
                     }
                 });
                 save();
             };
+            this.installedSaveCallback = wrapper;
+            saveCommandDefinition.callback = wrapper;
         }
         const codeMirrorAdapter = (compatGlobal as typeof compatGlobal & { CodeMirrorAdapter?: CodeMirrorAdapter })
             .CodeMirrorAdapter;
@@ -250,6 +252,8 @@ export class ModuleObsidianEvents extends AbstractObsidianModule {
     }
 
     private async applyDeferredBoundedActivityLifecycle() {
+        // Activity of an unloaded plug-in which ends now neither suspends nor resumes anything.
+        if (this.services.appLifecycle.hasUnloaded()) return;
         if (this.hasBoundedActivity()) {
             this.deferLifecycleUntilBoundedActivityEnds();
             return;
@@ -308,6 +312,7 @@ export class ModuleObsidianEvents extends AbstractObsidianModule {
         );
         // The interrupted cycle leaves its work pending; run it again once that cycle has unwound.
         if (!(await this.waitForBoundedRemoteActivityToEnd(ABORTED_REPLICATION_UNWIND_TIMEOUT_MS))) return;
+        // An unloaded plug-in counts as suspended.
         if (activeWindow.document.hidden || this.services.appLifecycle.isSuspended()) return;
         await this.services.replication.replicate();
     }
@@ -549,8 +554,25 @@ export class ModuleObsidianEvents extends AbstractObsidianModule {
     _isReloadingScheduled(): boolean {
         return this._totalProcessingCount !== undefined;
     }
+    /**
+     * Put the save command's callback back at unload, but only when it is still the wrapper this instance
+     * installed. A newer instance, loaded by a reload in the same app session, has replaced our wrapper with its
+     * own; we must leave that in place, or the first save afterwards would lose the newer instance's handler.
+     */
+    restoreSaveCommand(): Promise<boolean> {
+        const commandRegistry = (this.app as unknown as AppWithInternalCommands).commands;
+        const saveCommandDefinition = commandRegistry?.commands?.["editor:save-file"];
+        if (saveCommandDefinition && saveCommandDefinition.callback === this.installedSaveCallback) {
+            saveCommandDefinition.callback = this.initialCallback;
+        }
+        this.installedSaveCallback = undefined;
+        this.initialCallback = undefined;
+        return Promise.resolve(true);
+    }
+
     override onBindFunction(core: LiveSyncCore, services: typeof core.services): void {
         services.appLifecycle.onLayoutReady.addHandler(this._everyOnLayoutReady.bind(this));
+        services.appLifecycle.onBeforeUnload.addHandler(this.restoreSaveCommand.bind(this));
         services.appLifecycle.onInitialise.addHandler(this._everyOnloadStart.bind(this));
         services.appLifecycle.askRestart.setHandler(this._askReload.bind(this));
         services.appLifecycle.scheduleRestart.setHandler(this._scheduleAppReload.bind(this));

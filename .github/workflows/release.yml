@@ -60,6 +60,16 @@ jobs:
           test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
           test "$(git rev-parse "refs/tags/$TAG^{commit}")" = "$EXPECTED_SHA"
           test "${TAG%%-security.*}" = "$(node -p "require('./package.json').version")"
+          node scripts/security/verify-release-marker.mjs --tag "$TAG"
+          # The release number must be higher than every earlier security release, so a device never passes over
+          # a number it has already seen. Devices compare only the number, so a lower one would not install.
+          new_number="${TAG##*-security.}"
+          for earlier in $(git tag --list '*-security.*'); do
+            [ "$earlier" = "$TAG" ] && continue
+            earlier_number="${earlier##*-security.}"
+            case "$earlier_number" in *[!0-9]*) continue ;; esac
+            [ "$new_number" -gt "$earlier_number" ] || { echo "Release number $new_number is not above earlier tag $earlier" >&2; exit 1; }
+          done
           test "$(git ls-remote --exit-code origin refs/heads/main | cut -f1)" = "$EXPECTED_SHA"
           git config gpg.ssh.allowedSignersFile docs/security/release-signers.allowed
           git verify-tag "$TAG"
@@ -124,6 +134,11 @@ jobs:
       - name: Build release artefacts
         run: npm run build
 
+      - name: Verify the release marker of the built plug-in
+        env:
+          TAG: ${{ inputs.tag }}
+        run: node scripts/security/verify-release-marker.mjs --main main.js --tag "$TAG"
+
       - name: Create SBOM, licence inventory, and source receipt
         env:
           TAG: ${{ inputs.tag }}
@@ -133,14 +148,14 @@ jobs:
           mkdir -p release-assets
           npm run sbom -- release-assets/sbom.cdx.json
           jq -r '["name","version","licences","purl"], (.components | sort_by(.name, .version)[] | [.name, .version, ([.licenses[]? | .license.id // .license.name // .expression] | join(" OR ")), (.purl // "")]) | @tsv' release-assets/sbom.cdx.json > release-assets/LICENSE-INVENTORY.tsv
-          cp main.js manifest.json styles.css package-lock.json docs/security/commonlib-release.json release-assets/
+          cp main.js manifest.json styles.css bootstrap.js bootstrap-styles.css bootstrap-baseline.json bootstrap-installation.json package-lock.json docs/security/commonlib-release.json release-assets/
           upstream_repository=$(node -p "require('./security-release.json').upstreamRepository")
           upstream_base=$(node -p "require('./security-release.json').upstreamBase")
           lockfile_sha=$(sha256sum package-lock.json | cut -d' ' -f1)
           commonlib_receipt_sha=$(sha256sum docs/security/commonlib-release.json | cut -d' ' -f1)
           jq -n --arg repository "$GITHUB_REPOSITORY" --arg upstreamRepository "$upstream_repository" --arg upstreamBase "$upstream_base" --arg commit "$EXPECTED_SHA" --arg tag "$TAG" --arg lockfileSha256 "$lockfile_sha" --arg commonlibReceiptSha256 "$commonlib_receipt_sha" --arg workflowRun "$GITHUB_RUN_ID" '{repository:$repository,upstreamRepository:$upstreamRepository,upstreamBase:$upstreamBase,commit:$commit,tag:$tag,lockfileSha256:$lockfileSha256,commonlibReceiptSha256:$commonlibReceiptSha256,workflowRun:$workflowRun}' > release-assets/source-receipt.json
           cd release-assets
-          sha256sum LICENSE-INVENTORY.tsv commonlib-release.json main.js manifest.json package-lock.json sbom.cdx.json source-receipt.json styles.css > SHA256SUMS
+          sha256sum LICENSE-INVENTORY.tsv bootstrap.js bootstrap-styles.css bootstrap-baseline.json bootstrap-installation.json commonlib-release.json main.js manifest.json package-lock.json sbom.cdx.json source-receipt.json styles.css > SHA256SUMS
           sha256sum --check SHA256SUMS
 
       - name: Attest every release artefact

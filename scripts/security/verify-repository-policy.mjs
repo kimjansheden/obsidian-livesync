@@ -170,6 +170,18 @@ if (securityRelease.upstreamRepository !== "https://github.com/vrtmrz/obsidian-l
 if (!/^[0-9a-f]{40}$/u.test(securityRelease.upstreamBase ?? "")) {
     failures.push("security-release.json must pin one full upstream base commit");
 }
+if (!Number.isSafeInteger(securityRelease.releaseNumber) || securityRelease.releaseNumber <= 0) {
+    failures.push("security-release.json must declare releaseNumber as a positive integer");
+}
+if (
+    packageJson.scripts?.["security:release-marker"] !==
+    "node scripts/security/verify-release-marker.mjs --main main.js"
+) {
+    failures.push("the release marker check must remain available through security:release-marker");
+}
+if (!readFileSync("esbuild.config.mjs", "utf8").includes("enforceReleaseMarker(")) {
+    failures.push("the production build must fail unless main.js carries the release marker exactly once");
+}
 try {
     execFileSync("git", ["merge-base", "--is-ancestor", securityRelease.upstreamBase, "HEAD"], {
         stdio: "ignore",
@@ -291,6 +303,15 @@ for (const [label, workflow] of [
     if (!workflow.includes("node scripts/security/verify-commonlib-source-receipt.mjs")) {
         failures.push(`${label} workflow must compare every downloaded Commonlib source-receipt identity field`);
     }
+}
+if (!securityWorkflow.includes("npm run security:release-marker")) {
+    failures.push("security CI workflow must verify the release marker of the built plug-in");
+}
+if (!releaseWorkflow.includes('verify-release-marker.mjs --main main.js --tag "$TAG"')) {
+    failures.push("release workflow must verify the release marker of the built plug-in against the tag");
+}
+if (!releaseWorkflow.includes('verify-release-marker.mjs --tag "$TAG"')) {
+    failures.push("release workflow must refuse a tag which does not name the declared release number");
 }
 if (!codeqlWorkflow.includes("name: Zero open CodeQL alerts")) {
     failures.push("CodeQL workflow must expose the Zero open CodeQL alerts status after all analyses");

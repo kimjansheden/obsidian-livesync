@@ -6,6 +6,7 @@ import path from "path";
 import { fileURLToPath } from "node:url";
 import fs from "node:fs";
 import { platform } from "node:process";
+import { RELEASE_MARKER_CONSTANT, releaseMarkerText } from "./scripts/security/verify-release-marker.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 function readJson(filePath: string) {
@@ -79,6 +80,9 @@ const define = {
     MANIFEST_VERSION: `"${manifestJson.version}"`,
     PACKAGE_VERSION: `"${packageJson.version}"`,
     UPDATE_INFO: `${updateInfo}`,
+    [RELEASE_MARKER_CONSTANT]: JSON.stringify(
+        releaseMarkerText(readJson(path.resolve(__dirname, "security-release.json")))
+    ),
     global: "globalThis",
     hostPlatform: `"${platform}"`,
 };

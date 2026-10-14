@@ -9,6 +9,7 @@ const deviceLocalKeys = [
     "deviceAndVaultName",
     "P2P_DevicePeerName",
     "configPassphraseStore",
+    "removeUnreferencedJournalData",
 ];
 
 vi.mock("@vrtmrz/livesync-commonlib/compat/API/processSetting", () => {

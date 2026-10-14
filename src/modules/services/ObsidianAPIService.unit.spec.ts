@@ -25,6 +25,7 @@ vi.mock("./ObsidianConfirm", () => ({
 }));
 
 import { ObsidianAPIService } from "./ObsidianAPIService";
+import { RUNNING_RELEASE_NUMBER } from "@/serviceFeatures/releaseInstall/runningRelease";
 import type { ObsidianServiceContext } from "./ObsidianServiceContext";
 
 function createService(workspace: Record<string, unknown>, isMobile = false): ObsidianAPIService {
@@ -63,5 +64,19 @@ describe("ObsidianAPIService.showWindowOnRight", () => {
             active: false,
         });
         expect(workspace.revealLeaf).toHaveBeenCalledWith(rightLeaf);
+    });
+});
+
+describe("ObsidianAPIService running build", () => {
+    it("reports the release number, and the main.js hash only once it has been set", () => {
+        const service = createService({});
+
+        const before = service.getRunningBuild();
+        expect(before.releaseNumber).toBe(RUNNING_RELEASE_NUMBER);
+        expect(before.mainJsSha256).toBeUndefined();
+
+        service.setLoadedMainJsSha256("a".repeat(64));
+        const after = service.getRunningBuild();
+        expect(after).toEqual({ mainJsSha256: "a".repeat(64), releaseNumber: RUNNING_RELEASE_NUMBER });
     });
 });

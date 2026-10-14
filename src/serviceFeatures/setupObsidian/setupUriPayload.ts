@@ -3,14 +3,19 @@ import { decryptString } from "@vrtmrz/livesync-commonlib/compat/encryption/stri
 import { configURIBase } from "@/common/types";
 
 /**
- * Settings that belong to one installation and must never move to another device through setup:
- * its database identity, its names, and how it protects its own stored settings.
+ * Settings that belong to one installation and must never move to another device through setup or P2P: its database
+ * identity, its names, how it protects its own stored settings, and preferences which each device decides for
+ * itself. `removeUnreferencedJournalData` is one such device preference: the Commonlib setup-URI encoder already
+ * strips it, and listing it here keeps this plug-in's own setup paths — the QR encoder, the Setup-URI and QR
+ * decoders, and the P2P config receive, which all go through {@link withoutDeviceLocalSettings} — from carrying it
+ * onto or inheriting it on another device.
  */
 export const DEVICE_LOCAL_SETUP_SETTING_KEYS = [
     "additionalSuffixOfDatabaseName",
     "deviceAndVaultName",
     "P2P_DevicePeerName",
     "configPassphraseStore",
+    "removeUnreferencedJournalData",
 ] as const satisfies readonly (keyof ObsidianLiveSyncSettings)[];
 
 export type DeviceLocalSetupSettingKey = (typeof DEVICE_LOCAL_SETUP_SETTING_KEYS)[number];
