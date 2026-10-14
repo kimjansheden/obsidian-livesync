@@ -132,7 +132,9 @@ jobs:
           npm run test:unit
 
       - name: Build release artefacts
-        run: npm run build
+        run: |
+          npm run build
+          test -s bootstrap-styles.css
 
       - name: Verify the release marker of the built plug-in
         env:
