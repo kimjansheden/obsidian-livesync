@@ -876,7 +876,6 @@ export class ReplicateResultProcessor {
         const path = "path" in doc ? this.getPath(doc) : "<unknown>";
         const docNote = `${path} (${shortenId(doc._id)}, ${shortenRev(doc._rev)})`;
         if (old) {
-            if (this._hydratingSnapshot) return;
             if (old._rev == doc._rev) {
                 this.log(`[Enqueue] skipped (Already queued): ${docNote}`, LOG_LEVEL_VERBOSE);
                 return;

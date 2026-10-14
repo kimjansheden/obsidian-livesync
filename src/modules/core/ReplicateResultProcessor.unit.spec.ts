@@ -1387,6 +1387,22 @@ describe("ReplicateResultProcessor enqueue without scanning the queue", () => {
 });
 
 describe("ReplicateResultProcessor bounded document snapshots", () => {
+    it("keeps a queued revision which is newer than the same document left in processing", async () => {
+        const { store, map } = memoryStore();
+        map.set(SNAPSHOT_KEY, {
+            processing: [{ ...note("same-document"), _rev: "1-older" }],
+            queued: [{ ...note("same-document"), _rev: "2-newer" }],
+            waiting: [],
+        });
+        const { processor } = setup({ restore: false, applicationReady: false, kv: store });
+
+        await processor.restoreFromSnapshotOnce();
+
+        expect([...queueOf(processor)._queuedChanges.values()]).toEqual([
+            expect.objectContaining({ _id: "same-document", _rev: "2-newer" }),
+        ]);
+    });
+
     it("restores the processing document before documents which were still queued", async () => {
         const { store } = memoryStore();
         const { processor } = setup({ restore: false, applicationReady: false, kv: store });
