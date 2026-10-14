@@ -77,10 +77,17 @@ export default class ObsidianLiveSyncPlugin extends Plugin {
      * A build which installs a newer one from a release package reads this from the instance it has just loaded,
      * so the name and the shape of this property are part of that protocol and must stay as they are.
      */
-    readonly securityRelease: SecurityReleaseStatus = { releaseNumber: RUNNING_RELEASE_NUMBER, loadState: "loading" };
+    readonly securityRelease: SecurityReleaseStatus = {
+        bootstrapProtocol: 1,
+        releaseNumber: RUNNING_RELEASE_NUMBER,
+        loadState: "loading",
+        waitForTeardown: () => this.teardown ?? Promise.resolve(),
+        waitForStartup: () => this.startup ?? Promise.resolve(),
+    };
 
     /** Settles when the teardown which `onunload` started has ended, however it ended. */
     private teardown: Promise<void> | undefined;
+    private startup: Promise<void> | undefined;
 
     /**
      * Initialise service modules.
@@ -267,15 +274,21 @@ export default class ObsidianLiveSyncPlugin extends Plugin {
 
     private async _startUp() {
         if (!(await trackLoadState(this.securityRelease, () => this.core.services.control.onLoad()))) return;
+        if (this.core.services.control.hasUnloaded()) {
+            this.securityRelease.loadState = "failed";
+            return;
+        }
         const onReady = this.core.services.control.onReady.bind(this.core.services.control);
         this.app.workspace.onLayoutReady(onReady);
     }
     override onload() {
-        void this._startUp();
+        this.startup = this._startUp();
+        return this.startup;
     }
     override onunload(): void {
         // Whoever waits for the teardown waits for its end; a failure is logged like any other.
-        this.teardown = this.core.services.control.onUnload().catch((error: unknown) => {
+        this.teardown = this.core.services.control.onUnload();
+        void this.teardown.catch((error: unknown) => {
             Logger("Unloading did not complete", LOG_LEVEL_NOTICE);
             Logger(error, LOG_LEVEL_VERBOSE);
         });

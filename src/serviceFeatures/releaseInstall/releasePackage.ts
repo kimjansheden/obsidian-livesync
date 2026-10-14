@@ -78,6 +78,8 @@ export interface VerifiedReleaseFile {
 }
 
 export interface VerifiedReleasePackage {
+    /** Original signed envelope, retained for immutable bootstrap storage. */
+    sourceBytes?: Uint8Array<ArrayBuffer>;
     releaseName: string;
     releaseNumber: number;
     keyId: string;
@@ -192,7 +194,7 @@ export function canonicalReleasePackageBytes(releasePackage: {
  * Read the release number which a build carries in its `main.js`. The prefix must occur exactly once, and the
  * digits which follow it must be a positive decimal integer without leading zeros.
  */
-function readReleaseMarker(mainJs: Uint8Array, markerPrefix: string): number {
+export function readReleaseMarker(mainJs: Uint8Array, markerPrefix: string): number {
     const occurrences = findAsciiOccurrences(mainJs, markerPrefix);
     if (occurrences.length === 0) reject("missing-release-marker");
     if (occurrences.length > 1) reject("duplicate-release-marker");
@@ -226,12 +228,16 @@ function parseManifest(manifestBytes: Uint8Array): Record<string, unknown> {
     return manifest;
 }
 
-async function verify(packageBytes: Uint8Array, context: ReleaseVerificationContext): Promise<ReleasePackageVerdict> {
+async function verify(
+    packageBytes: Uint8Array,
+    context: ReleaseVerificationContext,
+    pinned = false
+): Promise<ReleasePackageVerdict> {
     const { subtle } = context;
     // Rule 0
     const releasePackage = parsePackage(packageBytes);
     // Rule 1
-    if (context.trustedKeys.length === 0) reject("no-trusted-key");
+    if (!pinned && context.trustedKeys.length === 0) reject("no-trusted-key");
     // Rule 2
     if (!isPlainObject(releasePackage)) reject("not-an-object");
     // Rule 3
@@ -257,25 +263,26 @@ async function verify(packageBytes: Uint8Array, context: ReleaseVerificationCont
     if (signature.algorithm !== SIGNATURE_ALGORITHM) reject("unknown-algorithm");
     // Rule 12. The identifiers compared here were computed on this device from the trusted keys themselves.
     const trusted = context.trustedKeys.find((candidate) => candidate.keyId === signature.keyId);
-    if (!trusted) reject("unknown-key-id");
+    if (!pinned && !trusted) reject("unknown-key-id");
     // Rule 13. The P1363 signature of P-256 is exactly 64 bytes (r followed by s). The length is checked here
     // rather than left to the engine, which need not reject a signature of another length by returning false.
     const signatureBytes = decodeCanonicalBase64(signature.value);
     const signatureHolds =
-        signatureBytes !== null &&
-        signatureBytes.length === SIGNATURE_BYTE_LENGTH &&
-        (await subtle.verify(
-            VERIFY_ALGORITHM,
-            trusted.key,
-            signatureBytes,
-            canonicalReleasePackageBytes({
-                format: PACKAGE_FORMAT,
-                pluginId,
-                releaseName,
-                releaseNumber,
-                files: entries,
-            })
-        ));
+        pinned ||
+        (signatureBytes !== null &&
+            signatureBytes.length === SIGNATURE_BYTE_LENGTH &&
+            (await subtle.verify(
+                VERIFY_ALGORITHM,
+                trusted!.key,
+                signatureBytes,
+                canonicalReleasePackageBytes({
+                    format: PACKAGE_FORMAT,
+                    pluginId,
+                    releaseName,
+                    releaseNumber,
+                    files: entries,
+                })
+            )));
     if (!signatureHolds) reject("bad-signature");
 
     // No file content is decoded before this point.
@@ -305,7 +312,13 @@ async function verify(packageBytes: Uint8Array, context: ReleaseVerificationCont
 
     return {
         status: "verified",
-        package: { releaseName, releaseNumber, keyId: trusted.keyId, files: RELEASE_FILE_NAMES.map(fileOf) },
+        package: {
+            releaseName,
+            releaseNumber,
+            keyId: signature.keyId,
+            files: RELEASE_FILE_NAMES.map(fileOf),
+            sourceBytes: new Uint8Array(packageBytes),
+        },
     };
 }
 
@@ -325,4 +338,23 @@ export async function verifyReleasePackage(
         if (error instanceof Rejection) return { status: "rejected", code: error.code };
         throw error;
     }
+}
+
+/**
+ * Read a package authenticated by a device-local hash, established by initial installation or an accepted
+ * signed update. This is never used to authorise a new update from the vault. All format/file checks remain.
+ */
+export async function readPinnedReleasePackage(
+    bytes: Uint8Array,
+    context: ReleaseVerificationContext,
+    pinnedSha256: string
+): Promise<VerifiedReleasePackage> {
+    if (
+        !/^[0-9a-f]{64}$/.test(pinnedSha256) ||
+        (await sha256Hex(context.subtle, new Uint8Array(bytes))) !== pinnedSha256
+    )
+        throw new Error("The stored runtime package does not match its local hash");
+    const verdict = await verify(bytes, { ...context, runningReleaseNumber: 0 }, true);
+    if (verdict.status !== "verified") throw new Error("The stored runtime package is invalid");
+    return verdict.package;
 }

@@ -320,66 +320,101 @@ describe("staging and backing up", () => {
 });
 
 describe("swapping, reloading and verifying", () => {
-    it.each(["refuse", "replace"] as const)(
-        "installs the package where a rename onto an existing file would %s it",
-        async (renameOntoExisting) => {
-            const device = createDevice();
-            device.adapter.renameOntoExisting = renameOntoExisting;
-            const install = await prepared(device);
-
-            const outcome = await completeReleaseInstall(device.env, install);
-
-            expect(outcome).toEqual({ status: "installed" });
-            expect(device.pluginFiles()).toEqual(packageFiles());
-            const instance = device.host.instance as SyntheticInstance;
-            expect(instance).not.toBe(device.runningInstance);
-            expect(instance.securityRelease).toEqual({ releaseNumber: NEW_RELEASE, loadState: "loaded" });
-            // The previous build stays beside the new one; nothing staged is left.
-            for (const name of FILE_NAMES) {
-                expect(encodeBase64(device.adapter.files.get(pluginFile(`${name}.previous`))!)).toBe(
-                    device.filesBefore[name]
-                );
-                expect(device.adapter.files.has(pluginFile(`${name}.incoming`))).toBe(false);
-            }
-            expect(device.notices).toEqual([
-                { message: expect.stringContaining("installed release 0.0.1-security.7"), lasting: false },
-            ]);
-            expect(device.failedToLoad).toEqual([]);
-        }
-    );
-
-    it("never leaves main.js absent at any step of the swap on a mobile-style adapter", async () => {
+    it("installs the package with atomic replacement", async () => {
         const device = createDevice();
-        // The documented mobile path: a rename onto an existing file is refused, so the file is overwritten in place.
-        device.adapter.renameOntoExisting = "refuse";
+        const install = await prepared(device);
+
+        const outcome = await completeReleaseInstall(device.env, install);
+
+        expect(outcome).toEqual({ status: "installed" });
+        expect(device.pluginFiles()).toEqual(packageFiles());
+        const instance = device.host.instance as SyntheticInstance;
+        expect(instance).not.toBe(device.runningInstance);
+        expect(instance.securityRelease).toEqual({ releaseNumber: NEW_RELEASE, loadState: "loaded" });
+        // The previous build stays beside the new one; nothing staged is left.
+        for (const name of FILE_NAMES) {
+            expect(encodeBase64(device.adapter.files.get(pluginFile(`${name}.previous`))!)).toBe(
+                device.filesBefore[name]
+            );
+            expect(device.adapter.files.has(pluginFile(`${name}.incoming`))).toBe(false);
+        }
+        expect(device.notices).toEqual([
+            { message: expect.stringContaining("installed release 0.0.1-security.7"), lasting: false },
+        ]);
+        expect(device.failedToLoad).toEqual([]);
+    });
+
+    it("preserves whole executable bytes at every mutation boundary", async () => {
+        const device = createDevice();
         const install = await prepared(device);
         const mainJs = pluginFile("main.js");
 
-        // The state at the start of every mutating operation is a point the device could stop at. Record whether
-        // main.js is present at each; it must never be missing, so no stop during the swap loses the only code file.
-        const presentAtEachStep: boolean[] = [];
-        const record = () => void presentAtEachStep.push(device.adapter.files.has(mainJs));
+        // Every mutation boundary models a process-stop point: main.js must hold one complete executable.
+        const completeAtEachStep: boolean[] = [];
+        const record = () => {
+            const bytes = encodeBase64(device.adapter.files.get(mainJs)!);
+            completeAtEachStep.push([device.filesBefore["main.js"], packageFiles()["main.js"]].includes(bytes));
+        };
         device.adapter.intercept = { write: record, remove: record, rename: record };
 
         const outcome = await completeReleaseInstall(device.env, install);
 
         expect(outcome).toEqual({ status: "installed" });
-        expect(presentAtEachStep.length).toBeGreaterThan(0);
-        expect(presentAtEachStep.every((present) => present)).toBe(true);
+        expect(completeAtEachStep.length).toBeGreaterThan(0);
+        expect(completeAtEachStep.every((complete) => complete)).toBe(true);
+        expect(device.adapter.operations).not.toContain(`write ${mainJs}`);
         expect(device.pluginFiles()).toEqual(packageFiles());
     });
 
-    it("installs by writing directly where the adapter cannot rename at all", async () => {
+    it("refuses preparation before any write where atomic replacement is unavailable", async () => {
         const device = createDevice();
-        device.adapter.intercept.rename = () => {
-            throw new Error("synthetic: rename is not supported");
+        device.adapter.atomicReplace = undefined;
+        device.adapter.operations.length = 0;
+
+        const outcome = await prepareReleaseInstall(device.env, await verifiedPackage(), PACKAGE_SHA256);
+
+        expect(outcome).toEqual({ status: "failed", reason: expect.stringContaining("atomically replace") });
+        expect(device.adapter.operations).toEqual([]);
+        expect(device.adapter.snapshot()).toEqual(device.installedBefore);
+        expect(device.host.instance).toBe(device.runningInstance);
+    });
+
+    it("refuses completion before unload when the replacement capability disappears", async () => {
+        const device = createDevice();
+        const install = await prepared(device);
+        device.adapter.atomicReplace = undefined;
+        device.adapter.operations.length = 0;
+        expect(await completeReleaseInstall(device.env, install)).toEqual({
+            status: "not-installed",
+            reason: expect.stringContaining("atomically replace"),
+        });
+        expect(device.adapter.operations).toEqual([]);
+        expect(device.host.instance).toBe(device.runningInstance);
+    });
+
+    it.each(FILE_NAMES)("leaves complete installed bytes when atomic replacement of %s is refused", async (name) => {
+        const device = createDevice();
+        const install = await prepared(device);
+        device.adapter.intercept.rename = (_from, to) => {
+            if (to === pluginFile(name)) throw new Error("synthetic replacement refusal");
         };
-
-        const outcome = await completeReleaseInstall(device.env, await prepared(device));
-
-        expect(outcome).toEqual({ status: "installed" });
-        expect(device.pluginFiles()).toEqual(packageFiles());
-        expect([...device.adapter.files.keys()].filter((path) => path.endsWith(".incoming"))).toEqual([]);
+        device.adapter.intercept.write = (path) => {
+            if (FILE_NAMES.some((file) => path === pluginFile(file))) {
+                device.adapter.files.set(path, bytesOf("partial"));
+                throw new Error("synthetic crash during an unsafe in-place write");
+            }
+        };
+        expect(await completeReleaseInstall(device.env, install)).toEqual({
+            status: "restored",
+            reason: `${name} could not be replaced`,
+        });
+        expect(device.pluginFiles()).toEqual(device.filesBefore);
+        expect(device.host.instance).not.toBeUndefined();
+        expect(
+            device.adapter.operations.filter((operation) =>
+                FILE_NAMES.some((file) => operation === `write ${pluginFile(file)}`)
+            )
+        ).toEqual([]);
     });
 
     it("installs from the verified bytes when a staged file was changed while it waited", async () => {
@@ -391,9 +426,12 @@ describe("swapping, reloading and verifying", () => {
 
         expect(outcome).toEqual({ status: "installed" });
         expect(device.pluginFiles()).toEqual(packageFiles());
-        // The changed file was never put in the place of main.js, not even for a moment.
-        expect(device.adapter.operations).not.toContain(
+        // The staging file is restored from verified bytes before it can replace main.js.
+        const replacement = device.adapter.operations.indexOf(
             `rename ${pluginFile("main.js.incoming")} -> ${pluginFile("main.js")}`
+        );
+        expect(device.adapter.operations.lastIndexOf(`write ${pluginFile("main.js.incoming")}`)).toBeLessThan(
+            replacement
         );
     });
 
@@ -469,6 +507,27 @@ describe("swapping, reloading and verifying", () => {
         await expect(completeReleaseInstall(device.env, install)).resolves.toEqual({ status: "installed" });
     });
 
+    it("does not activate a bootstrap runtime when the running payload rejects teardown", async () => {
+        const device = createDevice();
+        const activate = vi.fn(async () => undefined);
+        device.env.bootstrap = {
+            protocol: 1,
+            payloadSha256: "b".repeat(64),
+            packageSha256: "c".repeat(64),
+            stage: vi.fn(async () => undefined),
+            activate,
+        };
+        const install = await prepared(device);
+        device.env.waitForTeardown = () => Promise.reject(new Error("synthetic teardown failure"));
+
+        await expect(completeReleaseInstall(device.env, install)).resolves.toEqual({
+            status: "restore-failed",
+            reason: "the running build did not finish teardown",
+        });
+        expect(activate).not.toHaveBeenCalled();
+        expect(device.adapter.operations).not.toContain("enablePlugin");
+    });
+
     it("writes nothing but the three files and their staged and backed-up companions", async () => {
         const device = createDevice();
         const vaultPackage = "inbox/0.0.1-security.7.livesync-release";
@@ -539,19 +598,20 @@ describe("a new build which is not accepted", () => {
     it("remembers the package before it puts any file back", async () => {
         const device = createDevice();
         const install = await prepared(device, mainJsOf(`throw 1; ${markerOf(NEW_RELEASE)}`));
-        const mainJsWrites = () =>
-            device.adapter.operations.filter((op) => op === `write ${pluginFile("main.js")}`).length;
-        const writesWhenRemembered: number[] = [];
+        const mainJsReplacements = () =>
+            device.adapter.operations.filter(
+                (op) => op === `rename ${pluginFile("main.js.incoming")} -> ${pluginFile("main.js")}`
+            ).length;
+        const replacementsWhenRemembered: number[] = [];
         device.env.records = {
-            rememberFailedToLoad: () => void writesWhenRemembered.push(mainJsWrites()),
+            rememberFailedToLoad: () => void replacementsWhenRemembered.push(mainJsReplacements()),
         };
 
         await completeReleaseInstall(device.env, install);
 
-        // The package is remembered once, before the previous main.js is written back: the restoring write is one
-        // more than the writes which had happened when it was remembered (the mobile swap overwrites main.js once).
-        expect(writesWhenRemembered).toHaveLength(1);
-        expect(writesWhenRemembered[0]).toBeLessThan(mainJsWrites());
+        // Remembering precedes the atomic replacement which restores the previous executable.
+        expect(replacementsWhenRemembered).toHaveLength(1);
+        expect(replacementsWhenRemembered[0]).toBeLessThan(mainJsReplacements());
         expectPreviousBuildRestored(device);
     });
 
@@ -704,13 +764,13 @@ describe("a new build which is not accepted", () => {
         const install = await prepared(device, mainJsOf(`throw 1; ${markerOf(NEW_RELEASE)}`));
         const enable = vi.spyOn(device.host, "enablePlugin");
         let swapped = false;
-        device.adapter.intercept.write = (path) => {
-            if (swapped && path === pluginFile("main.js")) throw new Error("synthetic: storage failed");
+        device.adapter.intercept.rename = (_from, to) => {
+            if (swapped && to === pluginFile("main.js")) throw new Error("synthetic: storage failed");
         };
         const disable = device.host.disablePlugin;
         let unloads = 0;
         device.host.disablePlugin = (id) => {
-            // The second unload is that of the rejected build; from then on main.js cannot be written.
+            // The second unload is that of the rejected build; from then on main.js cannot be replaced.
             swapped = ++unloads > 1;
             return disable(id);
         };

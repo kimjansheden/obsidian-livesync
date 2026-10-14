@@ -56,6 +56,16 @@ export default defineConfig([
     ]),
     ...sveltePlugin.configs["flat/base"],
     ...obsidianmd.configs.recommended,
+    {
+        files: ["src/serviceFeatures/releaseInstall/bootstrap.ts"],
+        rules: {
+            // The permanent loader implements the host's CommonJS boundary for authenticated local code only.
+            // CSS is taken from the same authenticated package; reading the root styles.css would mix builds.
+            "no-eval": "off",
+            "obsidianmd/no-forbidden-elements": "off",
+            "obsidianmd/prefer-create-el": "off",
+        },
+    },
     importAlias.configs.recommended,
     {
         files: ["**/*.ts"],

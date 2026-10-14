@@ -1,6 +1,7 @@
 //@ts-check
 
 import esbuild from "esbuild";
+import { buildBootstrap } from "./scripts/security/build-bootstrap.mjs";
 import process from "process";
 import sveltePlugin from "esbuild-svelte";
 import { sveltePreprocess } from "svelte-preprocess";
@@ -246,6 +247,7 @@ if (prod) {
         console.error(error instanceof Error ? error.message : error);
         process.exit(1);
     }
+    await buildBootstrap();
     process.exit(0);
 } else {
     await context.watch();

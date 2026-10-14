@@ -193,7 +193,7 @@ describe("release workflow", () => {
         expect(workflow).toContain("npm audit --audit-level=low");
         expect(workflow).toContain("npm run sbom -- release-assets/sbom.cdx.json");
         expect(workflow).toContain(
-            "sha256sum LICENSE-INVENTORY.tsv commonlib-release.json main.js manifest.json package-lock.json sbom.cdx.json source-receipt.json styles.css"
+            "sha256sum LICENSE-INVENTORY.tsv bootstrap.js bootstrap-styles.css bootstrap-baseline.json bootstrap-installation.json commonlib-release.json main.js manifest.json package-lock.json sbom.cdx.json source-receipt.json styles.css"
         );
         expect(workflow).toContain("subject-path: release-assets/*");
         expect(workflow).toContain("actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8");

@@ -4,6 +4,7 @@
  * Whoever can write that folder can already replace the plug-in's code, so the keys are exactly as protected as
  * the code they gate. The plug-in only ever reads the file; it never writes, replaces or removes it.
  */
+import { RELEASE_RUNTIME_DIRECTORY } from "./releaseRuntime";
 import { decodeCanonicalBase64, decodeStrictUtf8, hasExactKeys, isPlainObject } from "./releaseBytes";
 import { importReleaseKey, releaseKeyId, type TrustedReleaseKey } from "./releasePackage";
 
@@ -95,7 +96,16 @@ export function createOwnPluginProtectedPathMatcher(pluginDirectory: string): (p
     const protectedPaths = new Set(
         OWN_PLUGIN_PROTECTED_FILES.map((name) => normaliseForComparison(`${pluginDirectory}/${name}`))
     );
-    return (path) => typeof path === "string" && protectedPaths.has(normaliseForComparison(path));
+    const runtimeDirectory = normaliseForComparison(`${pluginDirectory}/${RELEASE_RUNTIME_DIRECTORY}`);
+    return (path) => {
+        if (typeof path !== "string") return false;
+        const normalised = normaliseForComparison(path);
+        return (
+            protectedPaths.has(normalised) ||
+            normalised === runtimeDirectory ||
+            normalised.startsWith(`${runtimeDirectory}/`)
+        );
+    };
 }
 
 /**
@@ -114,7 +124,10 @@ export function createOwnPluginRemovalProtectedPathMatcher(pluginDirectory: stri
         if (isProtectedFile(path)) return true;
         const target = normaliseForComparison(path);
         // The plug-in directory itself, or an ancestor of it: removing or renaming it would take the plug-in with it.
-        return target !== "" && (pluginDirectoryNormalised === target || pluginDirectoryNormalised.startsWith(`${target}/`));
+        return (
+            target !== "" &&
+            (pluginDirectoryNormalised === target || pluginDirectoryNormalised.startsWith(`${target}/`))
+        );
     };
 }
 

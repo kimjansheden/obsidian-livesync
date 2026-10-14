@@ -26,7 +26,7 @@ import {
 } from "@/common/events.ts";
 import { AbstractObsidianModule } from "@/modules/AbstractObsidianModule.ts";
 import { addIcon, debounce, normalizePath, Notice, stringifyYaml, type WorkspaceLeaf } from "@/deps.ts";
-import { LOG_LEVEL_NOTICE, setGlobalLogFunction } from "octagonal-wheels/common/logger";
+import { defaultLogger, LOG_LEVEL_NOTICE, setGlobalLogFunction } from "octagonal-wheels/common/logger";
 import { LogPaneView, VIEW_TYPE_LOG } from "./Log/LogPaneView.ts";
 import { serialized } from "octagonal-wheels/concurrency/lock";
 import { $msg } from "@/common/translation";
@@ -54,7 +54,12 @@ import { generateReport } from "@/common/reportTool.ts";
 
 // DI the log again.
 const recentLogEntries = reactiveSource<LogEntry[]>([]);
+let logDisplayUnloaded = false;
 const globalLogFunction = (message: unknown, level?: number, key?: string) => {
+    if (logDisplayUnloaded) {
+        defaultLogger(message, Math.max(level ?? LOG_LEVEL_INFO, LOG_LEVEL_INFO), key);
+        return;
+    }
     const messageX =
         message instanceof Error
             ? new LiveSyncError("[Error Logged]: " + message.message, { cause: message })
@@ -108,6 +113,8 @@ function redactLog(log: string) {
 const showDebugLog = false;
 export const MARK_DONE = "\u{2009}\u{2009}";
 export class ModuleLog extends AbstractObsidianModule {
+    private _loggingStopped = false;
+    private _stopLogListener?: () => void;
     statusBar?: HTMLElement;
 
     statusDiv?: HTMLElement;
@@ -407,6 +414,12 @@ export class ModuleLog extends AbstractObsidianModule {
     }
 
     private _allStartOnUnload(): Promise<boolean> {
+        if (this._loggingStopped) return Promise.resolve(true);
+        this._loggingStopped = true;
+        logDisplayUnloaded = true;
+        this._stopLogListener?.();
+        this._stopLogListener = undefined;
+        recentLogEntries.value = [];
         for (const key of Object.keys(this.notifies)) {
             this.services.context.notices.hide(`log:${key}`);
         }
@@ -461,12 +474,16 @@ ${stringifyYaml(info)}
         return Promise.resolve(true);
     }
     private _everyOnloadAfterLoadSettings(): Promise<boolean> {
-        recentLogEntries.onChanged((entries) => {
+        if (this._loggingStopped) return Promise.resolve(false);
+        this._stopLogListener?.();
+        const consumeLogEntries = (entries: { readonly value: LogEntry[] }) => {
             if (entries.value.length === 0) return;
             const newEntries = [...entries.value];
             recentLogEntries.value = [];
             newEntries.forEach((e) => this.__addLog(e.message, e.level, e.key));
-        });
+        };
+        recentLogEntries.onChanged(consumeLogEntries);
+        this._stopLogListener = () => recentLogEntries.offChanged(consumeLogEntries);
         eventHub.onEvent(EVENT_FILE_RENAMED, (data) => {
             void this.setFileStatus();
         });
@@ -512,6 +529,10 @@ ${stringifyYaml(info)}
         );
     }
     __addLog(message: unknown, level: LOG_LEVEL = LOG_LEVEL_INFO, key = ""): void {
+        if (this._loggingStopped) {
+            defaultLogger(message, Math.max(level, LOG_LEVEL_INFO), key);
+            return;
+        }
         if (level == LOG_LEVEL_DEBUG && !showDebugLog) {
             return;
         }
@@ -588,6 +609,7 @@ ${stringifyYaml(info)}
         }
     }
     override onBindFunction(core: LiveSyncCore, services: typeof core.services): void {
+        logDisplayUnloaded = false;
         services.API.addLog.setHandler(globalLogFunction);
         services.appLifecycle.onInitialise.addHandler(this._everyOnloadStart.bind(this));
         services.appLifecycle.onSettingLoaded.addHandler(this._everyOnloadAfterLoadSettings.bind(this));

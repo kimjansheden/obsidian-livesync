@@ -60,7 +60,7 @@ export interface ReleaseInstallHostBindings {
     deviceLocalStorage(key: string): DeviceLocalStorage | undefined;
 }
 
-/** A desktop adapter which can rename through the native file system, replacing an existing destination in one step. */
+/** A host adapter which can atomically replace an existing file through its native file system. */
 interface NativeRenameAdapter {
     fsPromises?: { rename(from: string, to: string): Promise<void> };
     fs?: { rename(from: string, to: string): Promise<void> };
@@ -99,7 +99,11 @@ export function releasePluginHostOf(app: object): ReleasePluginHost | undefined 
         ...(loadManifests ? { loadManifests: async () => void (await loadManifests()) } : {}),
         getInstance: (pluginId) => {
             const plugins: unknown = Reflect.get(manager, "plugins");
-            return typeof plugins === "object" && plugins !== null ? Reflect.get(plugins, pluginId) : undefined;
+            const instance: unknown =
+                typeof plugins === "object" && plugins !== null ? Reflect.get(plugins, pluginId) : undefined;
+            return typeof instance === "object" && instance !== null && "releaseRuntimeInstance" in instance
+                ? Reflect.get(instance, "releaseRuntimeInstance")
+                : instance;
         },
     };
 }
@@ -129,24 +133,29 @@ export function useReleaseInstall(
 
     /**
      * The installer writes only its own three files, so it uses the adapter directly, past the guards which govern
-     * synchronised content. On the desktop it renames through the native file system, which replaces an existing
-     * file in one step, so the swap never leaves a file absent; a host without that (mobile) renames through the
-     * vault adapter, which can refuse an existing destination. The installer then overwrites the installed file
-     * from the verified bytes without removing it first.
+     * synchronised content. It renames through the native file system, which replaces an existing
+     * file in one step. A vault adapter's rename method alone does not guarantee atomic replacement, so a host
+     * without the native operation cannot install automatically.
      */
     function installFileAdapter(): ReleaseFileAdapter {
-        const native =
-            (adapter as Partial<NativeRenameAdapter>).fsPromises ?? (adapter as Partial<NativeRenameAdapter>).fs;
+        const nativeAdapter = adapter as Partial<NativeRenameAdapter>;
+        const native = [nativeAdapter.fsPromises, nativeAdapter.fs].find((fs) => typeof fs?.rename === "function");
         const getFullPath = (adapter as Partial<NativeRenameAdapter>).getFullPath;
-        const renamesNatively = typeof native?.rename === "function" && typeof getFullPath === "function";
+        const renamesNatively =
+            !host.services.API.isMobile() &&
+            !Reflect.get(compatGlobal, "Capacitor") &&
+            typeof native?.rename === "function" &&
+            typeof getFullPath === "function";
         return {
             readBinary: (path) => adapter.readBinary(path),
             writeBinary: (path, data) => adapter.writeBinary(path, data),
             remove: (path) => adapter.remove(path),
-            rename:
-                renamesNatively && native && getFullPath
-                    ? (from, to) => native.rename(getFullPath(from), getFullPath(to))
-                    : (from, to) => adapter.rename(from, to),
+            ...(renamesNatively && native && getFullPath
+                ? {
+                      atomicReplace: (from: string, to: string) =>
+                          native.rename(getFullPath.call(adapter, from), getFullPath.call(adapter, to)),
+                  }
+                : {}),
         };
     }
 
@@ -158,6 +167,13 @@ export function useReleaseInstall(
      * installer uses, and report nothing if it stays empty: a device without the field is simply not identified.
      */
     async function reportLoadedMainJs() {
+        const runtime = Reflect.get(plugin, "securityRelease") as
+            | { bootstrapRuntime?: { payloadSha256: string } }
+            | undefined;
+        if (runtime?.bootstrapRuntime) {
+            bindings.reportLoadedMainJs(runtime.bootstrapRuntime.payloadSha256);
+            return;
+        }
         const path = `${pluginDirectory}/main.js`;
         for (const pause of [0, ...DEFAULT_RELEASE_INSTALL_TIMINGS.readBackRetryDelaysMs]) {
             if (pause > 0) await wait(pause);
@@ -244,8 +260,14 @@ export function useReleaseInstall(
         };
         const records = createReleaseInstallRecords(deviceLocalStorage);
         const pluginHost = releasePluginHostOf(app);
+        const bootstrap = (
+            Reflect.get(plugin, "securityRelease") as
+                | { bootstrapRuntime?: import("./releaseRuntime").BootstrapRuntimePort }
+                | undefined
+        )?.bootstrapRuntime;
         const install: ReleaseInstallEnvironment | undefined = pluginHost && {
             adapter: installFileAdapter(),
+            bootstrap,
             host: pluginHost,
             subtle,
             pluginId: plugin.manifest.id,
@@ -253,7 +275,7 @@ export function useReleaseInstall(
             runningReleaseNumber: RUNNING_RELEASE_NUMBER,
             runningInstance: plugin,
             waitForTeardown: () => bindings.waitForTeardown(),
-            prepareForDowngrade: bindings.prepareForDowngrade,
+            prepareForDowngrade: bootstrap ? undefined : bindings.prepareForDowngrade,
             records,
             notify,
             wait,

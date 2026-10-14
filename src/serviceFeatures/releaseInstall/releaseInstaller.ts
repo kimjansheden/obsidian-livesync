@@ -8,6 +8,7 @@
  * only the adapter, the host's plug-in manager, WebCrypto, timers and plain data handed to it.
  */
 import { sha256Hex } from "./releaseBytes";
+import type { BootstrapRuntimePort } from "./releaseRuntime";
 import type { ReleaseFileName, VerifiedReleasePackage } from "./releasePackage";
 
 /** The part of the host's file adapter which an installation uses. Paths are relative to the vault. */
@@ -15,7 +16,8 @@ export interface ReleaseFileAdapter {
     readBinary(path: string): Promise<ArrayBuffer>;
     writeBinary(path: string, data: ArrayBuffer): Promise<void>;
     remove(path: string): Promise<void>;
-    rename(from: string, to: string): Promise<void>;
+    /** Atomically replaces an existing destination; an interrupted operation leaves either complete file. */
+    atomicReplace?: (from: string, to: string) => Promise<void>;
 }
 
 /** The part of the host's plug-in manager which an installation uses. */
@@ -42,6 +44,10 @@ export interface PreparedDowngrade {
     cancel(): void;
 }
 export interface SecurityReleaseStatus {
+    readonly bootstrapProtocol?: 1;
+    bootstrapRuntime?: BootstrapRuntimePort;
+    waitForTeardown?: () => Promise<unknown>;
+    waitForStartup?: () => Promise<unknown>;
     /** The release number which the build carries. */
     readonly releaseNumber: number;
     /** `loaded` once the plug-in has finished loading, `failed` when loading ended without success. */
@@ -98,6 +104,7 @@ export const DEFAULT_RELEASE_INSTALL_TIMINGS: ReleaseInstallTimings = {
 
 export interface ReleaseInstallEnvironment {
     adapter: ReleaseFileAdapter;
+    bootstrap?: BootstrapRuntimePort;
     host: ReleasePluginHost;
     subtle: SubtleCrypto;
     pluginId: string;
@@ -133,6 +140,7 @@ export interface PreparedReleaseInstall {
     /** SHA-256 of the package file, under which a build which does not load is remembered. */
     packageSha256: string;
     files: PreparedFile[];
+    bootstrap?: true;
 }
 
 export type ReleasePreparation =
@@ -151,7 +159,7 @@ export type ReleaseInstallOutcome =
 
 const STAGED_SUFFIX = ".incoming";
 const BACKUP_SUFFIX = ".previous";
-/** `main.js` is replaced last, so an interrupted swap leaves the code of the build which was running. */
+/** `main.js` is replaced last, so an interrupted swap retains a complete executable build. */
 const SWAP_ORDER: readonly ReleaseFileName[] = ["manifest.json", "styles.css", "main.js"];
 /** `main.js` is put back first, so working code returns as early as possible. */
 const RESTORE_ORDER: readonly ReleaseFileName[] = ["main.js", "manifest.json", "styles.css"];
@@ -227,6 +235,26 @@ export async function prepareReleaseInstall(
     verified: VerifiedReleasePackage,
     packageSha256: string
 ): Promise<ReleasePreparation> {
+    if (env.bootstrap) {
+        try {
+            await env.bootstrap.stage(verified, packageSha256);
+            return {
+                status: "prepared",
+                install: {
+                    releaseName: verified.releaseName,
+                    releaseNumber: verified.releaseNumber,
+                    packageSha256,
+                    files: [],
+                    bootstrap: true,
+                },
+            };
+        } catch (error) {
+            return { status: "failed", reason: describeError(error) };
+        }
+    }
+    if (!env.adapter.atomicReplace) {
+        return { status: "failed", reason: "this storage adapter cannot atomically replace installed files" };
+    }
     const fail = async (reason: string): Promise<ReleasePreparation> => {
         await removeStagedFiles(env);
         return { status: "failed", reason };
@@ -267,29 +295,26 @@ export async function prepareReleaseInstall(
 /**
  * Put the staged file in the place of the installed one and make sure the result is the package's file.
  *
- * A rename which replaces an existing file in one step (the native desktop rename the host passes) leaves no moment
- * in which the file is absent. A rename which refuses an existing destination (the mobile adapter) is let fail, and
- * the installed file is then overwritten in place from the verified bytes in memory — never removed first. So no
- * kill point during the swap ever leaves the file absent: a crash before a file's write leaves the old file whole,
- * a crash during it leaves a partial but verified file the `.incoming`/`.previous` companions can recover, and a
- * crash after it leaves the whole new file. Whatever a rename leaves behind is checked, and a target which is not
- * yet the package's file is written from the verified bytes.
+ * Active files are changed only by an atomic replacement. A refused replacement leaves the installed bytes
+ * intact. A changed staging file is rewritten and verified before replacement; the active file is never written
+ * in place, because an interrupted write to main.js would prevent the recovery code from loading.
  */
 async function replaceWithStaged(env: ReleaseInstallEnvironment, file: PreparedFile): Promise<void> {
+    const atomicReplace = env.adapter.atomicReplace;
+    if (!atomicReplace) throw new Error("this storage adapter cannot atomically replace installed files");
     const target = targetPath(env, file.name);
     const staged = stagedPath(env, file.name);
-    if (await fileMatches(env, staged, file.sha256)) {
-        try {
-            await env.adapter.rename(staged, target);
-        } catch {
-            // A rename which refuses an existing destination leaves the installed file in place; it is overwritten
-            // below from the verified bytes, never removed first, so no crash point leaves the file missing.
+    if (!(await fileMatches(env, staged, file.sha256))) {
+        if (!(await writeVerified(env, staged, file.bytes, file.sha256))) {
+            throw new Error(`${file.name} could not be staged intact`);
         }
-        if (await fileMatches(env, target, file.sha256)) return;
     }
-    if (!(await writeVerified(env, target, file.bytes, file.sha256))) {
-        throw new Error(`${file.name} could not be replaced`);
+    try {
+        await atomicReplace.call(env.adapter, staged, target);
+    } catch {
+        // An atomic operation may finish before its acknowledgement is lost; read-back decides.
     }
+    if (!(await fileMatches(env, target, file.sha256))) throw new Error(`${file.name} could not be replaced`);
 }
 
 async function swapFiles(env: ReleaseInstallEnvironment, install: PreparedReleaseInstall): Promise<void> {
@@ -308,7 +333,11 @@ async function restoreFiles(env: ReleaseInstallEnvironment, install: PreparedRel
     for (const file of inOrder(install.files, RESTORE_ORDER)) {
         const target = targetPath(env, file.name);
         if (await fileMatches(env, target, file.previousSha256)) continue;
-        if (!(await writeVerified(env, target, file.previousBytes, file.previousSha256))) restored = false;
+        try {
+            await replaceWithStaged(env, { ...file, bytes: file.previousBytes, sha256: file.previousSha256 });
+        } catch {
+            restored = false;
+        }
     }
     return restored;
 }
@@ -326,6 +355,15 @@ async function settlesWithin(env: ReleaseInstallEnvironment, promise: Promise<un
         () => true
     );
     return await Promise.race([settled, env.wait(limitMs).then(() => false)]);
+}
+
+/** Whether `promise` fulfilled within the time limit. Rejection is a failed lifecycle boundary. */
+async function fulfillsWithin(env: ReleaseInstallEnvironment, promise: Promise<unknown>, limitMs: number) {
+    const fulfilled = promise.then(
+        () => true,
+        () => false
+    );
+    return await Promise.race([fulfilled, env.wait(limitMs).then(() => false)]);
 }
 
 /**
@@ -479,6 +517,20 @@ export function completeReleaseInstall(
     env: ReleaseInstallEnvironment,
     install: PreparedReleaseInstall
 ): Promise<ReleaseInstallOutcome> {
+    if (env.bootstrap && install.bootstrap) {
+        let unloading: Promise<unknown>;
+        try {
+            unloading = env.host.disablePlugin(env.pluginId);
+        } catch (error) {
+            unloading = Promise.reject(error instanceof Error ? error : new Error(String(error)));
+        }
+        return finishBootstrapInstall(env, install, unloading);
+    }
+    if (!env.adapter.atomicReplace) {
+        const reason = "this storage adapter cannot atomically replace installed files";
+        env.notify(`Release ${install.releaseName} from the vault was not installed: ${reason}.`, true);
+        return Promise.resolve({ status: "not-installed", reason });
+    }
     let unloading: Promise<unknown>;
     try {
         unloading = env.host.disablePlugin(env.pluginId);
@@ -486,4 +538,41 @@ export function completeReleaseInstall(
         unloading = Promise.reject(error instanceof Error ? error : new Error(String(error)));
     }
     return finishInstall(env, install, unloading);
+}
+
+/** The permanent bootstrap owns candidate loading and fallback, so no installed executable is changed here. */
+async function finishBootstrapInstall(
+    env: ReleaseInstallEnvironment,
+    install: PreparedReleaseInstall,
+    unloading: Promise<unknown>
+): Promise<ReleaseInstallOutcome> {
+    await settlesWithin(env, unloading, env.timings.teardownTimeoutMs);
+    if (env.host.getInstance(env.pluginId) === env.runningInstance)
+        return { status: "not-installed", reason: "the host did not unload the running build" };
+    if (!(await fulfillsWithin(env, env.waitForTeardown(), env.timings.teardownTimeoutMs)))
+        return { status: "restore-failed", reason: "the running build did not finish teardown" };
+    try {
+        await env.bootstrap!.activate(install.packageSha256);
+        const problem = await loadAndCheck(env, install.releaseNumber, [env.runningInstance]);
+        if (problem === undefined) {
+            env.notify(
+                `Self-hosted LiveSync installed release ${install.releaseName} from the vault and reloaded.`,
+                false
+            );
+            return { status: "installed" };
+        }
+        env.records.rememberFailedToLoad(install.packageSha256);
+        const current = readSecurityRelease(env.host.getInstance(env.pluginId));
+        if (current.loadState === "loaded" && current.releaseNumber === env.runningReleaseNumber) {
+            env.notify(`The new runtime did not load; the previous release is running. ${problem}`, true);
+            return { status: "restored", reason: problem };
+        }
+        return { status: "restore-failed", reason: problem };
+    } catch (error) {
+        // A failed activation leaves the immutable accepted runtime intact. Reload it without modifying any file.
+        const problem = await loadAndCheck(env, env.runningReleaseNumber, [env.runningInstance]);
+        const reason = describeError(error);
+        env.notify(`The runtime was not activated: ${reason}`, true);
+        return { status: problem === undefined ? "restored" : "restore-failed", reason };
+    }
 }

@@ -34,3 +34,9 @@ src/apps/webapp/test-results/
 _testdata/**
 utils/bench/splitResults.csv
 .eslintcache
+
+# Permanent loader installation artifacts (published through the release workflow)
+bootstrap.js
+bootstrap-styles.css
+bootstrap-baseline.json
+bootstrap-installation.json

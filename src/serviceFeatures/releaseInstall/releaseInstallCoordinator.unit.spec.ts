@@ -602,6 +602,25 @@ describe("a build which does not load", () => {
 });
 
 describe("a package whose files cannot be put in place", () => {
+    it("releases the queue export pin when atomic replacement becomes unavailable before unload", async () => {
+        const device = createDevice();
+        const cancel = vi.fn();
+        device.ports.install!.prepareForDowngrade = async () => {
+            device.adapter.atomicReplace = undefined;
+            return { isCurrent: () => true, cancel };
+        };
+        device.vault.set("p.livesync-release", await packageOf(7));
+
+        expect(await device.coordinator.scan()).toEqual({
+            status: "not-installed",
+            reason: expect.stringContaining("atomically replace"),
+        });
+        expect(cancel).toHaveBeenCalledOnce();
+        expect(device.host.instance).toBe(device.runningInstance);
+        expect(device.pluginFiles()).toEqual(device.filesBefore);
+        expect(device.adapter.operations).not.toContain("disablePlugin");
+    });
+
     it("is not installed again and again by the restored build, which looks at the vault as soon as it loads", async () => {
         const device = createDevice();
         device.vault.set("p.livesync-release", await packageOf(7));

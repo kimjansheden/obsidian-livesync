@@ -44,11 +44,22 @@ function createHost(
     options: {
         keysFile?: string | Uint8Array<ArrayBuffer>;
         isMobile?: boolean;
+        nativeReplace?: "fs" | "fsPromises" | "none";
         withoutDeviceLocalStorage?: boolean;
         getQueueProcessor?: () => ReplicateResultProcessor;
     } = {}
 ) {
     const adapter = new MemoryAdapter();
+    const nativeReplace = options.nativeReplace ?? (options.isMobile ? "fs" : "fsPromises");
+    if (nativeReplace !== "none") {
+        Object.assign(adapter, {
+            [nativeReplace]: { rename: adapter.rename },
+            getFullPath(this: unknown, path: string) {
+                expect(this).toBe(adapter);
+                return path;
+            },
+        });
+    }
     installSyntheticBuild(adapter, RUNNING_RELEASE_NUMBER);
     if (options.keysFile !== undefined) {
         const bytes = typeof options.keysFile === "string" ? bytesOf(options.keysFile) : options.keysFile;
@@ -191,6 +202,40 @@ function createHost(
 
 const keysFileOf = (...keys: TestKey[]) => JSON.stringify({ format: 1, keys: keys.map((key) => key.spkiBase64) });
 const newerPackage = async (key = KEY) => packageBytesOf(await signedAfter(key, undefined, NEWER_RELEASE));
+
+describe("bootstrap host identity and loaded hash", () => {
+    it("unwraps only the explicit payload identity", () => {
+        const payload = { securityRelease: { releaseNumber: 7, loadState: "loaded" } };
+        const manager = {
+            unloadPlugin() {},
+            loadPlugin() {},
+            plugins: { [TEST_PLUGIN_ID]: { releaseRuntimeInstance: payload } },
+        };
+        expect(releasePluginHostOf({ plugins: manager })?.getInstance(TEST_PLUGIN_ID)).toBe(payload);
+    });
+    it("reports the bytes which executed rather than the permanent root main.js", async () => {
+        const host = createHost();
+        const payloadSha256 = "c".repeat(64);
+        Object.assign(host.plugin.securityRelease, { bootstrapRuntime: { protocol: 1, payloadSha256 } });
+        await host.start();
+        expect(host.reported).toEqual([payloadSha256]);
+        expect(host.notices).toEqual([]);
+    });
+    it("never treats a Capacitor fs shim as desktop atomic replacement", async () => {
+        vi.stubGlobal("Capacitor", {});
+        try {
+            const host = createHost({ keysFile: keysFileOf(KEY) });
+            host.vaultFiles.set("next.livesync-release", await newerPackage());
+            await host.start();
+            await vi.waitFor(() => expect(host.notices).toHaveLength(1));
+            expect(host.notices[0].message).toContain("cannot atomically replace installed files");
+            expect(host.adapter.snapshot()).toEqual(host.folderBefore);
+            expect(host.manager.unloadPlugin).not.toHaveBeenCalled();
+        } finally {
+            vi.unstubAllGlobals();
+        }
+    });
+});
 
 describe("without a trusted-keys file", () => {
     it("is off and silent: no package is read, nothing watches the vault, and nothing is installed", async () => {
@@ -527,15 +572,58 @@ describe("with trusted keys", () => {
         expect(host.manager.enabledPlugins.has(TEST_PLUGIN_ID)).toBe(true);
     }, 15_000);
 
+    it("keeps the running build and queue untouched when the mobile adapter has no native replacement", async () => {
+        const host = createHost({ keysFile: keysFileOf(KEY), isMobile: true, nativeReplace: "none" });
+        host.adapter.renameOntoExisting = "refuse";
+        host.vaultFiles.set("next.livesync-release", await newerPackage());
+        await host.start();
+        await vi.waitFor(() => expect(host.notices).toHaveLength(1), { timeout: 5000 });
+        expect(host.notices[0].message).toContain("cannot atomically replace installed files");
+        expect(host.adapter.snapshot()).toEqual(host.folderBefore);
+        expect(host.manager.unloadPlugin).not.toHaveBeenCalled();
+        expect(host.bindings.prepareForDowngrade).not.toHaveBeenCalled();
+        expect(host.plugins[TEST_PLUGIN_ID]).toBe(host.plugin);
+    });
+
+    it("refuses a mobile fs.rename shim even when it is exposed as a native binding", async () => {
+        const host = createHost({ keysFile: keysFileOf(KEY), isMobile: true });
+        // The native binding captured the atomic implementation; the public rename can refuse replacement.
+        host.adapter.rename = async () => {
+            throw new Error("synthetic public adapter refusal");
+        };
+        host.vaultFiles.set("next.livesync-release", await newerPackage());
+        await host.start();
+        await vi.waitFor(() => expect(host.notices).toHaveLength(1), { timeout: 10_000 });
+        expect(host.notices[0].message).toContain("cannot atomically replace installed files");
+        expect(host.adapter.operations).not.toContain(`write ${pluginFile("main.js")}`);
+        expect(host.plugins[TEST_PLUGIN_ID]).toBe(host.plugin);
+        expect(host.adapter.snapshot()).toEqual(host.folderBefore);
+        expect(host.manager.unloadPlugin).not.toHaveBeenCalled();
+    });
+
     it("does not swap while a replication runs or the mobile app is hidden", async () => {
         const host = createHost({ keysFile: keysFileOf(KEY), isMobile: true });
+        const stage = vi.fn(async () => undefined);
+        const activate = vi.fn(async () => undefined);
+        Object.assign(host.plugin.securityRelease, {
+            bootstrapRuntime: {
+                protocol: 1,
+                payloadSha256: "a".repeat(64),
+                packageSha256: "b".repeat(64),
+                stage,
+                activate,
+            },
+        });
+        host.manager.loadPlugin.mockImplementation(async (id) => {
+            host.plugins[id] = { securityRelease: { releaseNumber: NEWER_RELEASE, loadState: "loaded" } };
+        });
         host.vaultFiles.set("next.livesync-release", await newerPackage());
         host.services.replicator.boundedRemoteActivityCount.value = 1;
         host.bindings.isAppHidden.mockReturnValue(true);
 
         await host.start();
         // Staged and backed up, and then waiting.
-        await vi.waitFor(() => expect(host.adapter.files.has(pluginFile("main.js.previous"))).toBe(true), {
+        await vi.waitFor(() => expect(stage).toHaveBeenCalledOnce(), {
             timeout: 5000,
         });
         await new Promise((resolve) => setTimeout(resolve, 2500));

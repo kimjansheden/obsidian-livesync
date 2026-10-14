@@ -163,7 +163,9 @@ export class MemoryAdapter {
     /** Every operation, in order, as `<operation> <path>`. */
     readonly operations: string[] = [];
     /** What a rename onto an existing file does; adapters differ. */
-    renameOntoExisting: "refuse" | "replace" = "refuse";
+    renameOntoExisting: "refuse" | "replace" = "replace";
+    /** Synthetic atomic replacement. Tests remove it to model adapters with only ordinary rename/write. */
+    atomicReplace: ((from: string, to: string) => Promise<void>) | undefined = (from, to) => this.rename(from, to);
     intercept: {
         read?: (path: string, stored: Uint8Array<ArrayBuffer>) => Uint8Array<ArrayBuffer>;
         write?: (path: string) => void;

@@ -124,6 +124,22 @@ describe("attested security release workflow", () => {
         assert.equal(evaluateReleaseMarker({ mainJs: marker, releaseNumber: releaseNumber + 1 }).ok, false);
     });
 
+    it("publishes and checksums the complete permanent bootstrap installation set", () => {
+        const copy = releaseWorkflow.split(/\r?\n/u).find((line) => line.includes("cp main.js manifest.json"));
+        const checksums = releaseWorkflow
+            .split(/\r?\n/u)
+            .find((line) => line.includes("sha256sum LICENSE-INVENTORY.tsv"));
+        for (const asset of [
+            "bootstrap.js",
+            "bootstrap-styles.css",
+            "bootstrap-baseline.json",
+            "bootstrap-installation.json",
+        ]) {
+            assert.ok(copy?.includes(asset), `missing bootstrap installation asset: ${asset}`);
+            assert.ok(checksums?.includes(asset), `missing bootstrap checksum: ${asset}`);
+        }
+    });
+
     it("creates the release SBOM through the repository generator", () => {
         assert.match(releaseWorkflow, /npm run sbom -- release-assets\/sbom\.cdx\.json/u);
     });
