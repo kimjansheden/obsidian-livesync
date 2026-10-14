@@ -31,11 +31,13 @@ const routes = ["modify", "modifyBinary"] as const;
 function fixture(linkGuard?: ProtectedPathLinkGuard, aliasGuard = indexed) {
     const modify = vi.fn(async () => {});
     const modifyBinary = vi.fn(async () => {});
+    const rename = vi.fn(async () => {});
     const trashFile = vi.fn(async () => {});
-    const app = { vault: { modify, modifyBinary }, fileManager: { trashFile } } as unknown as App;
+    const app = { vault: { modify, modifyBinary, rename }, fileManager: { trashFile } } as unknown as App;
     return {
         modify,
         modifyBinary,
+        rename,
         trashFile,
         adapter: new ObsidianVaultAdapter(
             app,
@@ -52,6 +54,39 @@ async function write(adapter: ObsidianVaultAdapter, route: (typeof routes)[numbe
     if (route === "modify") await adapter.modify(file, "replacement");
     else await adapter.modifyBinary(file, new TextEncoder().encode("replacement").buffer);
 }
+
+describe("indexed rename protection", () => {
+    it("refuses a source link which resolves into the protected plug-in directory", async () => {
+        const source = "updates/main.js";
+        const target = "archive/main.js";
+        const root = resolve(tmpdir(), "synthetic-rename-vault");
+        const guard = createProtectedPathLinkGuard({
+            vaultBasePath: root,
+            protectedPaths: [PLUGIN],
+            fs: {
+                exists: async () => true,
+                realpath: async (path) => (path === resolve(root, source) ? resolve(root, PLUGIN, "main.js") : path),
+            },
+            path: { resolve, relative, isAbsolute },
+        });
+        const f = fixture(guard);
+
+        await expect(f.adapter.rename({ path: source } as TFile, target)).rejects.toThrow("symbolic link or junction");
+
+        expect(f.rename).not.toHaveBeenCalled();
+    });
+
+    it("checks both ordinary source and target paths before renaming", async () => {
+        const assertNoLinkEscape = vi.fn(async () => {});
+        const f = fixture({ assertNoLinkEscape });
+        const file = { path: "notes/source.md" } as TFile;
+
+        await f.adapter.rename(file, "notes/target.md");
+
+        expect(assertNoLinkEscape.mock.calls).toEqual([[file.path], ["notes/target.md"]]);
+        expect(f.rename).toHaveBeenCalledExactlyOnceWith(file, "notes/target.md");
+    });
+});
 
 describe.each(routes)("indexed file protection for %s", (route) => {
     it.each([

@@ -165,20 +165,24 @@ export class ReleaseInstallCoordinator {
         this.ports.records.rememberNoticed(key);
     }
 
+    private refuseOversize(file: ReleasePackageFile, size: number, maxPackageBytes: number): boolean {
+        if (size <= maxPackageBytes) return false;
+        this.noticeOnce(
+            `oversize:${size}:${file.path}`,
+            `Release package ${file.path} was rejected: it is larger than ${maxPackageBytes} bytes. Nothing was installed.`
+        );
+        return true;
+    }
+
     /**
      * Verify one package file.
      * @returns The package when it is valid, newer than the running build and not known to fail; nothing otherwise.
      */
     private async examine(file: ReleasePackageFile): Promise<Candidate | undefined> {
         const { timings, verification, records } = this.ports;
-        if (file.size > timings.maxPackageBytes) {
-            this.noticeOnce(
-                `oversize:${file.size}:${file.path}`,
-                `Release package ${file.path} was rejected: it is larger than ${timings.maxPackageBytes} bytes. Nothing was installed.`
-            );
-            return undefined;
-        }
+        if (this.refuseOversize(file, file.size, timings.maxPackageBytes)) return undefined;
         let bytes = await file.read();
+        if (this.refuseOversize(file, bytes.length, timings.maxPackageBytes)) return undefined;
         let packageSha256 = await sha256Hex(verification.subtle, bytes);
         let verdict: ReleasePackageVerdict = await verifyReleasePackage(bytes, verification);
         for (const pause of timings.incompleteRetryDelaysMs) {
@@ -188,6 +192,7 @@ export class ReleaseInstallCoordinator {
             await this.ports.wait(pause);
             if (this.ports.hasUnloaded()) return undefined;
             bytes = await file.read();
+            if (this.refuseOversize(file, bytes.length, timings.maxPackageBytes)) return undefined;
             packageSha256 = await sha256Hex(verification.subtle, bytes);
             verdict = await verifyReleasePackage(bytes, verification);
         }

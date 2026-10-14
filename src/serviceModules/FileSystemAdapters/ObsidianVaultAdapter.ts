@@ -80,6 +80,8 @@ export class ObsidianVaultAdapter implements IVaultAdapter<TFile, TFolder> {
 
     async rename(file: TFile, newPath: string): Promise<void> {
         this.assertMayRename(file.path, newPath);
+        await this.linkGuard.assertNoLinkEscape(file.path);
+        await this.aliasGuard.assertNoAlias(file.path);
         await this.linkGuard.assertNoLinkEscape(newPath);
         await this.aliasGuard.assertNoAlias(newPath);
         return await this.app.vault.rename(file, newPath);

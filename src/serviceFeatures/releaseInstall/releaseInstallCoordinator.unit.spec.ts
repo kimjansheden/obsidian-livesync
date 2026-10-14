@@ -372,6 +372,23 @@ describe("packages which are not installed", () => {
         expectUntouched(device);
     });
 
+    it("refuses bytes which grow above the limit before the first read", async () => {
+        const device = createDevice();
+        device.ports.timings = { ...device.ports.timings, maxPackageBytes: 16 };
+        device.ports.listPackageFiles = () => [
+            {
+                path: "growing.livesync-release",
+                size: 1,
+                read: async () => new Uint8Array(17),
+            },
+        ];
+
+        await device.coordinator.scan();
+
+        expect(device.notices).toEqual([expect.stringContaining("larger than 16 bytes")]);
+        expectUntouched(device);
+    });
+
     it("does not install where the host cannot unload and load a plug-in, and says so once", async () => {
         const device = createDevice({ canReload: false });
         device.vault.set("p.livesync-release", await packageOf(7));
@@ -397,6 +414,19 @@ describe("packages which are not installed", () => {
 });
 
 describe("a package file which is not complete yet", () => {
+    it("refuses a retry which has grown above the size limit", async () => {
+        const device = createDevice();
+        device.ports.timings = { ...device.ports.timings, maxPackageBytes: 16 };
+        device.vault.set("growing.livesync-release", bytesOf("{"));
+        device.state.onWait = () => device.vault.set("growing.livesync-release", new Uint8Array(17));
+
+        await device.coordinator.scan();
+
+        expect(device.reads).toEqual(["growing.livesync-release", "growing.livesync-release"]);
+        expect(device.notices).toEqual([expect.stringContaining("larger than 16 bytes")]);
+        expectUntouched(device);
+    });
+
     it.each([
         ["empty", new Uint8Array(0)],
         ["cut short", undefined],
