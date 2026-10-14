@@ -762,6 +762,7 @@ describe("the running build", () => {
 
         await host.loadSettings();
 
+        await vi.waitFor(() => expect(host.reported).toEqual([expect.stringMatching(/^[a-f0-9]{64}$/u)]));
         expect(host.reported).toEqual([await sha256HexOf(host.adapter.files.get(pluginFile("main.js"))!)]);
     });
 
@@ -772,7 +773,47 @@ describe("the running build", () => {
         await host.loadSettings();
 
         expect(host.reported).toEqual([]);
-        expect(host.logs[host.logs.length - 1]).toContain("is on, trusted keys");
+        expect(host.logs).toContainEqual(expect.stringContaining("is on, trusted keys"));
+    });
+
+    it("does not hold startup open while an empty mobile read waits to be identified", async () => {
+        vi.useFakeTimers();
+        try {
+            const host = createHost();
+            host.adapter.files.set(pluginFile("main.js"), new Uint8Array());
+
+            const loading = host.loadSettings();
+            await vi.advanceTimersByTimeAsync(0);
+
+            await expect(loading).resolves.toBeUndefined();
+            expect(host.reported).toEqual([]);
+            expect(vi.getTimerCount()).toBeGreaterThan(0);
+        } finally {
+            vi.clearAllTimers();
+            vi.useRealTimers();
+        }
+    });
+
+    it("does not let an unloaded instance identify a replacement main.js", async () => {
+        vi.useFakeTimers();
+        try {
+            const host = createHost();
+            const path = pluginFile("main.js");
+            host.adapter.files.set(path, new Uint8Array());
+            const readBinary = vi.spyOn(host.adapter, "readBinary");
+
+            await host.loadSettings();
+            await vi.advanceTimersByTimeAsync(0);
+            host.lifecycle.unloaded = true;
+            host.adapter.files.set(path, new TextEncoder().encode("replacement build"));
+            await vi.runAllTimersAsync();
+
+            expect(readBinary).toHaveBeenCalledOnce();
+            expect(host.reported).toEqual([]);
+        } finally {
+            vi.clearAllTimers();
+            vi.useRealTimers();
+        }
     });
 });
 

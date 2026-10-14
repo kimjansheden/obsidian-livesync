@@ -526,6 +526,9 @@ describe("swapping, reloading and verifying", () => {
         });
         expect(activate).not.toHaveBeenCalled();
         expect(device.adapter.operations).not.toContain("enablePlugin");
+        expect(device.notices).toEqual([
+            { message: expect.stringContaining("Self-hosted LiveSync is not running"), lasting: true },
+        ]);
     });
 
     it("writes nothing but the three files and their staged and backed-up companions", async () => {

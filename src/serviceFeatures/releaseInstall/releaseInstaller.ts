@@ -549,8 +549,15 @@ async function finishBootstrapInstall(
     await settlesWithin(env, unloading, env.timings.teardownTimeoutMs);
     if (env.host.getInstance(env.pluginId) === env.runningInstance)
         return { status: "not-installed", reason: "the host did not unload the running build" };
-    if (!(await fulfillsWithin(env, env.waitForTeardown(), env.timings.teardownTimeoutMs)))
-        return { status: "restore-failed", reason: "the running build did not finish teardown" };
+    if (!(await fulfillsWithin(env, env.waitForTeardown(), env.timings.teardownTimeoutMs))) {
+        const reason = "the running build did not finish teardown";
+        env.notify(
+            `Release ${install.releaseName} from the vault was not installed: ${reason}. ` +
+                `Self-hosted LiveSync is not running; restart the app before continuing.`,
+            true
+        );
+        return { status: "restore-failed", reason };
+    }
     try {
         await env.bootstrap!.activate(install.packageSha256);
         const problem = await loadAndCheck(env, install.releaseNumber, [env.runningInstance]);

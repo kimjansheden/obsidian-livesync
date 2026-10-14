@@ -167,19 +167,25 @@ export function useReleaseInstall(
      * installer uses, and report nothing if it stays empty: a device without the field is simply not identified.
      */
     async function reportLoadedMainJs() {
+        if (host.services.control.hasUnloaded()) return;
         const runtime = Reflect.get(plugin, "securityRelease") as
             | { bootstrapRuntime?: { payloadSha256: string } }
             | undefined;
         if (runtime?.bootstrapRuntime) {
+            if (host.services.control.hasUnloaded()) return;
             bindings.reportLoadedMainJs(runtime.bootstrapRuntime.payloadSha256);
             return;
         }
         const path = `${pluginDirectory}/main.js`;
         for (const pause of [0, ...DEFAULT_RELEASE_INSTALL_TIMINGS.readBackRetryDelaysMs]) {
             if (pause > 0) await wait(pause);
+            if (host.services.control.hasUnloaded()) return;
             const mainJs = new Uint8Array(await adapter.readBinary(path));
+            if (host.services.control.hasUnloaded()) return;
             if (mainJs.length > 0) {
-                bindings.reportLoadedMainJs(await sha256Hex(subtle, mainJs));
+                const hash = await sha256Hex(subtle, mainJs);
+                if (host.services.control.hasUnloaded()) return;
+                bindings.reportLoadedMainJs(hash);
                 return;
             }
         }
@@ -323,12 +329,12 @@ export function useReleaseInstall(
     }
 
     host.services.appLifecycle.onSettingLoaded.addHandler(async () => {
-        // Loading goes on whatever happens here.
-        try {
-            await reportLoadedMainJs();
-        } catch (error) {
+        // Build identification is optional reporting. Mobile storage may need the full read-back retry schedule,
+        // so it continues beside startup instead of delaying the database and replication lifecycle.
+        void reportLoadedMainJs().catch((error) => {
+            if (host.services.control.hasUnloaded()) return;
             log(`The running build could not be identified: ${String(error)}`, LOG_LEVEL_VERBOSE);
-        }
+        });
         try {
             const { keys, state } = await readTrustedKeys();
             log(
