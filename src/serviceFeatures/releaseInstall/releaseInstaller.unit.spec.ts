@@ -531,6 +531,48 @@ describe("swapping, reloading and verifying", () => {
         ]);
     });
 
+    it("reports when the host refuses to unload a bootstrap payload", async () => {
+        const device = createDevice();
+        device.env.bootstrap = {
+            protocol: 1,
+            payloadSha256: "b".repeat(64),
+            packageSha256: "c".repeat(64),
+            stage: vi.fn(async () => undefined),
+            activate: vi.fn(async () => undefined),
+        };
+        const install = await prepared(device);
+        device.host.disablePlugin = () => Promise.reject(new Error("synthetic: the host refused"));
+
+        await expect(completeReleaseInstall(device.env, install)).resolves.toEqual({
+            status: "not-installed",
+            reason: "the host did not unload the running build",
+        });
+        expect(device.notices).toEqual([
+            { message: expect.stringContaining("Restart the app before another installation attempt"), lasting: true },
+        ]);
+    });
+
+    it("reports when neither a bootstrap candidate nor the previous payload loads", async () => {
+        const device = createDevice();
+        device.env.bootstrap = {
+            protocol: 1,
+            payloadSha256: "b".repeat(64),
+            packageSha256: "c".repeat(64),
+            stage: vi.fn(async () => undefined),
+            activate: vi.fn(async () => undefined),
+        };
+        const install = await prepared(device);
+        device.host.loadBuild = () => undefined;
+
+        await expect(completeReleaseInstall(device.env, install)).resolves.toEqual({
+            status: "restore-failed",
+            reason: "the host did not load it",
+        });
+        expect(device.notices).toEqual([
+            { message: expect.stringContaining("Self-hosted LiveSync is not running"), lasting: true },
+        ]);
+    });
+
     it("writes nothing but the three files and their staged and backed-up companions", async () => {
         const device = createDevice();
         const vaultPackage = "inbox/0.0.1-security.7.livesync-release";

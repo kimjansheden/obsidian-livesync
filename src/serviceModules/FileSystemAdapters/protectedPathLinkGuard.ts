@@ -32,8 +32,8 @@ export interface PathOperations {
 }
 
 export interface ProtectedPathLinkGuard {
-    /** Refuse `vaultRelativePath` when a symbolic link or junction resolves it into a protected path. */
-    assertNoLinkEscape(vaultRelativePath: string): Promise<void>;
+    /** Refuse a change which a symbolic link or junction resolves into a protected path or removal ancestor. */
+    assertNoLinkEscape(vaultRelativePath: string, operation?: "change" | "remove"): Promise<void>;
 }
 
 const REFUSAL = "Refusing a path which a symbolic link or junction resolves into the protected plug-in folder.";
@@ -81,7 +81,7 @@ export function createProtectedPathLinkGuard(options: {
     };
 
     return {
-        async assertNoLinkEscape(vaultRelativePath: string): Promise<void> {
+        async assertNoLinkEscape(vaultRelativePath: string, operation = "change"): Promise<void> {
             const segments = vaultRelativePath.split("/").filter((segment) => segment !== "");
             if (segments.length === 0) return;
             // The deepest existing prefix of the path: the whole path when it exists, else its longest existing
@@ -111,7 +111,9 @@ export function createProtectedPathLinkGuard(options: {
             // A link was traversed. Where the write would really land:
             const realTarget = path.resolve(real, ...segments.slice(existingLength));
             for (const target of await resolveProtected()) {
-                if (isWithin(target, realTarget)) throw new Error(REFUSAL);
+                if (isWithin(target, realTarget) || (operation === "remove" && isWithin(realTarget, target))) {
+                    throw new Error(REFUSAL);
+                }
             }
         },
     };

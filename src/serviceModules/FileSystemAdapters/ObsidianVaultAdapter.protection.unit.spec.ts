@@ -83,7 +83,7 @@ describe("indexed rename protection", () => {
 
         await f.adapter.rename(file, "notes/target.md");
 
-        expect(assertNoLinkEscape.mock.calls).toEqual([[file.path], ["notes/target.md"]]);
+        expect(assertNoLinkEscape.mock.calls).toEqual([[file.path, "remove"], ["notes/target.md"]]);
         expect(f.rename).toHaveBeenCalledExactlyOnceWith(file, "notes/target.md");
     });
 });
@@ -239,7 +239,7 @@ describe.each(["delete", "trash"] as const)("indexed removal protection for %s",
         const f = fixture({ assertNoLinkEscape });
         const file = { path: "notes/ordinary.md" } as TFile;
         await f.adapter[route](file);
-        expect(assertNoLinkEscape).toHaveBeenCalledExactlyOnceWith(file.path);
+        expect(assertNoLinkEscape).toHaveBeenCalledExactlyOnceWith(file.path, "remove");
         expect(f.trashFile).toHaveBeenCalledExactlyOnceWith(file);
     });
 });

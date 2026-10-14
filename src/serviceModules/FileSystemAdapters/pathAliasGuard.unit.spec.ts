@@ -454,6 +454,22 @@ describe("a path which a symbolic link or junction resolves into the plug-in fol
         }
     });
 
+    it("refuses removing a linked ancestor which contains the plug-in directory", async () => {
+        const root = realVaultWithJunction();
+        try {
+            symlinkSync(join(root, ".obsidian"), join(root, "configuration"), "junction");
+            const app = appOver(root) as unknown as App;
+            const adapter = new ObsidianStorageAdapter(app, () => false, createPathAliasGuard(app), guardOver(root));
+
+            await expect(adapter.remove("configuration/plugins")).rejects.toThrow(REFUSAL);
+
+            expect(readFileSync(join(root, PLUGIN_REL, "main.js"), "utf8")).toBe("the real plug-in code");
+            expect(readFileSync(join(root, KEYS_REL), "utf8")).toBe("the trusted keys");
+        } finally {
+            rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+        }
+    });
+
     it("allows an ordinary path and resolves a real path only when a segment exists, never for a brand-new file", async () => {
         const root = realVaultWithJunction();
         try {

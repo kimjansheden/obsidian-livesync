@@ -80,7 +80,7 @@ export class ObsidianVaultAdapter implements IVaultAdapter<TFile, TFolder> {
 
     async rename(file: TFile, newPath: string): Promise<void> {
         this.assertMayRename(file.path, newPath);
-        await this.linkGuard.assertNoLinkEscape(file.path);
+        await this.linkGuard.assertNoLinkEscape(file.path, "remove");
         await this.aliasGuard.assertNoAlias(file.path);
         await this.linkGuard.assertNoLinkEscape(newPath);
         await this.aliasGuard.assertNoAlias(newPath);
@@ -89,7 +89,7 @@ export class ObsidianVaultAdapter implements IVaultAdapter<TFile, TFolder> {
 
     private async assertMayRemove(path: string): Promise<void> {
         if (this.isRemoveProtected(path)) throw new Error("Refusing to change a write-protected file.");
-        await this.linkGuard.assertNoLinkEscape(path);
+        await this.linkGuard.assertNoLinkEscape(path, "remove");
         await this.aliasGuard.assertNoAlias(path);
     }
 

@@ -65,7 +65,7 @@ export class ObsidianStorageAdapter implements IStorageAdapter<Stat> {
      */
     private async assertMayRemove(path: string): Promise<void> {
         if (this.isRemoveProtected(path)) throw new Error("Refusing to change a write-protected file.");
-        await this.linkGuard.assertNoLinkEscape(path);
+        await this.linkGuard.assertNoLinkEscape(path, "remove");
         await this.aliasGuard.assertNoAlias(path);
     }
 

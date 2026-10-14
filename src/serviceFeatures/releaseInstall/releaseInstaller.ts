@@ -547,8 +547,15 @@ async function finishBootstrapInstall(
     unloading: Promise<unknown>
 ): Promise<ReleaseInstallOutcome> {
     await settlesWithin(env, unloading, env.timings.teardownTimeoutMs);
-    if (env.host.getInstance(env.pluginId) === env.runningInstance)
-        return { status: "not-installed", reason: "the host did not unload the running build" };
+    if (env.host.getInstance(env.pluginId) === env.runningInstance) {
+        const reason = "the host did not unload the running build";
+        env.notify(
+            `Release ${install.releaseName} from the vault was not installed: ${reason}. ` +
+                `No file was replaced. Restart the app before another installation attempt.`,
+            true
+        );
+        return { status: "not-installed", reason };
+    }
     if (!(await fulfillsWithin(env, env.waitForTeardown(), env.timings.teardownTimeoutMs))) {
         const reason = "the running build did not finish teardown";
         env.notify(
@@ -574,12 +581,24 @@ async function finishBootstrapInstall(
             env.notify(`The new runtime did not load; the previous release is running. ${problem}`, true);
             return { status: "restored", reason: problem };
         }
+        env.notify(
+            `The new runtime did not load, and the previous release could not be started again: ${problem}. ` +
+                `Self-hosted LiveSync is not running; restart the app or reinstall it manually.`,
+            true
+        );
         return { status: "restore-failed", reason: problem };
     } catch (error) {
         // A failed activation leaves the immutable accepted runtime intact. Reload it without modifying any file.
         const problem = await loadAndCheck(env, env.runningReleaseNumber, [env.runningInstance]);
         const reason = describeError(error);
-        env.notify(`The runtime was not activated: ${reason}`, true);
+        env.notify(
+            problem === undefined
+                ? `The runtime was not activated: ${reason}. The previous release is running.`
+                : `The runtime was not activated: ${reason}. ` +
+                      `The previous release could not be started again: ${problem}. ` +
+                      `Self-hosted LiveSync is not running; restart the app or reinstall it manually.`,
+            true
+        );
         return { status: problem === undefined ? "restored" : "restore-failed", reason };
     }
 }
