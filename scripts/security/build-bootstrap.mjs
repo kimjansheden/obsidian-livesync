@@ -28,7 +28,7 @@ export async function buildBootstrap() {
     );
     const baselineSha256 = hash(baseline);
     await writeFile("bootstrap-baseline.json", baseline);
-    const bootstrapStyles = Buffer.alloc(0);
+    const bootstrapStyles = Buffer.from("/* Payload styles are loaded by the permanent bootstrap. */\n");
     await writeFile("bootstrap-styles.css", bootstrapStyles);
     await esbuild.build({
         entryPoints: ["src/serviceFeatures/releaseInstall/bootstrap.ts"],

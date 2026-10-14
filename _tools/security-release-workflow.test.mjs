@@ -138,6 +138,7 @@ describe("attested security release workflow", () => {
             assert.ok(copy?.includes(asset), `missing bootstrap installation asset: ${asset}`);
             assert.ok(checksums?.includes(asset), `missing bootstrap checksum: ${asset}`);
         }
+        assert.match(releaseWorkflow, /test -s bootstrap-styles\.css/u);
     });
 
     it("creates the release SBOM through the repository generator", () => {
