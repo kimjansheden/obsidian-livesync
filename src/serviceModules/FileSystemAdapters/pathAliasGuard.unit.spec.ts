@@ -1,5 +1,6 @@
 import {
     existsSync,
+    linkSync,
     mkdirSync,
     mkdtempSync,
     readdirSync,
@@ -412,12 +413,16 @@ describe("a path which a symbolic link or junction resolves into the plug-in fol
     function guardOver(root: string, onRealpath?: () => void) {
         return createProtectedPathLinkGuard({
             vaultBasePath: root,
-            protectedPaths: [PLUGIN_REL, KEYS_REL],
+            protectedPaths: [PLUGIN_REL, `${PLUGIN_REL}/main.js`, KEYS_REL],
             fs: {
                 exists: async (path) => await Promise.resolve(existsSync(path)),
                 realpath: async (path) => {
                     onRealpath?.();
                     return await Promise.resolve((realpathSync.native ?? realpathSync)(path));
+                },
+                identity: async (path) => {
+                    const stat = statSync(path, { bigint: true });
+                    return `${String(stat.dev)}:${String(stat.ino)}`;
                 },
             },
             path: { resolve, relative, isAbsolute },
@@ -470,6 +475,22 @@ describe("a path which a symbolic link or junction resolves into the plug-in fol
         }
     });
 
+    it("refuses changing a hard link to a protected executable", async () => {
+        const root = realVaultWithJunction();
+        try {
+            const alias = join(root, "notes/plugin-code.js");
+            linkSync(join(root, PLUGIN_REL, "main.js"), alias);
+            const app = appOver(root) as unknown as App;
+            const adapter = new ObsidianStorageAdapter(app, () => false, createPathAliasGuard(app), guardOver(root));
+
+            await expect(adapter.write("notes/plugin-code.js", "replacement")).rejects.toThrow("hard link");
+
+            expect(readFileSync(join(root, PLUGIN_REL, "main.js"), "utf8")).toBe("the real plug-in code");
+        } finally {
+            rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+        }
+    });
+
     it("allows an ordinary path and resolves a real path only when a segment exists, never for a brand-new file", async () => {
         const root = realVaultWithJunction();
         try {
@@ -483,11 +504,15 @@ describe("a path which a symbolic link or junction resolves into the plug-in fol
             expect(realpaths).toBe(0);
             expect(readFileSync(join(root, "fresh.md"), "utf8")).toBe("content");
 
-            // A file in an existing ordinary folder: one realpath of the existing prefix, not a link, so allowed.
+            // The first ordinary write resolves its existing prefix and the three protected targets once.
             realpaths = 0;
             await adapter.write("notes/b.md", "more");
-            expect(realpaths).toBe(1);
+            expect(realpaths).toBe(4);
             expect(readFileSync(join(root, "notes/b.md"), "utf8")).toBe("more");
+
+            // Protected targets are cached; another new file resolves only its existing parent.
+            await adapter.write("notes/c.md", "again");
+            expect(realpaths).toBe(5);
         } finally {
             rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
         }

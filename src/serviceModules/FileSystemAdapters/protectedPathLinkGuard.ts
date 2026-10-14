@@ -9,8 +9,9 @@
  *
  * On desktop the real path is resolved natively, and a write, append, removal, directory creation or rename target
  * which a link resolves into a protected path is refused. The common case, where no segment of the path is a link,
- * costs one `realpath` of the path's existing prefix and returns. Where resolution is unavailable for an existing
- * prefix, the write is refused rather than let through blind.
+ * resolves the path's existing prefix and compares it with the cached protected targets. Existing targets are also
+ * compared by file identity with the protected installed files, so a listed hard-link alias is refused. Where
+ * resolution or identity is unavailable for an existing target, the change is refused rather than let through blind.
  *
  * On the mobile adapter no guard is wired: its file system cannot represent or follow symbolic links or junctions,
  * so a vault path can never resolve anywhere but where it is spelled, and the vector cannot arise there.
@@ -22,6 +23,8 @@ export interface LinkResolvingFileSystem {
     exists(absolutePath: string): Promise<boolean>;
     /** The canonical real path, resolving every symbolic link and junction. Rejects when it cannot be resolved. */
     realpath(absolutePath: string): Promise<string>;
+    /** Stable identity of an existing file or directory, equal for hard links to the same object. */
+    identity(absolutePath: string): Promise<string | undefined>;
 }
 
 /** The path operations the guard needs, the platform's own, so comparison matches how the file system resolves. */
@@ -58,6 +61,7 @@ export function createProtectedPathLinkGuard(options: {
 
     /** The protected paths in their real, resolved form; computed once and reused. */
     let protectedReal: string[] | undefined;
+    const protectedIdentities = new Map<string, string>();
     const resolveProtected = async (): Promise<string[]> => {
         if (protectedReal) return protectedReal;
         const resolved: string[] = [];
@@ -78,6 +82,14 @@ export function createProtectedPathLinkGuard(options: {
         if (fold(parent) === fold(child)) return true;
         const relative = path.relative(parent, child);
         return relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative);
+    };
+
+    const protectedIdentity = async (target: string): Promise<string | undefined> => {
+        const cached = protectedIdentities.get(target);
+        if (cached) return cached;
+        const identity = await fs.identity(target);
+        if (identity) protectedIdentities.set(target, identity);
+        return identity;
     };
 
     return {
@@ -105,14 +117,23 @@ export function createProtectedPathLinkGuard(options: {
                 // An existing prefix which cannot be resolved may be a link we cannot follow: refuse, do not guess.
                 throw new Error(REFUSAL);
             }
-            const lexical = path.resolve(vaultBasePath, ...segments.slice(0, existingLength));
-            // No link on the existing prefix: the real and lexical paths agree. The common, cheap case.
-            if (fold(real) === fold(lexical)) return;
-            // A link was traversed. Where the write would really land:
+            // Where the change would really land, including any uncreated suffix after the resolved prefix.
             const realTarget = path.resolve(real, ...segments.slice(existingLength));
+            let existingIdentity: string | undefined;
+            if (existingLength === segments.length) {
+                try {
+                    existingIdentity = await fs.identity(existingAbsolute);
+                } catch {
+                    throw new Error(REFUSAL);
+                }
+                if (!existingIdentity) throw new Error(REFUSAL);
+            }
             for (const target of await resolveProtected()) {
                 if (isWithin(target, realTarget) || (operation === "remove" && isWithin(realTarget, target))) {
                     throw new Error(REFUSAL);
+                }
+                if (existingIdentity && existingIdentity === (await protectedIdentity(target))) {
+                    throw new Error("Refusing a hard link to protected plug-in storage.");
                 }
             }
         },

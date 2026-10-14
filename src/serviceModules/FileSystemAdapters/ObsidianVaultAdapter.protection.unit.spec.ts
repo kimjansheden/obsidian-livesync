@@ -5,6 +5,7 @@ import {
     readFileSync,
     realpathSync,
     rmSync,
+    statSync,
     symlinkSync,
     writeFileSync,
 } from "node:fs";
@@ -66,6 +67,7 @@ describe("indexed rename protection", () => {
             fs: {
                 exists: async () => true,
                 realpath: async (path) => (path === resolve(root, source) ? resolve(root, PLUGIN, "main.js") : path),
+                identity: async (path) => path,
             },
             path: { resolve, relative, isAbsolute },
         });
@@ -127,11 +129,34 @@ describe.each(routes)("indexed file protection for %s", (route) => {
             fs: {
                 exists: async () => true,
                 realpath: async (path) => (path === resolve(root, alias) ? resolve(root, PLUGIN, "main.js") : path),
+                identity: async (path) => path,
             },
             path: { resolve, relative, isAbsolute },
         });
         const { adapter, modify, modifyBinary } = fixture(guard);
         await expect(write(adapter, route, alias)).rejects.toThrow("symbolic link or junction");
+        expect(modify).not.toHaveBeenCalled();
+        expect(modifyBinary).not.toHaveBeenCalled();
+    });
+
+    it("refuses the resolved target when a protected file is itself a symlink", async () => {
+        const root = resolve(tmpdir(), "synthetic-protected-link-vault");
+        const protectedPath = `${PLUGIN}/trusted-release-keys.json`;
+        const target = "notes/device-keys.json";
+        const guard = createProtectedPathLinkGuard({
+            vaultBasePath: root,
+            protectedPaths: [protectedPath],
+            fs: {
+                exists: async () => true,
+                realpath: async (path) => (path === resolve(root, protectedPath) ? resolve(root, target) : path),
+                identity: async (path) => path,
+            },
+            path: { resolve, relative, isAbsolute },
+        });
+        const { adapter, modify, modifyBinary } = fixture(guard);
+
+        await expect(write(adapter, route, target)).rejects.toThrow("symbolic link or junction");
+
         expect(modify).not.toHaveBeenCalled();
         expect(modifyBinary).not.toHaveBeenCalled();
     });
@@ -146,6 +171,7 @@ describe.each(routes)("indexed file protection for %s", (route) => {
                 realpath: async () => {
                     throw new Error("resolution failed");
                 },
+                identity: async (path) => path,
             },
             path: { resolve, relative, isAbsolute },
         });
@@ -169,6 +195,10 @@ describe.each(routes)("indexed file protection for %s", (route) => {
                 fs: {
                     exists: async (path) => existsSync(path),
                     realpath: async (path) => (realpathSync.native ?? realpathSync)(path),
+                    identity: async (path) => {
+                        const stat = statSync(path, { bigint: true });
+                        return `${String(stat.dev)}:${String(stat.ino)}`;
+                    },
                 },
                 path: { resolve, relative, isAbsolute },
             });
@@ -213,6 +243,7 @@ describe.each(["delete", "trash"] as const)("indexed removal protection for %s",
                     path === resolve(root, "updates/state.json")
                         ? resolve(root, PLUGIN, "release-runtime/accepted-sha.json")
                         : path,
+                identity: async (path) => path,
             },
             path: { resolve, relative, isAbsolute },
         });
