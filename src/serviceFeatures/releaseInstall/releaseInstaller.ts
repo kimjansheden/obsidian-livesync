@@ -588,17 +588,28 @@ async function finishBootstrapInstall(
         );
         return { status: "restore-failed", reason: problem };
     } catch (error) {
-        // A failed activation leaves the immutable accepted runtime intact. Reload it without modifying any file.
-        const problem = await loadAndCheck(env, env.runningReleaseNumber, [env.runningInstance]);
+        // The intent write may have succeeded before its acknowledgement was lost. Reload first, then trust the
+        // release identity which the bootstrap actually made runnable rather than the rejected promise alone.
+        const candidateProblem = await loadAndCheck(env, install.releaseNumber, [env.runningInstance]);
+        const current = readSecurityRelease(env.host.getInstance(env.pluginId));
         const reason = describeError(error);
+        if (candidateProblem === undefined) {
+            env.notify(
+                `Self-hosted LiveSync installed release ${install.releaseName} from the vault and reloaded.`,
+                false
+            );
+            return { status: "installed" };
+        }
+        if (current.loadState === "loaded" && current.releaseNumber === env.runningReleaseNumber) {
+            env.notify(`The runtime was not activated: ${reason}. The previous release is running.`, true);
+            return { status: "restored", reason };
+        }
         env.notify(
-            problem === undefined
-                ? `The runtime was not activated: ${reason}. The previous release is running.`
-                : `The runtime was not activated: ${reason}. ` +
-                      `The previous release could not be started again: ${problem}. ` +
-                      `Self-hosted LiveSync is not running; restart the app or reinstall it manually.`,
+            `The runtime was not activated: ${reason}. ` +
+                `Neither the candidate nor the previous release could be started (${candidateProblem}). ` +
+                `Self-hosted LiveSync is not running; restart the app or reinstall it manually.`,
             true
         );
-        return { status: problem === undefined ? "restored" : "restore-failed", reason };
+        return { status: "restore-failed", reason };
     }
 }

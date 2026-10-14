@@ -1,5 +1,5 @@
 /** Permanent Obsidian entry point. Its executable is installed locally once and never updated through the vault. */
-import { Plugin, Notice, type PluginManifest } from "obsidian";
+import { Platform, Plugin, Notice, requireApiVersion, type PluginManifest } from "obsidian";
 import { RELEASE_MARKER_PREFIX } from "./runningRelease";
 import { decodeStrictUtf8 } from "./releaseBytes";
 import { ReleaseRuntime, type BootstrapRuntimePort } from "./releaseRuntime";
@@ -39,6 +39,14 @@ function pollPause(ms: number, signal: AbortSignal): Promise<void> {
     });
 }
 const LOAD_TIMEOUT_MS = 60_000;
+function assertManifestCompatibility(manifest: PluginManifest): void {
+    if (typeof manifest.minAppVersion === "string" && !requireApiVersion(manifest.minAppVersion)) {
+        throw new Error(`The runtime requires Obsidian ${manifest.minAppVersion} or later`);
+    }
+    if (manifest.isDesktopOnly === true && !Platform.isDesktopApp) {
+        throw new Error("The runtime is available only in the Obsidian desktop app");
+    }
+}
 async function bounded<T>(work: Promise<T>, limit: number): Promise<T> {
     let timer: number | undefined;
     try {
@@ -182,6 +190,9 @@ export default class LiveSyncBootstrap extends Plugin {
         const generation = ++this.generation;
         if (this.stopped) throw new Error("The bootstrap has unloaded");
         const files = new Map(verified.files.map((file) => [file.name, file]));
+        const parsedManifest: unknown = JSON.parse(decodeStrictUtf8(files.get("manifest.json")!.bytes));
+        const manifest = { ...(parsedManifest as PluginManifest), dir: pluginDirectory };
+        assertManifestCompatibility(manifest);
         const source = decodeStrictUtf8(files.get("main.js")!.bytes);
         const commonJs = { exports: {} as unknown };
         // Only hash-authenticated baseline/accepted bytes or newly signature-verified bytes reach this boundary.
@@ -194,8 +205,6 @@ export default class LiveSyncBootstrap extends Plugin {
         const constructor: unknown =
             (typeof exported === "object" && exported !== null && Reflect.get(exported, "default")) || exported;
         if (typeof constructor !== "function") throw new Error("The runtime exports no Plugin constructor");
-        const parsedManifest: unknown = JSON.parse(decodeStrictUtf8(files.get("manifest.json")!.bytes));
-        const manifest = { ...(parsedManifest as PluginManifest), dir: pluginDirectory };
         const child: unknown = Reflect.construct(constructor, [this.app, manifest]);
         if (!(child instanceof Plugin)) throw new Error("The runtime is not an Obsidian Plugin");
         const payload = child as PayloadPlugin;

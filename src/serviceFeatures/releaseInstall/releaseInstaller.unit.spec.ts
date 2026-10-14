@@ -573,6 +573,33 @@ describe("swapping, reloading and verifying", () => {
         ]);
     });
 
+    it("accepts the candidate which loads after its durable intent loses the write acknowledgement", async () => {
+        const device = createDevice();
+        const candidateInstance = loadSyntheticBuild(mainJsOf(markerOf(NEW_RELEASE)))!;
+        device.env.bootstrap = {
+            protocol: 1,
+            payloadSha256: "b".repeat(64),
+            packageSha256: "c".repeat(64),
+            stage: vi.fn(async () => undefined),
+            activate: vi.fn(async () => {
+                device.host.loadBuild = () => candidateInstance;
+                throw new Error("synthetic: acknowledgement lost");
+            }),
+        };
+        const install = await prepared(device);
+
+        await expect(completeReleaseInstall(device.env, install)).resolves.toEqual({ status: "installed" });
+
+        expect(device.host.instance).toBe(candidateInstance);
+        expect(device.notices).toEqual([
+            {
+                message: expect.stringContaining(`installed release ${install.releaseName}`),
+                lasting: false,
+            },
+        ]);
+        expect(device.failedToLoad).toEqual([]);
+    });
+
     it("writes nothing but the three files and their staged and backed-up companions", async () => {
         const device = createDevice();
         const vaultPackage = "inbox/0.0.1-security.7.livesync-release";

@@ -50,6 +50,7 @@ async function fixture() {
     ]);
     const events: string[] = [];
     const controls: Record<string, unknown> = {};
+    const compatibility = { apiAvailable: true, desktopApp: true };
     const styles: { textContent?: string; dataset: Record<string, string>; remove(): void; removed: boolean }[] = [];
     class Plugin {
         _loaded = false;
@@ -141,7 +142,16 @@ async function fixture() {
         exports: commonJs.exports,
         require: (name: string) => {
             if (name !== "obsidian") throw new Error("unexpected require");
-            return { Plugin, Notice: class {} };
+            return {
+                Plugin,
+                Notice: class {},
+                Platform: {
+                    get isDesktopApp() {
+                        return compatibility.desktopApp;
+                    },
+                },
+                requireApiVersion: () => compatibility.apiAvailable,
+            };
         },
     });
     const bundle = buildSync({
@@ -171,15 +181,25 @@ async function fixture() {
             };
             onExternalSettingsChange(): Promise<void>;
         };
-    const candidate = async (behavior = "", transform: (source: string) => string = (value) => value) => {
+    const candidate = async (
+        behavior = "",
+        transform: (source: string) => string = (value) => value,
+        manifestPatch: Record<string, unknown> = {}
+    ) => {
         const files = testFiles(7);
         files["main.js"] = bytesOf(transform(new TextDecoder().decode(source(7, behavior))));
+        files["manifest.json"] = bytesOf(
+            JSON.stringify({
+                ...(JSON.parse(new TextDecoder().decode(files["manifest.json"])) as Record<string, unknown>),
+                ...manifestPatch,
+            })
+        );
         const bytes = packageBytesOf(await sign(await buildUnsigned(7, files), key));
         const verdict = await verifyReleasePackage(bytes, verificationContext(key));
         if (verdict.status !== "verified") throw new Error("fixture signature");
         return { verified: verdict.package, sha256: await sha256HexOf(bytes) };
     };
-    return { create, candidate, disk, styles, events, baseline, controls };
+    return { create, candidate, disk, styles, events, baseline, controls, compatibility };
 }
 function deferred() {
     let resolve!: () => void;
@@ -213,6 +233,27 @@ describe("the real compiled CommonJS bootstrap boundary", () => {
         expect(f.events).toEqual(["load:6", "enable:6", "settings:6", "cleanup:6", "unload:6"]);
         expect(f.styles).toHaveLength(1);
         expect(f.styles[0].removed).toBe(true);
+    });
+    it.each([
+        ["a newer Obsidian API", { minAppVersion: "99.0.0" }, { apiAvailable: false }],
+        ["the desktop app", { isDesktopOnly: true }, { desktopApp: false }],
+    ] as const)("rejects a signed payload which requires %s before evaluating its code", async (_, patch, host) => {
+        const f = await fixture();
+        const first = f.create();
+        await first.load();
+        const candidate = await f.candidate("", (value) => `events.push("candidate-evaluated"); ${value}`, patch);
+        const port = first.releaseRuntimeInstance.securityRelease.bootstrapRuntime;
+        await port.stage(candidate.verified, candidate.sha256);
+        first.unload();
+        await port.activate(candidate.sha256);
+        Object.assign(f.compatibility, host);
+
+        const next = f.create();
+        await next.load();
+
+        expect(next.core.release).toBe(6);
+        expect(f.events).not.toContain("candidate-evaluated");
+        expect(f.events).not.toContain("load:7");
     });
     it("drains callbacks from startup which finishes after facade unload", async () => {
         const f = await activateFixture('await controls.startup; this.register(() => events.push("late-cleanup:7"));');
