@@ -16,6 +16,7 @@ Earlier releases remain available in the 1.0 release history, the 1.0 preview hi
 
 #### Fixed
 
+- The one-time incomplete-document integrity check now waits for the initial remote synchronisation instead of delaying recently changed notes behind a full local content audit. The check still runs automatically after that synchronisation and remains available manually.
 - Object Storage build reporting now accepts an R2 milestone read with a weak HTTP ETag while retaining the remote recovery lock. A changed object still refuses the conditional write and is read again before retrying.
 - An accepted device on a recovery-locked Object Storage remote reports its running plug-in build in the milestone without unlocking the remote. The report uses a conditional write, so a concurrent lock or device-list change is retained.
 - Files with a text suffix whose bytes are not valid UTF-8 are synchronised as binary content, preserving their original bytes. Valid UTF-8 continues to use text handling. Previously damaged revisions are not repaired automatically; restore the original bytes after every synchronising device has been updated.

@@ -20,6 +20,11 @@ import { initialiseWorkerModule } from "@vrtmrz/livesync-commonlib/compat/worker
 import { manifestVersion, packageVersion } from "@vrtmrz/livesync-commonlib/compat/common/coreEnvVars";
 import type { VaultScanOutcome } from "@vrtmrz/livesync-commonlib/compat/services/base/IService";
 
+function isIndexedDbReadFailure(error: unknown): boolean {
+    const description = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+    return description.toLowerCase().includes("indexed_db_went_bad");
+}
+
 export class ModuleLiveSyncMain extends AbstractModule {
     /**
      * State which files the start-up scan could not process, and how and when each is tried again.
@@ -74,10 +79,21 @@ export class ModuleLiveSyncMain extends AbstractModule {
         if (this.core.services.appLifecycle.hasUnloaded()) return false;
         // Start-up continues when only individual files of the scan failed; the preparation then completes itself.
         const scanOutcome: VaultScanOutcome = {};
-        const isInitialized = await this.services.databaseEvents.initialiseDatabase(false, false, false, {
-            completeAfterFailedPairs: true,
-            scanOutcome,
-        });
+        let isInitialized: boolean;
+        try {
+            isInitialized = await this.services.databaseEvents.initialiseDatabase(false, false, false, {
+                completeAfterFailedPairs: true,
+                scanOutcome,
+            });
+        } catch (error) {
+            if (!isIndexedDbReadFailure(error)) throw error;
+            this._log(
+                "The browser reported 'indexed_db_went_bad' while reading the local database. LiveSync stopped before replication to protect local and remote data. Back up this Vault, then follow 'Local IndexedDB cannot be read' in the troubleshooting guide. Do not use Rebuild unless this device's Vault has been verified as the authoritative copy.",
+                LOG_LEVEL_NOTICE
+            );
+            this._log(error, LOG_LEVEL_VERBOSE);
+            return false;
+        }
         if (!isInitialized) {
             //TODO:stop all sync.
             return false;
