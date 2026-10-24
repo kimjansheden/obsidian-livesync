@@ -61,7 +61,7 @@ jobs:
         run: npm run security:policy && npm run test:release-workflow
 
       - name: Test candidate dependency alert evaluation
-        run: node --test _tools/pull-request-dependencies.test.mjs
+        run: node --test _tools/pull-request-dependencies.test.mjs _tools/dependabot-automerge.test.mjs
 
       - name: Prove the release gate rejects security-state faults
         run: npm run test:security-state-faults

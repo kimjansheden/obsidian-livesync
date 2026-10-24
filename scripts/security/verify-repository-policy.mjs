@@ -148,7 +148,14 @@ for (const workflow of tracked.filter((path) => path.startsWith(".github/workflo
     const content = readFileSync(workflow, "utf8");
     if (/pull_request_target\s*:/i.test(content)) failures.push(`pull_request_target is forbidden: ${workflow}`);
     if (/\bself-hosted\b/i.test(content)) failures.push(`self-hosted runner is forbidden: ${workflow}`);
-    if (/\bsecrets\./i.test(content)) failures.push(`repository secret reference is forbidden: ${workflow}`);
+    const permittedReader =
+        workflow === ".github/workflows/dependabot-automerge.yml" &&
+        /^\s{4}environment: dependency-maintenance$/mu.test(content) &&
+        /ref: refs\/heads\/main/u.test(content) &&
+        !/^\s{2}(?:pull_request|push):/mu.test(content);
+    const secretReferences = [...content.matchAll(/\bsecrets\.([A-Za-z0-9_]+)/gu)];
+    if (secretReferences.some(([, name]) => !permittedReader || name !== "SECURITY_READER_PRIVATE_KEY"))
+        failures.push(`repository secret reference is forbidden: ${workflow}`);
     for (const match of content.matchAll(/uses:\s*([^\s#]+)@([^\s#]+)/g)) {
         if (!/^[0-9a-f]{40}$/.test(match[2]))
             failures.push(`action is not pinned to a full commit: ${workflow}: ${match[1]}@${match[2]}`);
