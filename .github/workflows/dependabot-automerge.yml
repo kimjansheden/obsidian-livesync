@@ -1,0 +1,62 @@
+name: Dependabot maintenance
+
+on:
+  workflow_run:
+    workflows: [Security CI, CodeQL, Dependency Review]
+    types: [completed]
+  schedule:
+    - cron: "13,43 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependabot-maintenance
+  cancel-in-progress: false
+
+jobs:
+  merge:
+    if: github.repository == 'kimjansheden/obsidian-livesync' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: dependency-maintenance
+    permissions:
+      actions: write
+      contents: write
+      pull-requests: write
+      statuses: write
+    steps:
+      - name: Check out trusted main only
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: refs/heads/main
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24.7.0
+          cache: npm
+
+      - name: Install trusted locked dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Create a repository-scoped read-only security token
+        id: security-reader
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        with:
+          app-id: ${{ vars.SECURITY_READER_APP_ID }}
+          private-key: ${{ secrets.SECURITY_READER_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: obsidian-livesync
+          permission-contents: read
+          permission-security-events: read
+          permission-vulnerability-alerts: read
+          permission-secret-scanning-alerts: read
+
+      - name: Verify candidates and request protected merges
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SECURITY_READ_TOKEN: ${{ steps.security-reader.outputs.token }}
+        run: node scripts/security/dependabot-automerge.mjs
