@@ -15,10 +15,6 @@ function createRuntime(): ConfiguredStartupLifecycleRuntime & { events: string[]
             events.push("compromised-chunks");
             return true;
         }),
-        hasIncompleteDocuments: vi.fn(async () => {
-            events.push("incomplete-documents");
-            return true;
-        }),
         waitForCompatibilityReview: vi.fn(async () => {}),
         runDoctor: vi.fn(async () => {
             events.push("doctor");
@@ -36,7 +32,7 @@ describe("runConfiguredStartupLifecycle", () => {
 
         await expect(runConfiguredStartupLifecycle(runtime)).resolves.toBe(true);
 
-        expect(runtime.events).toEqual(["compromised-chunks", "incomplete-documents", "doctor", "bulk-send"]);
+        expect(runtime.events).toEqual(["compromised-chunks", "doctor", "bulk-send"]);
     });
 
     it("keeps Config Doctor behind the initial compatibility review", async () => {
@@ -49,13 +45,7 @@ describe("runConfiguredStartupLifecycle", () => {
 
         await expect(runConfiguredStartupLifecycle(runtime)).resolves.toBe(true);
 
-        expect(runtime.events).toEqual([
-            "compromised-chunks",
-            "incomplete-documents",
-            "compatibility-review",
-            "doctor",
-            "bulk-send",
-        ]);
+        expect(runtime.events).toEqual(["compromised-chunks", "compatibility-review", "doctor", "bulk-send"]);
     });
 
     it("stops before onboarding or checks when the database is unavailable", async () => {
@@ -69,14 +59,14 @@ describe("runConfiguredStartupLifecycle", () => {
 
     it("stops the configured sequence at the first failed check", async () => {
         const runtime = createRuntime();
-        vi.mocked(runtime.hasIncompleteDocuments).mockImplementation(async () => {
-            runtime.events.push("incomplete-documents");
+        vi.mocked(runtime.hasCompromisedChunks).mockImplementation(async () => {
+            runtime.events.push("compromised-chunks");
             return false;
         });
 
         await expect(runConfiguredStartupLifecycle(runtime)).resolves.toBe(false);
 
-        expect(runtime.events).toEqual(["compromised-chunks", "incomplete-documents"]);
+        expect(runtime.events).toEqual(["compromised-chunks"]);
     });
 });
 

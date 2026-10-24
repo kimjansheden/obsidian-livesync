@@ -47,6 +47,18 @@ Do not switch to P2P or reset the database as the first response. Check:
 
 If the remote is healthy but one device's local database is not, use [Reset Synchronisation on This Device](recovery.md#reset-synchronisation-on-this-device) only after backing up unsynchronised local files.
 
+## Local IndexedDB cannot be read
+
+If the first specific start-up error contains `indexed_db_went_bad`, the browser could not read this device's local LiveSync database. LiveSync stops before replication rather than continuing from a partial database. The error does not by itself identify which underlying IndexedDB file failed.
+
+1. Stop editing on the affected device and close Obsidian.
+2. Back up the complete Vault with operating-system tools, including files which may not yet exist on another device.
+3. Verify that the selected remote contains the expected recent changes before discarding any local database state.
+4. Follow [Reset Synchronisation on This Device](recovery.md#reset-synchronisation-on-this-device), and preserve existing Vault files when the recovery dialogue asks how to treat them.
+5. Confirm that the start-up scan completes, ordinary replication becomes active, and a fresh change reaches another device.
+
+Do not use **Overwrite Server Data with This Device's Files** merely because the local IndexedDB is unreadable. That operation replaces the central remote and requires separate evidence that this device's Vault is the authoritative copy.
+
 ## Synchronisation is paused for compatibility review
 
 A compatibility review is separate from the Change Log. It can appear after an internal database or settings-format change, or when a configured Vault is copied, restored, or opened in a new Obsidian profile without its device-local acknowledgement.

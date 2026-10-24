@@ -29,6 +29,8 @@ type StartupOptions = {
     commits?: boolean;
     /** Recording the scanner's `initialized` marker fails, after the aggregate result. */
     failInitialisedMark?: boolean;
+    /** A fatal error thrown while preparing or scanning the local database. */
+    startupError?: unknown;
 };
 
 /**
@@ -138,8 +140,9 @@ function createStartupHarness(options: StartupOptions) {
                     reopenDatabase: boolean,
                     ignoreSuspending: boolean,
                     preparation?: DatabasePreparationOptions
-                ): Promise<boolean> =>
-                    await prepareDatabaseForUse(
+                ): Promise<boolean> => {
+                    if (options.startupError !== undefined) throw options.startupError;
+                    return await prepareDatabaseForUse(
                         host,
                         log,
                         errorManager as StartupErrorManager,
@@ -147,7 +150,8 @@ function createStartupHarness(options: StartupOptions) {
                         reopenDatabase,
                         ignoreSuspending,
                         preparation
-                    )
+                    );
+                }
             ),
             onDatabaseInitialised: vi.fn(phase("onDatabaseInitialised", options.databaseInitialised ?? true)),
         },
@@ -280,6 +284,31 @@ describe("ModuleLiveSyncMain start-up", () => {
 
         expect(phases).toEqual([]);
         expect(services.appLifecycle.markIsReady).not.toHaveBeenCalled();
+    });
+
+    it("stops before replication and gives recovery guidance when IndexedDB cannot be read", async () => {
+        const databaseError = new Error("indexed_db_went_bad: unknown");
+        const { module, services, phases, startupLog } = createStartupHarness({
+            chunksArrived: false,
+            startupError: databaseError,
+        });
+
+        await expect(module._onLiveSyncReady()).resolves.toBe(false);
+
+        expect(phases).toEqual([]);
+        expect(services.appLifecycle.onFirstInitialise).not.toHaveBeenCalled();
+        expect(startupLog).toHaveBeenCalledWith(
+            expect.stringMatching(/indexed_db_went_bad.*stopped before replication.*Back up this Vault/s),
+            expect.anything()
+        );
+        expect(startupLog).toHaveBeenCalledWith(databaseError, expect.anything());
+    });
+
+    it("preserves an unexpected database start-up error for the existing error boundary", async () => {
+        const databaseError = new Error("unexpected scan failure");
+        const { module } = createStartupHarness({ chunksArrived: false, startupError: databaseError });
+
+        await expect(module._onLiveSyncReady()).rejects.toBe(databaseError);
     });
 
     it("stops start-up with the usual error when the completion hooks fail after failed files", async () => {

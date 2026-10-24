@@ -2,7 +2,6 @@ export interface ConfiguredStartupLifecycleRuntime {
     databaseReady: boolean;
     reportDatabaseNotReady(): void;
     hasCompromisedChunks(): Promise<boolean>;
-    hasIncompleteDocuments(): Promise<boolean>;
     waitForCompatibilityReview(): Promise<void>;
     runDoctor(): Promise<boolean>;
     migrateBulkSend(): Promise<void>;
@@ -33,7 +32,6 @@ export async function runConfiguredStartupLifecycle(runtime: ConfiguredStartupLi
         return false;
     }
     if (!(await runtime.hasCompromisedChunks())) return false;
-    if (!(await runtime.hasIncompleteDocuments())) return false;
     await runtime.waitForCompatibilityReview();
     if (!(await runtime.runDoctor())) return false;
     await runtime.migrateBulkSend();

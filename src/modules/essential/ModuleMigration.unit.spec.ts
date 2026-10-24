@@ -19,7 +19,7 @@ async function* failedDocumentScan() {
 }
 
 function createMigration(
-    findAllNormalDocs: typeof noDocuments | typeof failedDocumentScan = noDocuments,
+    findAllNormalDocs: () => AsyncGenerator<unknown, void, unknown> = noDocuments,
     settings = { sendChunksBulk: false, sendChunksBulkMaxSize: 1 }
 ) {
     const noticeGroups = {
@@ -36,9 +36,13 @@ function createMigration(
         },
         context: { noticeGroups },
         setting: { saveSettingData: vi.fn(async () => undefined) },
+        replication: { replicateByEvent: vi.fn(async () => true) },
         vault: { isTargetFile: vi.fn(async () => true) },
-        path: { getPath: vi.fn() },
+        path: { getPath: vi.fn((entry: { path: string }) => entry.path) },
     };
+    const askSelectStringDialogue = vi.fn(
+        async (_message: string, _buttons: string[], _options: unknown): Promise<undefined> => undefined
+    );
     const core = {
         _services: services,
         services,
@@ -46,13 +50,24 @@ function createMigration(
             get: vi.fn(async () => false),
             set: vi.fn(async () => undefined),
         },
-        localDatabase: { findAllNormalDocs },
-        storageAccess: {},
+        localDatabase: {
+            findAllNormalDocs,
+            getDBEntryFromMeta: vi.fn(async (entry: { size: number }) => ({
+                type: "plain",
+                data: ["hello"],
+                size: entry.size,
+            })),
+        },
+        storageAccess: { readHiddenFileBinary: vi.fn(async () => new Uint8Array(4)) },
+        confirm: { askSelectStringDialogue },
         settings,
     };
     return {
         migration: new ModuleMigration(core as never),
         noticeGroups,
+        replicateByEvent: services.replication.replicateByEvent,
+        kvGet: core.kvDB.get,
+        askSelectStringDialogue,
         saveSettingData: services.setting.saveSettingData,
     };
 }
@@ -80,6 +95,64 @@ describe("ModuleMigration obsolete-setting migration", () => {
 });
 
 describe("ModuleMigration incomplete-document notice", () => {
+    it("does not offer the destructive-looking Fix action when every mismatch is conflicted", async () => {
+        async function* conflictedDocument() {
+            yield {
+                _id: "Todo/Torsdag.md",
+                _rev: "2-conflicted",
+                _conflicts: ["2-other"],
+                path: "Todo/Torsdag.md",
+                type: "plain",
+                children: ["h:content"],
+                size: 5,
+                ctime: 1,
+                mtime: 2,
+            };
+        }
+        const { migration, askSelectStringDialogue } = createMigration(conflictedDocument);
+
+        await expect(migration.hasIncompleteDocs()).resolves.toBe(true);
+
+        expect(askSelectStringDialogue).toHaveBeenCalledOnce();
+        expect(askSelectStringDialogue.mock.calls[0][1]).toHaveLength(2);
+    });
+
+    it("waits for initial replication before the one-time document check", async () => {
+        const events: string[] = [];
+        async function* documentsAfterReplication() {
+            events.push("incomplete-documents");
+        }
+        const { migration, replicateByEvent } = createMigration(documentsAfterReplication);
+        replicateByEvent.mockImplementation(async () => {
+            events.push("replication");
+            return true;
+        });
+
+        await expect(migration.checkIncompleteDocsAfterInitialReplication()).resolves.toBe(true);
+
+        expect(events).toEqual(["replication", "incomplete-documents"]);
+    });
+
+    it("does not request another replication after the document check has already completed", async () => {
+        const { migration, noticeGroups, replicateByEvent, kvGet } = createMigration();
+        kvGet.mockResolvedValue(true);
+
+        await expect(migration.checkIncompleteDocsAfterInitialReplication()).resolves.toBe(true);
+
+        expect(replicateByEvent).not.toHaveBeenCalled();
+        expect(noticeGroups.setItem).not.toHaveBeenCalled();
+    });
+
+    it("defers the content audit when the initial replication does not complete", async () => {
+        const { migration, noticeGroups, replicateByEvent } = createMigration();
+        replicateByEvent.mockResolvedValue(false);
+
+        await expect(migration.checkIncompleteDocsAfterInitialReplication()).resolves.toBe(true);
+
+        expect(replicateByEvent).toHaveBeenCalledOnce();
+        expect(noticeGroups.setItem).not.toHaveBeenCalled();
+    });
+
     it("keeps the check and its result in one persistent named group", async () => {
         const { migration, noticeGroups } = createMigration();
 

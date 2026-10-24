@@ -207,7 +207,8 @@ export class ModuleMigration extends AbstractModule<LiveSyncCore> {
             const CHECK_IT_LATER = $msg("moduleMigration.fix0256.buttons.checkItLater");
             const FIX = $msg("moduleMigration.fix0256.buttons.fix");
             const DISMISS = $msg("moduleMigration.fix0256.buttons.DismissForever");
-            const ret = await this.core.confirm.askSelectStringDialogue(message, [CHECK_IT_LATER, FIX, DISMISS], {
+            const buttons = recoverable.length > 0 ? [CHECK_IT_LATER, FIX, DISMISS] : [CHECK_IT_LATER, DISMISS];
+            const ret = await this.core.confirm.askSelectStringDialogue(message, buttons, {
                 title: $msg("moduleMigration.fix0256.title"),
                 defaultAction: CHECK_IT_LATER,
             });
@@ -242,6 +243,20 @@ export class ModuleMigration extends AbstractModule<LiveSyncCore> {
         } finally {
             noticeGroups.finish(INCOMPLETE_DOCUMENT_NOTICE_GROUP);
         }
+    }
+
+    async checkIncompleteDocsAfterInitialReplication(): Promise<boolean> {
+        const incompleteDocsChecked = (await this.core.kvDB.get<boolean>("checkIncompleteDocs")) || false;
+        if (incompleteDocsChecked) return true;
+        const replicated = await this.services.replication.replicateByEvent();
+        if (replicated === false) {
+            this._log(
+                "The incomplete document check was deferred because the initial remote synchronisation did not complete.",
+                LOG_LEVEL_INFO
+            );
+            return true;
+        }
+        return await this.hasIncompleteDocs();
     }
 
     async hasCompromisedChunks(): Promise<boolean> {
@@ -305,7 +320,6 @@ export class ModuleMigration extends AbstractModule<LiveSyncCore> {
             databaseReady: this.localDatabase.isReady,
             reportDatabaseNotReady: () => this._log($msg("moduleMigration.logLocalDatabaseNotReady"), LOG_LEVEL_NOTICE),
             hasCompromisedChunks: () => this.hasCompromisedChunks(),
-            hasIncompleteDocuments: () => this.hasIncompleteDocs(),
             waitForCompatibilityReview: () => this.waitForCompatibilityReview(),
             runDoctor: () => this.migrateUsingDoctor(false),
             migrateBulkSend: () => this.migrateDisableBulkSend(),
@@ -329,5 +343,8 @@ export class ModuleMigration extends AbstractModule<LiveSyncCore> {
         super.onBindFunction(core, services);
         services.appLifecycle.onLayoutReady.addHandler(this._everyOnLayoutReady.bind(this));
         services.appLifecycle.onFirstInitialise.addHandler(this._everyOnFirstInitialize.bind(this));
+        services.appLifecycle.onScanningStartupIssues.addHandler(
+            this.checkIncompleteDocsAfterInitialReplication.bind(this)
+        );
     }
 }

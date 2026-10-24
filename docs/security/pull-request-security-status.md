@@ -1,0 +1,7 @@
+# Dependency repair pull requests
+
+Dependabot's open-alert API describes the default branch. Requiring those alerts to disappear before merging the dependency repair creates a circular prerequisite. The protected branch rule remains in place; the candidate attestation evaluates those same advisory ranges against the PR's complete committed npm lock graph.
+
+Run `scripts/security/publish-pull-request-security-status.mjs` from the exact reviewed PR head, with `GITHUB_REPOSITORY` and `PULL_REQUEST_NUMBER` set. The script reads the authenticated GitHub CLI token internally. It requires exact successful CodeQL analyses for the current PR merge commit, zero PR CodeQL alerts, zero repository secret scanning alerts, no vulnerable locked instance for any default-branch Dependabot alert, and a zero-vulnerability audit of the entire candidate dependency graph. Unsupported alert formats, manifests, ranges and unverifiable versions fail closed. Nested and aliased packages are included. The PR head and merge commit are checked again before publishing.
+
+The resulting `Zero open security alerts` status explicitly describes the PR scope. It cannot satisfy the production release attestation, which requires a different exact description. After merge, run the existing complete security-state gate against the integrated `main` commit. Wait for Dependabot to mark the repaired alerts fixed, require all three actual alert counts to be zero, and publish the fresh main attestation before creating a release. No default-branch alert is dismissed to permit integration.
