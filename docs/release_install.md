@@ -6,6 +6,14 @@ The plug-in never fetches code from the network. The only source is a file in th
 
 The feature is off until a trust file is placed on the device. There is no setting for it.
 
+## Large mobile database startup
+
+The bootstrap waits up to ten minutes for a payload to finish loading. Opening a large mobile database while storage is busy can exceed the former one-minute limit. A payload is still accepted only after its startup completes; a timed-out startup retains ownership of its cleanup and cannot overlap a fallback runtime.
+
+This limit belongs to the permanent bootstrap executable. Delivering a new payload through the vault does not change an older loader's limit. A device affected by the old timeout needs the approved release's complete, hash-verified bootstrap installation set installed locally while Obsidian is stopped. Preserve the database, pending queue, settings, local trust and earlier runtime records. The new pinned baseline then supplies the compatible recovery payload without resetting the database or retrying an already failed candidate in the old loader.
+
+The feature is off until a trust file is placed on the device. There is no setting for it.
+
 ## Turning it on: the trusted keys
 
 The trust anchor is the file `trusted-release-keys.json` in the plug-in's own folder, beside `main.js`:

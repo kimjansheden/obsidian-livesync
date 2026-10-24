@@ -371,7 +371,7 @@ describe("the real compiled CommonJS bootstrap boundary", () => {
         const plugin = f.create();
         const outcome = plugin.load().catch((error) => error);
         await vi.waitFor(() => expect(f.events).toContain("load:7"));
-        await vi.advanceTimersByTimeAsync(90_001);
+        await vi.advanceTimersByTimeAsync(630_001);
         expect(await outcome).toMatchObject({ message: expect.stringContaining("Neither") });
         expect(f.events.filter((event) => event === "load:6")).toHaveLength(1);
         startup.resolve();
@@ -385,9 +385,31 @@ describe("the real compiled CommonJS bootstrap boundary", () => {
         const plugin = f.create();
         const loading = plugin.load();
         await vi.waitFor(() => expect(f.events).toContain("load:7"));
-        await vi.advanceTimersByTimeAsync(60_001);
+        await vi.advanceTimersByTimeAsync(600_001);
         await loading;
         expect(plugin.core.release).toBe(6);
+        expect(vi.getTimerCount()).toBe(0);
+    });
+    it("accepts a healthy database startup which takes longer than one minute without starting fallback", async () => {
+        vi.useFakeTimers();
+        const f = await activateFixture("await controls.startup;");
+        const startup = deferred();
+        f.controls.startup = startup.promise;
+        const plugin = f.create();
+        let settled = false;
+        const outcome = plugin.load().then(() => {
+            settled = true;
+        });
+        await vi.waitFor(() => expect(f.events).toContain("load:7"));
+        await vi.advanceTimersByTimeAsync(120_000);
+        expect(settled).toBe(false);
+        expect(f.events).not.toContain("unload:7");
+        expect(f.events.filter((event) => event === "load:6")).toHaveLength(1);
+        expect([...f.disk.keys()].filter((path) => path.includes("/accepted-"))).toHaveLength(0);
+        startup.resolve();
+        await outcome;
+        expect(plugin.core.release).toBe(7);
+        expect([...f.disk.keys()].filter((path) => path.includes("/accepted-"))).toHaveLength(1);
         expect(vi.getTimerCount()).toBe(0);
     });
     it("forwards the host user-disabled flag so child registered views can detach", async () => {
