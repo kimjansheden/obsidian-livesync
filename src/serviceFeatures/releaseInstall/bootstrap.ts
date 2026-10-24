@@ -38,7 +38,9 @@ function pollPause(ms: number, signal: AbortSignal): Promise<void> {
         signal.addEventListener("abort", abort, { once: true });
     });
 }
-const LOAD_TIMEOUT_MS = 60_000;
+// A large mobile database can take several minutes to open while storage is busy. Keep startup
+// bounded without declaring a healthy database failed after one minute.
+const LOAD_TIMEOUT_MS = 10 * 60_000;
 function assertManifestCompatibility(manifest: PluginManifest): void {
     if (typeof manifest.minAppVersion === "string" && !requireApiVersion(manifest.minAppVersion)) {
         throw new Error(`The runtime requires Obsidian ${manifest.minAppVersion} or later`);
