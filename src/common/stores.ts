@@ -1,7 +1,7 @@
-import { PersistentMap } from "octagonal-wheels/dataobject/PersistentMap";
+import { SameChangePairs } from "./sameChangePairs";
 
-export let sameChangePairs: PersistentMap<number[]>;
+export let sameChangePairs: SameChangePairs;
 
 export function initializeStores(vaultName: string) {
-    sameChangePairs = new PersistentMap<number[]>(`ls-persist-same-changes-${vaultName}`);
+    sameChangePairs = new SameChangePairs(`ls-persist-same-changes-${vaultName}`);
 }
