@@ -30,7 +30,7 @@
         "i18n:json2yaml": "tsx _tools/json2yaml.ts",
         "i18n:yaml2json": "tsx _tools/yaml2json.ts",
         "test:unit": "vitest run --config vitest.config.unit.ts",
-        "test:release-workflow": "node --test _tools/security-release-workflow.test.mjs",
+        "test:release-workflow": "node --test _tools/security-release-workflow.test.mjs _tools/svelte-config-merge.test.mjs",
         "test:security-state-faults": "vitest run --config vitest.config.security-mutation.ts",
         "test:security-state-mutations": "stryker run",
         "security:policy": "node scripts/security/verify-repository-policy.mjs",
@@ -138,6 +138,7 @@
         "@vitest/coverage-v8": "^4.1.12",
         "@vrtmrz/obsidian-test-session": "0.2.6",
         "dotenv-cli": "^11.0.0",
+        "deepmerge": "file:./_tools/svelte-config-merge",
         "esbuild": "0.28.1",
         "esbuild-plugin-inline-worker": "^0.1.1",
         "esbuild-svelte": "^0.9.4",
@@ -187,14 +188,14 @@
         "@smithy/types": "^4.14.3",
         "@smithy/util-retry": "^4.4.5",
         "@vrtmrz/browser-ui-kit": "0.1.0",
-        "@vrtmrz/livesync-commonlib": "https://github.com/kimjansheden/livesync-commonlib/releases/download/0.1.19-security.22/vrtmrz-livesync-commonlib-0.1.19-security.22.tgz",
+        "@vrtmrz/livesync-commonlib": "https://github.com/kimjansheden/livesync-commonlib/releases/download/0.1.19-security.23/vrtmrz-livesync-commonlib-0.1.19-security.23.tgz",
         "@vrtmrz/obsidian-plugin-kit": "0.1.4",
         "@vrtmrz/ui-interactions": "0.1.2",
         "diff-match-patch": "^1.0.5",
         "fflate": "^0.8.3",
         "idb": "^8.0.3",
         "markdown-it": "^14.2.0",
-        "minimatch": "^10.2.5",
+        "minimatch": "^11.0.4",
         "obsidian": "^1.13.1",
         "octagonal-wheels": "^0.1.53",
         "qrcode-generator": "^1.4.4",
@@ -207,7 +208,7 @@
             "picomatch": "4.0.7"
         },
         "typed-rest-client": {
-            "qs": "6.16.0"
+            "qs": "6.17.1"
         },
         "pouchdb-core": {
             "uuid": "11.1.1"
@@ -215,11 +216,15 @@
         "pouchdb-utils": {
             "uuid": "11.1.1"
         },
-        "moment": "2.31.0"
+        "moment": "2.31.0",
+        "minimatch": "$minimatch",
+        "glob": "14.0.3",
+        "deepmerge": "$deepmerge"
     },
     "workspaces": [
         "src/apps/cli",
         "src/apps/webpeer",
-        "src/apps/webapp"
+        "src/apps/webapp",
+        "_tools/svelte-config-merge"
     ]
 }

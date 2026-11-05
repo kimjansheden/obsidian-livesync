@@ -24,6 +24,63 @@ test("rejects vulnerable direct, nested, aliased and prerelease instances", () =
 test("does not confuse a similarly named dependency with the reported package", () => {
     assert.equal(evaluate(lock({ "node_modules/not-vite": { version: "8.1.0" } }), [alert()]).ok, true);
 });
+
+test("resolves a replacement workspace by its declared package identity", () => {
+    const packages = {
+        "node_modules/vite": { link: true, resolved: "_tools/config-adapter" },
+        "_tools/config-adapter": { name: "@fixture/config-adapter", version: "1.0.0" },
+    };
+    assert.equal(evaluate(lock(packages), [alert()]).ok, true);
+    assert.equal(
+        evaluate(lock({ "node_modules/vite": { name: "@fixture/config-adapter", version: "1.0.0" } }), [alert()]).ok,
+        true
+    );
+});
+
+test("does not hide an affected package behind a workspace link or alias", () => {
+    assert.equal(
+        evaluate(
+            lock({
+                "node_modules/alias": { link: true, resolved: "packages/engine" },
+                "packages/engine": { name: "vite", version: "8.1.0" },
+            }),
+            [alert()]
+        ).ok,
+        false
+    );
+});
+
+test("rejects unresolved, escaping, malformed, and chained workspace links", () => {
+    for (const resolved of [
+        undefined,
+        "../outside",
+        "/outside",
+        "C:/outside",
+        "packages\\engine",
+        "packages//engine",
+        "packages/./engine",
+        "missing",
+    ]) {
+        assert.equal(evaluate(lock({ "node_modules/alias": { link: true, resolved } }), [alert()]).ok, false);
+    }
+    for (const target of [
+        {},
+        { name: "vite" },
+        { name: "vite", version: "invalid" },
+        { name: "vite", version: "8.1.6", link: true },
+    ]) {
+        assert.equal(
+            evaluate(
+                lock({
+                    "node_modules/alias": { link: true, resolved: "packages/engine" },
+                    "packages/engine": target,
+                }),
+                [alert()]
+            ).ok,
+            false
+        );
+    }
+});
 test("fails closed on missing or malformed API responses and lock graphs", () => {
     for (const invalid of [null, {}, { lockfileVersion: 3, packages: {} }])
         assert.equal(evaluate(invalid, []).ok, false);

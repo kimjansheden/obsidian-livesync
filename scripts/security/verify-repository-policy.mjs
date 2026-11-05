@@ -259,7 +259,10 @@ if (packageJson.scripts?.["test:security-state-mutations"] !== "stryker run") {
         "security-state mutation script is missing; restore test:security-state-mutations so production gate mutants block CI"
     );
 }
-if (packageJson.scripts?.["test:release-workflow"] !== "node --test _tools/security-release-workflow.test.mjs") {
+if (
+    packageJson.scripts?.["test:release-workflow"] !==
+    "node --test _tools/security-release-workflow.test.mjs _tools/svelte-config-merge.test.mjs"
+) {
     failures.push("release workflow contract tests must remain available through test:release-workflow");
 }
 

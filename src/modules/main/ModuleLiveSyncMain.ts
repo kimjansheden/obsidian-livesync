@@ -3,6 +3,7 @@ import {
     LOG_LEVEL_INFO,
     LOG_LEVEL_NOTICE,
     LOG_LEVEL_VERBOSE,
+    REMOTE_MINIO,
     type ObsidianLiveSyncSettings,
 } from "@vrtmrz/livesync-commonlib/compat/common/types";
 import {
@@ -19,6 +20,7 @@ import type { LiveSyncCore } from "@/main.ts";
 import { initialiseWorkerModule } from "@vrtmrz/livesync-commonlib/compat/worker/bgWorker";
 import { manifestVersion, packageVersion } from "@vrtmrz/livesync-commonlib/compat/common/coreEnvVars";
 import type { VaultScanOutcome } from "@vrtmrz/livesync-commonlib/compat/services/base/IService";
+import { compatGlobal, type CompatTimeoutHandle } from "@vrtmrz/livesync-commonlib/compat/common/coreEnvFunctions";
 
 function isIndexedDbReadFailure(error: unknown): boolean {
     const description = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
@@ -26,6 +28,138 @@ function isIndexedDbReadFailure(error: unknown): boolean {
 }
 
 export class ModuleLiveSyncMain extends AbstractModule {
+    private deferredScan = false;
+    private deferredScanComplete = false;
+    private deferredScanRun?: Promise<void>;
+    private deferredStartup?: CompatTimeoutHandle;
+    private initialReplicationStarted = false;
+    private deferredStopped = false;
+    private readinessAttempts = 0;
+    private resumeRequested = false;
+    private postScanReplicationPending = false;
+    private postScanReplicationRun?: Promise<void>;
+    private postScanRetry?: CompatTimeoutHandle;
+    private postScanRetryBudget = 1;
+
+    private startDeferredMobileStartup(): void {
+        if (!this.deferredScan || this.deferredStopped || this.services.appLifecycle.hasUnloaded()) return;
+        if (this.services.appLifecycle.isSuspended()) return;
+        if (!this.services.appLifecycle.isReady()) {
+            if (!this.deferredStartup && this.readinessAttempts++ < 5) {
+                this.deferredStartup = compatGlobal.setTimeout(() => {
+                    this.deferredStartup = undefined;
+                    this.startDeferredMobileStartup();
+                }, 50);
+            }
+            return;
+        }
+        this.readinessAttempts = 0;
+        if (!this.initialReplicationStarted && this.settings.syncOnStart) {
+            this.initialReplicationStarted = true;
+            fireAndForget(() => this.services.replication.replicate());
+        }
+        this.startDeferredScan();
+        void this.retryPostScanReplication();
+    }
+
+    private startDeferredScan(): void {
+        if (!this.deferredScan || this.deferredStopped || this.deferredScanComplete || this.deferredScanRun) return;
+        if (
+            this.services.appLifecycle.hasUnloaded() ||
+            this.services.appLifecycle.isSuspended() ||
+            !this.services.appLifecycle.isReady()
+        )
+            return;
+        this.deferredScanRun = this.runDeferredScan().finally(() => {
+            this.deferredScanRun = undefined;
+            if (this.resumeRequested) {
+                this.resumeRequested = false;
+                this.startDeferredMobileStartup();
+            }
+        });
+    }
+
+    private clearDeferredTimers(): void {
+        if (this.deferredStartup) compatGlobal.clearTimeout(this.deferredStartup);
+        if (this.postScanRetry) compatGlobal.clearTimeout(this.postScanRetry);
+        this.deferredStartup = undefined;
+        this.postScanRetry = undefined;
+    }
+
+    private async retryPostScanReplication(): Promise<void> {
+        if (!this.postScanReplicationPending || this.postScanReplicationRun || this.deferredStopped) return;
+        if (this.services.appLifecycle.hasUnloaded() || this.services.appLifecycle.isSuspended()) return;
+        if (this.postScanRetry) compatGlobal.clearTimeout(this.postScanRetry);
+        this.postScanRetry = undefined;
+        this.postScanReplicationRun = (async () => {
+            try {
+                const replicated = await this.services.replication.replicateByEvent();
+                if (replicated !== false) this.postScanReplicationPending = false;
+            } catch (error) {
+                this._log("Synchronisation after reconciliation is waiting for a retry", LOG_LEVEL_INFO);
+                this._log(error, LOG_LEVEL_VERBOSE);
+            } finally {
+                if (
+                    this.postScanReplicationPending &&
+                    this.postScanRetryBudget > 0 &&
+                    !this.deferredStopped &&
+                    !this.services.appLifecycle.hasUnloaded() &&
+                    !this.services.appLifecycle.isSuspended()
+                ) {
+                    this.postScanRetryBudget--;
+                    this.postScanRetry = compatGlobal.setTimeout(() => {
+                        this.postScanRetry = undefined;
+                        void this.retryPostScanReplication();
+                    }, 1_000);
+                }
+            }
+        })();
+        try {
+            await this.postScanReplicationRun;
+        } finally {
+            this.postScanReplicationRun = undefined;
+        }
+    }
+
+    private async runDeferredScan(): Promise<void> {
+        const outcome: VaultScanOutcome = {};
+        const started = Date.now();
+        try {
+            const scanned = await this.services.vault.scanVault(false, false, outcome);
+            if (this.deferredStopped || this.services.appLifecycle.hasUnloaded()) return;
+            this._log(`Continued full reconciliation: ${Date.now() - started} ms`, LOG_LEVEL_INFO);
+            if (outcome.interrupted) {
+                return;
+            }
+            const failures = outcome.failedPairs ?? 0;
+            const queued = (outcome.queuedForReflection ?? 0) + (outcome.queuedAsStorageEvents ?? 0);
+            if (scanned || (failures > 0 && queued >= failures)) {
+                this.logFilesTriedAgain(outcome);
+                this.deferredScanComplete = true;
+                this.postScanReplicationPending = true;
+                await this.retryPostScanReplication();
+                return;
+            }
+            if (this.services.appLifecycle.isSuspended()) return;
+            if (!scanned && outcome.failedPairs === undefined) {
+                // A failed scan without an aggregate result is a global safety failure.
+                this.services.appLifecycle.resetIsReady();
+                this.services.appLifecycle.setSuspended(true);
+                this._log("Full reconciliation could not be verified; synchronisation has stopped", LOG_LEVEL_NOTICE);
+                return;
+            }
+            this.logFilesTriedAgain(outcome);
+        } catch (error) {
+            if (this.deferredStopped || this.services.appLifecycle.hasUnloaded()) return;
+            this.services.appLifecycle.resetIsReady();
+            this.services.appLifecycle.setSuspended(true);
+            this._log(
+                "A database error interrupted full reconciliation; synchronisation has stopped",
+                LOG_LEVEL_NOTICE
+            );
+            this._log(error, LOG_LEVEL_VERBOSE);
+        }
+    }
     /**
      * State which files the start-up scan could not process, and how and when each is tried again.
      *
@@ -79,11 +213,16 @@ export class ModuleLiveSyncMain extends AbstractModule {
         if (this.core.services.appLifecycle.hasUnloaded()) return false;
         // Start-up continues when only individual files of the scan failed; the preparation then completes itself.
         const scanOutcome: VaultScanOutcome = {};
+        const deferFullScan =
+            this.services.API.isMobile?.() === true &&
+            this.settings.remoteType === REMOTE_MINIO &&
+            typeof this.services.vault.prepareForEarlyReplication === "function";
         let isInitialized: boolean;
         try {
             isInitialized = await this.services.databaseEvents.initialiseDatabase(false, false, false, {
                 completeAfterFailedPairs: true,
                 scanOutcome,
+                ...(deferFullScan ? { deferFullScan: true } : {}),
             });
         } catch (error) {
             if (!isIndexedDbReadFailure(error)) throw error;
@@ -102,6 +241,16 @@ export class ModuleLiveSyncMain extends AbstractModule {
         if (!(await this.core.services.appLifecycle.onFirstInitialise())) return false;
         // await this.core.$$realizeSettingSyncMode();
         await this.services.control.applySettings();
+        if (this.deferredStopped || this.services.appLifecycle.hasUnloaded()) return false;
+        this.deferredScan = deferFullScan;
+        if (deferFullScan) {
+            // The settings lifecycle can finish its resume callback before the outer ready callback has settled.
+            // Start both operations on the next task, and call replication before the background enumeration.
+            this.deferredStartup = compatGlobal.setTimeout(() => {
+                this.deferredStartup = undefined;
+                this.startDeferredMobileStartup();
+            }, 0);
+        }
         fireAndForget(async () => {
             this._log($msg("moduleLiveSyncMain.logAdditionalSafetyScan"), LOG_LEVEL_VERBOSE);
             if (!(await this.services.appLifecycle.onScanningStartupIssues())) {
@@ -243,5 +392,22 @@ export class ModuleLiveSyncMain extends AbstractModule {
         services.appLifecycle.onReady.addHandler(this._onLiveSyncReady.bind(this));
         services.appLifecycle.onWireUpEvents.addHandler(this._wireUpEvents.bind(this));
         services.appLifecycle.onLoad.addHandler(this._onLiveSyncLoad.bind(this));
+        services.appLifecycle.onResumed.addHandler(() => {
+            this.readinessAttempts = 0;
+            this.postScanRetryBudget = 1;
+            if (this.deferredScanRun) this.resumeRequested = true;
+            this.startDeferredMobileStartup();
+            return Promise.resolve(true);
+        });
+        services.appLifecycle.onSuspending.addHandler(() => {
+            this.clearDeferredTimers();
+            return Promise.resolve(true);
+        });
+        services.appLifecycle.onBeforeUnload.addHandler(() => {
+            this.deferredStopped = true;
+            this.resumeRequested = false;
+            this.clearDeferredTimers();
+            return Promise.resolve(true);
+        });
     }
 }

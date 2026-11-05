@@ -189,6 +189,21 @@ function waitingInLatestSnapshot(setSnapshot: ReturnType<typeof vi.fn>): string[
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe("ReplicateResultProcessor", () => {
+    it("keeps a path blocked by offline preparation in the durable waiting queue while other notes apply", async () => {
+        const h = setup();
+        let prepared = false;
+        h.processSynchroniseResult.mockImplementation(
+            async (entry: unknown) => (entry as { _id: string })._id !== "uncertain" || prepared
+        );
+        h.processor.enqueueAll([note("uncertain"), note("safe")]);
+        await vi.waitFor(() => expect(h.processSynchroniseResult).toHaveBeenCalledTimes(2));
+        expect(h.processSynchroniseResult).toHaveBeenCalledWith(expect.objectContaining({ _id: "safe" }));
+        await vi.waitFor(() => expect(waitingInLatestSnapshot(h.setSnapshot)).toEqual(["uncertain"]));
+        prepared = true;
+        h.processor.retryWaitingChanges();
+        await vi.waitFor(() => expect(h.processSynchroniseResult).toHaveBeenCalledTimes(3));
+    });
+
     it("applies no replicated document once the plug-in has unloaded", async () => {
         const { lifecycle, processor, processSynchroniseResult, runBoundedLocalApplicationActivity } = setup();
         lifecycle.unloaded = true;

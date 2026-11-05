@@ -16,6 +16,7 @@ Earlier releases remain available in the 1.0 release history, the 1.0 preview hi
 
 #### Fixed
 
+- Mobile devices using Object Storage can receive changes before the full local file/database scan finishes. Each incoming path protects offline edits and deletions before storage is changed, while the complete scan and persistent retries continue. The local chunk-safety check still performs a full initial inspection; a valid database-bound receipt lets subsequent starts inspect changes instead of repeating the complete history check.
 - The one-time incomplete-document integrity check now waits for the initial remote synchronisation instead of delaying recently changed notes behind a full local content audit. The check still runs automatically after that synchronisation and remains available manually.
 - Object Storage build reporting now accepts an R2 milestone read with a weak HTTP ETag while retaining the remote recovery lock. A changed object still refuses the conditional write and is read again before retrying.
 - An accepted device on a recovery-locked Object Storage remote reports its running plug-in build in the milestone without unlocking the remote. The report uses a conditional write, so a concurrent lock or device-list change is retained.

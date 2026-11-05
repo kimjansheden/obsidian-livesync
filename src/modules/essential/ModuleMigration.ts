@@ -16,7 +16,11 @@ import {
     isLoadedEntry,
     readAsBlob,
 } from "@vrtmrz/livesync-commonlib/compat/common/utils";
-import { countCompromisedChunks } from "@vrtmrz/livesync-commonlib/compat/pouchdb/negotiation";
+import {
+    countCompromisedChunks,
+    countCompromisedChunksSinceReceipt,
+} from "@vrtmrz/livesync-commonlib/compat/pouchdb/negotiation";
+import { REMOTE_MINIO } from "@vrtmrz/livesync-commonlib/compat/common/types";
 import type { LiveSyncCore } from "@/main.ts";
 import { SetupManager } from "@/modules/features/SetupManager.ts";
 import { showOnboardingInvitation } from "@/serviceFeatures/setupObsidian/setupManagerHandlers.ts";
@@ -266,7 +270,10 @@ export class ModuleMigration extends AbstractModule<LiveSyncCore> {
             return true;
         }
         // Check local database for compromised chunks
-        const localCompromised = await countCompromisedChunks(this.localDatabase.localDatabase);
+        const localCompromised =
+            this.settings.remoteType === REMOTE_MINIO
+                ? await countCompromisedChunksSinceReceipt(this.localDatabase.localDatabase, this.core.kvDB)
+                : await countCompromisedChunks(this.localDatabase.localDatabase);
         const remote = this.services.replicator.getActiveReplicator();
         const remoteCompromised = this.services.API.isOnline ? await remote?.countCompromisedChunks() : 0;
         if (localCompromised === false) {

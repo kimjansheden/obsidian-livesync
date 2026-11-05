@@ -9,6 +9,8 @@ vi.mock("@/common/utils.ts", () => ({
 }));
 
 import { ModuleMigration } from "./ModuleMigration.ts";
+import { REMOTE_MINIO, REMOTE_COUCHDB, REMOTE_P2P } from "@vrtmrz/livesync-commonlib/compat/common/types";
+import { COMPROMISED_CHUNK_SCAN_RECEIPT_KEY } from "@vrtmrz/livesync-commonlib/compat/pouchdb/negotiation";
 
 async function* noDocuments() {
     return;
@@ -71,6 +73,70 @@ function createMigration(
         saveSettingData: services.setting.saveSettingData,
     };
 }
+
+function createChunkSafetyMigration(remoteType: string = REMOTE_MINIO) {
+    const h = createMigration();
+    const receipts = new Map<string, unknown>();
+    const pouch = {
+        id: vi.fn(async () => "synthetic-plugin-db"),
+        info: vi.fn(async () => ({ update_seq: 174_019, doc_count: 174_019 })),
+        find: vi.fn(async () => ({ docs: [] as unknown[] })),
+        allDocs: vi.fn(async () => ({ rows: [] })),
+        changes: vi.fn(async () => ({ results: [], last_seq: 174_019 })),
+    };
+    Object.assign(h.migration.settings, {
+        remoteType,
+        encrypt: true,
+        isConfigured: true,
+        doctorProcessedVersion: "approved-release-20",
+    });
+    Object.assign(h.migration.core.localDatabase, { localDatabase: pouch, isReady: true });
+    Object.assign(h.migration.core.kvDB, {
+        get: vi.fn(async (key: string) => receipts.get(key)),
+        set: vi.fn(async (key: string, value: unknown) => {
+            receipts.set(key, value);
+        }),
+    });
+    const remoteCount = vi.fn(async () => 0);
+    Object.assign(h.migration.services, {
+        replicator: { getActiveReplicator: () => ({ countCompromisedChunks: remoteCount }) },
+    });
+    Object.assign(h.migration.services.API, { isOnline: true });
+    return { ...h, pouch, receipts, remoteCount };
+}
+
+describe("ModuleMigration local chunk safety receipts", () => {
+    it("requires an actual full clean scan on upgrade and then skips unchanged historical Mango scans", async () => {
+        const h = createChunkSafetyMigration();
+        expect(await h.migration.hasCompromisedChunks()).toBe(true);
+        expect(h.pouch.find).toHaveBeenCalledTimes(2);
+        expect(h.receipts.has(COMPROMISED_CHUNK_SCAN_RECEIPT_KEY)).toBe(true);
+        h.pouch.find.mockClear();
+        expect(await h.migration.hasCompromisedChunks()).toBe(true);
+        expect(h.pouch.find).not.toHaveBeenCalled();
+        expect(h.remoteCount).toHaveBeenCalledTimes(2);
+    });
+
+    it("does not promote a historical Dismiss and doctor flag into a clean receipt", async () => {
+        const h = createChunkSafetyMigration();
+        h.pouch.find.mockResolvedValue({ docs: [{ _id: "legacy", type: "leaf" }] });
+        expect(await h.migration.hasCompromisedChunks()).toBe(true);
+        expect(h.askSelectStringDialogue).toHaveBeenCalledOnce();
+        expect(h.receipts.has(COMPROMISED_CHUNK_SCAN_RECEIPT_KEY)).toBe(false);
+    });
+
+    it.each([REMOTE_COUCHDB, REMOTE_P2P])(
+        "retains the existing full local and remote checks for %s",
+        async (remoteType) => {
+            const h = createChunkSafetyMigration(remoteType);
+            await h.migration.hasCompromisedChunks();
+            await h.migration.hasCompromisedChunks();
+            expect(h.pouch.find).toHaveBeenCalledTimes(4);
+            expect(h.remoteCount).toHaveBeenCalledTimes(2);
+            expect(h.receipts.has(COMPROMISED_CHUNK_SCAN_RECEIPT_KEY)).toBe(false);
+        }
+    );
+});
 
 describe("ModuleMigration obsolete-setting migration", () => {
     it("persists the removal of an enabled automatic bulk chunk pre-send setting", async () => {
