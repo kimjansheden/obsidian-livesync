@@ -24,9 +24,37 @@ export function evaluatePullRequestDependencies(lock, alerts) {
             continue;
         }
         for (const [path, entry] of Object.entries(lock.packages)) {
-            if (entry?.name !== name && path !== `node_modules/${name}` && !path.endsWith(`/node_modules/${name}`))
+            let installed = entry;
+            if (entry?.link) {
+                const resolved = entry.resolved;
+                const target = typeof resolved === "string" ? lock.packages[resolved] : undefined;
+                if (
+                    typeof resolved !== "string" ||
+                    resolved.startsWith("/") ||
+                    resolved.includes(":") ||
+                    resolved.includes("\\") ||
+                    resolved.split("/").some((part) => !part || part === "." || part === "..") ||
+                    !target ||
+                    target.link ||
+                    typeof target.name !== "string" ||
+                    !semver.valid(target.version)
+                ) {
+                    errors.push(`The candidate has an unverified workspace link at ${path}.`);
+                    continue;
+                }
+                installed = target;
+            }
+            // Aliases and workspace links are identified by the installed package, not the import name.
+            if (
+                installed?.name
+                    ? installed.name !== name
+                    : path !== `node_modules/${name}` && !path.endsWith(`/node_modules/${name}`)
+            )
                 continue;
-            if (!semver.valid(entry.version) || semver.satisfies(entry.version, range, { includePrerelease: true })) {
+            if (
+                !semver.valid(installed.version) ||
+                semver.satisfies(installed.version, range, { includePrerelease: true })
+            ) {
                 errors.push(`The candidate still has an affected or unverified ${name} version at ${path}.`);
             }
         }

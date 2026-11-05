@@ -8,6 +8,10 @@ The feature is off until a trust file is placed on the device. There is no setti
 
 ## Large mobile database startup
 
+Mobile Object Storage installations can begin receiving after the local database and safety gates are ready, before completing the full storage/database reconciliation. Incoming paths are prepared under their storage-event locks so offline edits and deletions are preserved. Uncertain paths remain pending, and the full scan continues with persistent retries and lifecycle cancellation.
+
+The local chunk-safety check requires a complete inspection when it has no valid receipt. Subsequent checks bind that receipt to the physical database identity, policy, and verified sequence, inspecting changes when possible and returning to a complete check when that evidence is unavailable. This does not bypass Obsidian's own Vault loading or indexing.
+
 The bootstrap waits up to ten minutes for a payload to finish loading. Opening a large mobile database while storage is busy can exceed the former one-minute limit. A payload is still accepted only after its startup completes; a timed-out startup retains ownership of its cleanup and cannot overlap a fallback runtime.
 
 This limit belongs to the permanent bootstrap executable. Delivering a new payload through the vault does not change an older loader's limit. A device affected by the old timeout needs the approved release's complete, hash-verified bootstrap installation set installed locally while Obsidian is stopped. Preserve the database, pending queue, settings, local trust and earlier runtime records. The new pinned baseline then supplies the compatible recovery payload without resetting the database or retrying an already failed candidate in the old loader.
