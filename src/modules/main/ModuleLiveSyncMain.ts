@@ -96,7 +96,7 @@ export class ModuleLiveSyncMain extends AbstractModule {
                 const replicated = await this.services.replication.replicateByEvent();
                 if (replicated !== false) this.postScanReplicationPending = false;
             } catch (error) {
-                this._log("Synk efter avstämningen väntar på ett nytt försök", LOG_LEVEL_INFO);
+                this._log("Synchronisation after reconciliation is waiting for a retry", LOG_LEVEL_INFO);
                 this._log(error, LOG_LEVEL_VERBOSE);
             } finally {
                 if (
@@ -127,7 +127,7 @@ export class ModuleLiveSyncMain extends AbstractModule {
         try {
             const scanned = await this.services.vault.scanVault(false, false, outcome);
             if (this.deferredStopped || this.services.appLifecycle.hasUnloaded()) return;
-            this._log(`Fortsatt full avstämning: ${Date.now() - started} ms`, LOG_LEVEL_INFO);
+            this._log(`Continued full reconciliation: ${Date.now() - started} ms`, LOG_LEVEL_INFO);
             if (outcome.interrupted) {
                 return;
             }
@@ -145,7 +145,7 @@ export class ModuleLiveSyncMain extends AbstractModule {
                 // A failed scan without an aggregate result is a global safety failure.
                 this.services.appLifecycle.resetIsReady();
                 this.services.appLifecycle.setSuspended(true);
-                this._log("Full avstämning kunde inte verifieras; synkningen har stoppats", LOG_LEVEL_NOTICE);
+                this._log("Full reconciliation could not be verified; synchronisation has stopped", LOG_LEVEL_NOTICE);
                 return;
             }
             this.logFilesTriedAgain(outcome);
@@ -153,7 +153,10 @@ export class ModuleLiveSyncMain extends AbstractModule {
             if (this.deferredStopped || this.services.appLifecycle.hasUnloaded()) return;
             this.services.appLifecycle.resetIsReady();
             this.services.appLifecycle.setSuspended(true);
-            this._log("Full avstämning avbröts av ett databasfel; synkningen har stoppats", LOG_LEVEL_NOTICE);
+            this._log(
+                "A database error interrupted full reconciliation; synchronisation has stopped",
+                LOG_LEVEL_NOTICE
+            );
             this._log(error, LOG_LEVEL_VERBOSE);
         }
     }
