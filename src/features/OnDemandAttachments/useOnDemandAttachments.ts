@@ -277,6 +277,7 @@ export class OnDemandAttachments {
                 await io.moveToVault(record.key, target, record.stat);
                 if ((await sha256Buffer(await io.sourceRead(target))) !== record.hash)
                     throw new Error("A recovered attachment failed verification");
+                await io.archiveRecoveryRecord(record, target);
             }
             const active = s.keyValueDB.openSimpleStore<AttachmentCacheRecord>("on-demand-attachments-v1");
             for (const key of await active.keys("", "\uffff")) await active.delete(key);
@@ -418,7 +419,8 @@ export class OnDemandAttachments {
             this.links.resolve(
                 target.startsWith(resourceRoot) ? target.slice(resourceRoot.length) : target,
                 source,
-                target.startsWith(resourceRoot)
+                target.startsWith(resourceRoot),
+                app.metadataCache.getFirstLinkpathDest(target, source)?.path
             );
         const pending = new Map<HTMLElement, { path: string; source: string; raw: string; image: boolean }>();
         const seen = new WeakMap<HTMLElement, string>();

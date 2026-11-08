@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { DeferredAttachmentLinks } from "./attachmentLink";
 
+it("respects an existing resident destination before using a deferred basename", () => {
+    const links = new DeferredAttachmentLinks(["Archive/image.png"]);
+    expect(links.resolve("image.png", "Notes/note.md", false, "Notes/image.png")).toBeNull();
+    expect(links.resolve("Archive/image.png", "Notes/note.md", false, "Archive/image.png")).toBe("Archive/image.png");
+    expect(links.resolve("image.png", "Notes/note.md")).toBe("Archive/image.png");
+});
+
 describe("deferred attachment links", () => {
     it("resolves exact, encoded, parent-relative, and unique basename links", () => {
         const links = new DeferredAttachmentLinks(["Archive/image 1.png", "Archive/pdf/report.pdf"]);

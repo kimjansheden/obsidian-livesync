@@ -38,7 +38,8 @@ export class DeferredAttachmentLinks {
         this.names.get(path.slice(path.lastIndexOf("/") + 1))?.delete(path);
     }
 
-    resolve(target: string, sourcePath: string, exactResource = false): string | null {
+    resolve(target: string, sourcePath: string, exactResource = false, resolvedPath?: string): string | null {
+        if (resolvedPath && !this.paths.has(resolvedPath)) return null;
         if (!target || target.startsWith("/") || /^[a-z][a-z\d+.-]*:/iu.test(target)) return null;
         let decoded: string;
         try {

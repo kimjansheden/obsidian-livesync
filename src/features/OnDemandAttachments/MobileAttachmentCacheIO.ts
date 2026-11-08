@@ -183,10 +183,30 @@ export class MobileAttachmentCacheIO implements AttachmentCacheIO, AttachmentRec
                 const record = parseAttachmentCacheRecord(value, value.path);
                 if (`${record.key}.json` !== name || !name.startsWith(index.toString(16).padStart(2, "0")))
                     throw new Error("Attachment recovery record identity mismatch");
+                const completed = await this.readJson(this.cached(record.key).replace(/\.bin$/u, ".done.json"));
+                if (completed !== undefined && completed !== record.hash)
+                    throw new Error("Invalid attachment recovery completion");
+                if (completed === record.hash && !(await this.cacheStat(record.key))) continue;
                 records.push(record);
             }
         }
         return records;
+    }
+
+    async archiveRecoveryRecord(record: AttachmentCacheRecord, restoredPath = record.path): Promise<void> {
+        await this.saveRecoveryRecord(record);
+        if (await this.cacheStat(record.key)) return;
+        const source = await this.sourceStat(restoredPath);
+        if (
+            !source ||
+            source.size !== record.stat.size ||
+            (await sha256Buffer(await this.sourceRead(restoredPath))) !== record.hash
+        )
+            return;
+        await this.adapter.queue(async () => {
+            this.checkRunning();
+            await this.writeJson(this.cached(record.key).replace(/\.bin$/u, ".done.json"), record.hash);
+        });
     }
 
     private async nativeStat(path: string): Promise<AttachmentStat | null> {

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { App } from "obsidian";
-import { MobileAttachmentCacheIO } from "./MobileAttachmentCacheIO";
+import { MobileAttachmentCacheIO, sha256Buffer } from "./MobileAttachmentCacheIO";
 
 const base = "/storage/emulated/0/Documents/Synthetic Vault";
 const path = "Archive/example.png";
@@ -62,6 +62,34 @@ async function harness() {
 }
 
 describe("Android attachment cache IO", () => {
+    it("retires a consumed original before a later legitimate source rename or deletion", async () => {
+        const f = await harness();
+        const record = {
+            version: 1 as const,
+            path,
+            key,
+            hash: await sha256Buffer(new Uint8Array([1, 2, 3]).buffer),
+            stat,
+            phase: "restoring" as const,
+        };
+        await f.io.archiveRecoveryRecord(record);
+        f.files.delete(`${base}/${path}`);
+        expect(await f.io.recoveryRecords()).toEqual([]);
+    });
+    it("keeps unconsumed originals recoverable even when a source file already exists", async () => {
+        const f = await harness();
+        await f.io.writeCache(key, new Uint8Array([1, 2, 3]).buffer);
+        const record = {
+            version: 1 as const,
+            path,
+            key,
+            hash: await sha256Buffer(new Uint8Array([1, 2, 3]).buffer),
+            stat,
+            phase: "cached" as const,
+        };
+        await f.io.archiveRecoveryRecord(record);
+        expect(await f.io.recoveryRecords()).toEqual([record]);
+    });
     it("moves the original outside the Vault, restores exact timestamps, and reconciles only the logical path", async () => {
         const f = await harness();
         await f.io.moveToCache(path, key);

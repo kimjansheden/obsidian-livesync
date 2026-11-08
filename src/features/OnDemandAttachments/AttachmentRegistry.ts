@@ -16,6 +16,7 @@ export interface AttachmentRecoveryIO {
     readRegistryFingerprint(): Promise<string | null>;
     writeRegistryFingerprint(value: string): Promise<void>;
     saveRecoveryRecord(record: AttachmentCacheRecord): Promise<void>;
+    archiveRecoveryRecord(record: AttachmentCacheRecord): Promise<void>;
 }
 
 const emptyFingerprint = "0".repeat(64);
@@ -118,6 +119,6 @@ export class AttachmentRegistry implements AttachmentCacheStore {
     }
 
     async archive(record: AttachmentCacheRecord): Promise<void> {
-        await this.io.saveRecoveryRecord(record);
+        await this.io.archiveRecoveryRecord(record);
     }
 }

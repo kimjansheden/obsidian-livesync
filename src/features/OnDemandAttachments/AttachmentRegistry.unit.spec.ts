@@ -26,6 +26,7 @@ function harness() {
         },
     };
     const io = {
+        archiveRecoveryRecord: vi.fn(async () => {}),
         readRegistryFingerprint: async () => checkpoint,
         writeRegistryFingerprint: vi.fn(async (value: string) => {
             checkpoint = value;
