@@ -50,6 +50,10 @@ import { useCompatibilityReview } from "./serviceFeatures/compatibilityReview.ts
 import { createObsidianCompatibilityReviewUi } from "./serviceFeatures/compatibilityReviewObsidian.ts";
 import { createFileReflectionProvenance } from "./serviceModules/FileReflectionProvenance.ts";
 import {
+    useOnDemandAttachments,
+    type OnDemandAttachments,
+} from "./features/OnDemandAttachments/useOnDemandAttachments.ts";
+import {
     createQueueDowngradePreparation,
     useReleaseInstall,
 } from "./serviceFeatures/releaseInstall/useReleaseInstall.ts";
@@ -69,6 +73,7 @@ export type LiveSyncCore = LiveSyncBaseCore<ObsidianServiceContext, LiveSyncComm
 const RELEASE_NOTICE_DURATION_MS = 15_000;
 
 export default class ObsidianLiveSyncPlugin extends Plugin {
+    onDemandAttachments?: OnDemandAttachments;
     core: LiveSyncCore;
 
     /**
@@ -244,6 +249,7 @@ export default class ObsidianLiveSyncPlugin extends Plugin {
                 useDeviceSynchronisationIdentity(core);
                 useSetupManagerHandlersFeature(core, setupManager);
                 useOfflineScanner(core);
+                this.onDemandAttachments = useOnDemandAttachments(this, core);
                 useRedFlagFeatures(core);
                 useCheckRemoteSize(core);
                 const compatibilityReview = useCompatibilityReview(
@@ -273,11 +279,19 @@ export default class ObsidianLiveSyncPlugin extends Plugin {
     }
 
     private async _startUp() {
-        if (!(await trackLoadState(this.securityRelease, () => this.core.services.control.onLoad()))) return;
+        if (
+            !(await trackLoadState(this.securityRelease, async () => {
+                const started = await this.core.services.control.onLoad();
+                // Retain the recovery command shell when attachment records block normal initialisation.
+                return started || this.onDemandAttachments?.recoveryRequired === true;
+            }))
+        )
+            return;
         if (this.core.services.control.hasUnloaded()) {
             this.securityRelease.loadState = "failed";
             return;
         }
+        if (this.onDemandAttachments?.recoveryRequired) return;
         const onReady = this.core.services.control.onReady.bind(this.core.services.control);
         this.app.workspace.onLayoutReady(onReady);
     }
