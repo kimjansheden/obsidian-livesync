@@ -52,6 +52,10 @@ export interface ReleaseRuntimeEnvironment {
 /** No active executable or record is ever replaced. Torn new files cannot invalidate an earlier build. */
 export class ReleaseRuntime {
     private cancelled = false;
+    private minimumAccepted = 0;
+    get minimumAcceptedReleaseNumber(): number {
+        return this.minimumAccepted;
+    }
     constructor(private readonly env: ReleaseRuntimeEnvironment) {
         if (!HASH.test(env.baselineSha256)) throw new Error("A bootstrap requires a pinned baseline package");
     }
@@ -199,6 +203,7 @@ export class ReleaseRuntime {
             }
         }
         accepted.sort((a, b) => b.verified.releaseNumber - a.verified.releaseNumber);
+        this.minimumAccepted = Math.min(...accepted.map((item) => item.verified.releaseNumber));
         const previous = accepted[0];
         const candidates: { runtime: StoredRuntime; record: RuntimeRecord }[] = [];
         for (const sha256 of await this.names("intent")) {

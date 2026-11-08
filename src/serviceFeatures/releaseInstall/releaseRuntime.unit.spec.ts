@@ -178,6 +178,16 @@ describe("permanent bootstrap storage and recovery", () => {
         await f.runtime().start();
         expect(f.loaded).toEqual([6, 7, 6, 6]);
     });
+    it("reports the oldest runnable fallback even after accepting a newer runtime", async () => {
+        const f = await fixture();
+        const port = await staged(f);
+        await port.activate(f.candidateSha256);
+        const runtime = f.runtime();
+        expect(runtime.minimumAcceptedReleaseNumber).toBe(0);
+        await runtime.start();
+        expect(f.loaded).toEqual([6, 7]);
+        expect(runtime.minimumAcceptedReleaseNumber).toBe(6);
+    });
     it.each(["package", "intent", "attempt", "accepted"])(
         "a torn %s file leaves a complete runnable baseline",
         async (kind) => {

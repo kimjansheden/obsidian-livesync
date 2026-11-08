@@ -85,6 +85,9 @@ export default class LiveSyncBootstrap extends Plugin {
     get securityRelease(): SecurityReleaseStatus | undefined {
         return this.payload?.securityRelease;
     }
+    get minimumRuntimeReleaseNumber(): number {
+        return this.runtime?.minimumAcceptedReleaseNumber ?? 0;
+    }
 
     override async onload(): Promise<void> {
         const pluginDirectory = this.manifest.dir ?? `${this.app.vault.configDir}/plugins/${this.manifest.id}`;
