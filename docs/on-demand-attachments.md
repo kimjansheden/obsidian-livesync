@@ -4,7 +4,7 @@ On-demand attachments keep Markdown notes in the Vault while moving older attach
 
 The command **Use older attachments on demand** requires Object Storage synchronisation, the supported Android shared-storage adapter, and a bootstrap whose oldest runnable fallback supports release 22. Keep older bootstrap recovery copies outside the active plug-in directory. An older runtime must never open a Vault with deferred attachments.
 
-Preparation builds encrypted R2 chunk indexes, verifies each eligible file against its exact local database revision, saves its immutable chunk descriptor, and moves the original with an atomic native rename. It preserves notes, hidden files, recently changed files, unsupported attachment types, and files larger than 16 MiB. The initial age threshold is seven days. Files whose database revision or content cannot be proved remain resident.
+Preparation publishes pending originals, verifies each eligible file against its exact local database revision, saves its immutable chunk descriptor, and moves the original with an atomic native rename. It preserves notes, hidden files, recently changed files, unsupported attachment types, and files larger than 16 MiB. The initial age threshold is seven days. Files whose database revision or content cannot be proved remain resident. Legacy R2 indexes are resolved only when remote content is needed; preparation does not scan the entire remote archive before moving preserved originals.
 
 Synchronisation pauses during the migration. Restart Obsidian after preparation finishes, or if preparation stops. The saved records protect both complete and interrupted moves. Do not manually remove the sibling `.livesync-attachment-cache` directory or its device-local records.
 
