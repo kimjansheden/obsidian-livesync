@@ -41,6 +41,7 @@ async function harness() {
         setTimes: vi.fn(async (_path: string, _ctime: number, _mtime: number) => {}),
     };
     const adapter = {
+        onFileChange: vi.fn((_path: unknown) => {}) as (path: unknown) => void,
         fs,
         getFullPath: vi.fn((path: string) => (path ? `${base}/${path}` : base)),
         queue: async <T>(task: () => Promise<T>) => await task(),
@@ -62,6 +63,84 @@ async function harness() {
 }
 
 describe("Android attachment cache IO", () => {
+    it("defers only events for retired originals while forwarding live note changes", async () => {
+        const f = await harness(),
+            original = vi.fn((_path: unknown) => {});
+        f.adapter.onFileChange = original;
+        const retired = new Set([path]);
+        const lease = f.io.deferRetiredFileEvents((p) => retired.has(p));
+        expect(f.io.deferRetiredFileEvents(() => false)).toBe(lease);
+        const restore = await lease;
+        f.adapter.onFileChange(path);
+        f.adapter.onFileChange("/" + path);
+        expect(original).not.toHaveBeenCalled();
+        f.adapter.onFileChange("notes/live.md");
+        expect(original).toHaveBeenCalledExactlyOnceWith("notes/live.md");
+        expect(original.mock.contexts[0]).toBe(f.adapter);
+        retired.delete(path);
+        f.adapter.onFileChange(path);
+        expect(original).toHaveBeenLastCalledWith(path);
+        restore();
+        expect(f.adapter.onFileChange).toBe(original);
+    });
+    it("restores event delivery after a failed original operation", async () => {
+        const f = await harness(),
+            original = f.adapter.onFileChange;
+        const restore = await f.io.deferRetiredFileEvents(() => true);
+        try {
+            await f.io.moveToCache("../invalid.png", key);
+        } catch {
+            /* The source remains resident. */
+        } finally {
+            restore();
+        }
+        expect(f.adapter.onFileChange).toBe(original);
+        expect(f.files.has(base + "/" + path)).toBe(true);
+    });
+    it("disables its filter without replacing a later event owner", async () => {
+        const f = await harness(),
+            original = vi.fn((_path: unknown) => {});
+        f.adapter.onFileChange = original;
+        const restore = await f.io.deferRetiredFileEvents(() => true);
+        const filtered = f.adapter.onFileChange,
+            other = vi.fn((p: unknown) => filtered(p));
+        f.adapter.onFileChange = other;
+        restore();
+        f.adapter.onFileChange(path);
+        expect(f.adapter.onFileChange).toBe(other);
+        expect(original).toHaveBeenCalledExactlyOnceWith(path);
+    });
+    it("makes cleanup idempotent across consecutive batches", async () => {
+        const f = await harness();
+        const first = await f.io.deferRetiredFileEvents(() => true);
+        first();
+        const next = f.io.deferRetiredFileEvents(() => false);
+        const second = await next;
+        first();
+        expect(f.io.deferRetiredFileEvents(() => true)).toBe(next);
+        second();
+    });
+    it("forwards unknown native event values without treating them as retired paths", async () => {
+        const f = await harness(),
+            original = vi.fn((_path: unknown) => {});
+        f.adapter.onFileChange = original;
+        const restore = await f.io.deferRetiredFileEvents(() => true);
+        f.adapter.onFileChange(null);
+        f.adapter.onFileChange(undefined);
+        expect(original.mock.calls).toEqual([[null], [undefined]]);
+        restore();
+    });
+    it("does not alter event ownership after unload or without a supported handler", async () => {
+        const f = await harness(),
+            original = f.adapter.onFileChange;
+        f.stop();
+        await expect(f.io.deferRetiredFileEvents(() => true)).rejects.toThrow("stopped");
+        expect(f.adapter.onFileChange).toBe(original);
+        const g = await harness();
+        Reflect.set(g.adapter, "onFileChange", undefined);
+        await expect(g.io.deferRetiredFileEvents(() => true)).rejects.toThrow("handler is unavailable");
+        expect(g.fs.rename).not.toHaveBeenCalled();
+    });
     it("retires a consumed original before a later legitimate source rename or deletion", async () => {
         const f = await harness();
         const record = {

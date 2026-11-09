@@ -71,6 +71,10 @@ export class OnDemandAttachments {
             this.batchControl?.stop();
             return Promise.resolve(true);
         });
+        s.appLifecycle.onUnload.addHandler(async () => {
+            await this.stopOffloading();
+            return true;
+        });
         s.appLifecycle.onSettingLoaded.addHandler(async () => {
             try {
                 await this.initialise();
@@ -334,6 +338,7 @@ export class OnDemandAttachments {
             );
         this.preparationNotice?.hide();
         const notice = (this.preparationNotice = new Notice("Preparing older attachments for on-demand access…", 0));
+        let restoreFileEvents: (() => void) | undefined;
         try {
             if (!this.migrationPrepared) {
                 this.preparingReplicator = this.replicator();
@@ -362,7 +367,7 @@ export class OnDemandAttachments {
             }
             const files = this.plugin.app.vault
                 .getFiles()
-                .filter((file) => canCacheAttachment(file.path, file.stat, Date.now()));
+                .filter((file) => !cache.isDeferred(file.path) && canCacheAttachment(file.path, file.stat, Date.now()));
             const targets = await selectAttachmentTargets(
                 files.map((file) => file.path),
                 {
@@ -377,6 +382,8 @@ export class OnDemandAttachments {
             );
             if (!targets) return { moved: 0, retained: 0, stopped: true };
             this.preparedTargets = new Set(targets);
+            if (!this.recoveryIO) throw new Error("The Android attachment IO is unavailable");
+            restoreFileEvents = await this.recoveryIO.deferRetiredFileEvents((path) => cache.isDeferred(path));
             const result = await control.run(
                 targets,
                 (path) => {
@@ -409,6 +416,8 @@ export class OnDemandAttachments {
                     "Attachment offloading stopped. Original copies are kept. Restart Obsidian before resuming synchronisation."
                 );
             throw error;
+        } finally {
+            restoreFileEvents?.();
         }
     }
 
