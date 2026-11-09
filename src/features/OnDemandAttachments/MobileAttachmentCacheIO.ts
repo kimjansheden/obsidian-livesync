@@ -21,6 +21,7 @@ interface MobileNativeFileSystem {
 }
 
 interface MobileVaultAdapter extends DataAdapter {
+    onFileChange?: (path: unknown) => void;
     fs: MobileNativeFileSystem;
     getFullPath(path: string): string;
     queue<T>(task: () => Promise<T>): Promise<T>;
@@ -65,12 +66,39 @@ function attachmentStat(stat: Stat | NativeStat | null): AttachmentStat | null {
 
 /** An Android-only, opaque cache beside the Vault. Every raw native path is confined before use. */
 export class MobileAttachmentCacheIO implements AttachmentCacheIO, AttachmentRecoveryIO {
+    private eventLease?: Promise<() => void>;
     private constructor(
         private readonly adapter: MobileVaultAdapter,
         private readonly vaultRoot: string,
         private readonly cacheRoot: string,
         private readonly mayRun: () => boolean
     ) {}
+
+    deferRetiredFileEvents(isDeferred: (path: string) => boolean): Promise<() => void> {
+        if (this.eventLease) return this.eventLease;
+        const lease = this.adapter.queue(() => {
+            this.checkRunning();
+            const original = this.adapter.onFileChange;
+            if (typeof original !== "function") throw new Error("The Android file event handler is unavailable");
+            let active = true;
+            const filtered = (path: unknown) => {
+                if (active && typeof path === "string" && isDeferred(path.replace(/^\/+/u, ""))) return;
+                original.call(this.adapter, path);
+            };
+            this.adapter.onFileChange = filtered;
+            return Promise.resolve(() => {
+                if (!active) return;
+                active = false;
+                if (this.adapter.onFileChange === filtered) Reflect.set(this.adapter, "onFileChange", original);
+                this.eventLease = undefined;
+            });
+        });
+        this.eventLease = lease;
+        void lease.catch(() => {
+            if (this.eventLease === lease) this.eventLease = undefined;
+        });
+        return lease;
+    }
 
     static async create(app: App, mayRun: () => boolean = () => true): Promise<MobileAttachmentCacheIO> {
         const adapter = app.vault.adapter;
