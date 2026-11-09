@@ -18,6 +18,7 @@ import { DeferredAttachmentLinks } from "./attachmentLink";
 import { waitForAttachmentReadiness } from "./attachmentReadiness";
 import { AttachmentBatch, type AttachmentBatchResult } from "./AttachmentBatch";
 import { AttachmentRegistry } from "./AttachmentRegistry";
+import { prepareAttachmentOffload } from "./AttachmentPreparation";
 
 export const ATTACHMENT_CACHE_MIN_RELEASE = 22;
 
@@ -328,27 +329,28 @@ export class OnDemandAttachments {
         try {
             if (!this.migrationPrepared) {
                 this.preparingReplicator = this.replicator();
-                const remote = this.preparingReplicator.client.getRemoteKey();
+                const replicator = this.preparingReplicator,
+                    remote = replicator.client.getRemoteKey();
                 try {
-                    if (!(await this.preparingReplicator.replicateAllToServer(s.setting.currentSettings(), true)))
-                        throw new Error("Attachment originals could not be published before offloading");
-                    if (control.isStopped) return { moved: 0, retained: 0, stopped: true };
-                    if (!(await this.preparingReplicator.prepareOnDemandChunkIndex()))
-                        throw new Error("The R2 index could not be prepared");
-                    if (remote !== this.preparingReplicator.client.getRemoteKey())
-                        throw new Error("The remote changed during attachment preparation");
+                    const prepared = await prepareAttachmentOffload({
+                        remoteKey: () => replicator.client.getRemoteKey(),
+                        publish: () => replicator.replicateAllToServer(s.setting.currentSettings(), true),
+                        isStopped: () => control.isStopped,
+                        recordPreparation: () =>
+                            s.keyValueDB
+                                .openSimpleStore<{ needsStatusTrim: boolean }>("on-demand-attachment-config-v1")
+                                .set("migration", { needsStatusTrim: true }),
+                        suspend: () => {
+                            s.appLifecycle.setSuspended(true);
+                            return s.appLifecycle.onSuspending();
+                        },
+                    });
+                    if (!prepared) return { moved: 0, retained: 0, stopped: true };
                     this.preparedRemote = remote;
+                    this.migrationPrepared = true;
                 } finally {
                     this.preparingReplicator = undefined;
                 }
-                if (control.isStopped) return { moved: 0, retained: 0, stopped: true };
-                await s.keyValueDB
-                    .openSimpleStore<{ needsStatusTrim: boolean }>("on-demand-attachment-config-v1")
-                    .set("migration", { needsStatusTrim: true });
-                s.appLifecycle.setSuspended(true);
-                if (!(await s.appLifecycle.onSuspending()))
-                    throw new Error("Synchronisation could not be paused for attachment preparation");
-                this.migrationPrepared = true;
             }
             const files = this.plugin.app.vault
                 .getFiles()
