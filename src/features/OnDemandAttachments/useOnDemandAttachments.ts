@@ -183,7 +183,7 @@ export class OnDemandAttachments {
                     s.path.getPath(meta) !== path
                 )
                     return undefined;
-                const content = await db.fetchEntry(target, meta._rev, true, true);
+                const content = await db.fetchEntryFromMeta(meta, true, true);
                 if (!content || (await sha256Buffer(await readAsBlob(content).arrayBuffer())) !== hash)
                     return undefined;
                 if (this.disposed || s.appLifecycle.hasUnloaded()) throw new Error("Attachment preparation stopped");
@@ -366,7 +366,8 @@ export class OnDemandAttachments {
                 async (processed) => {
                     notice.setMessage(`Preparing attachments: ${processed}/${files.length}`);
                     await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
-                }
+                },
+                4
             );
             if (!this.disposed)
                 notice.setMessage(
