@@ -235,8 +235,7 @@ export class MobileAttachmentCacheIO implements AttachmentCacheIO, AttachmentRec
     }
 
     async sourceStat(path: string): Promise<AttachmentStat | null> {
-        this.source(path);
-        return attachmentStat(await this.adapter.stat(path));
+        return await this.nativeStat(this.source(path));
     }
 
     async sourceRead(path: string): Promise<ArrayBuffer> {
@@ -263,7 +262,7 @@ export class MobileAttachmentCacheIO implements AttachmentCacheIO, AttachmentRec
             await this.ensureDirectory(target.slice(0, target.lastIndexOf("/")));
             this.checkRunning();
             await this.adapter.fs.rename(source, target);
-            await this.adapter.reconcileFile(path, path, true);
+            // The deferred registry owns this path until restoration. Rebuild the file cache on restart.
         });
     }
 

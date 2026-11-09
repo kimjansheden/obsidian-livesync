@@ -93,6 +93,7 @@ describe("Android attachment cache IO", () => {
     it("moves the original outside the Vault, restores exact timestamps, and reconciles only the logical path", async () => {
         const f = await harness();
         await f.io.moveToCache(path, key);
+        expect(f.adapter.reconcileFile).not.toHaveBeenCalled();
         const target = f.fs.rename.mock.calls[0][1];
         expect(target.startsWith(`${base}/`)).toBe(false);
         expect(target).toMatch(/\/\.livesync-attachment-cache\/[a-f0-9]{64}\/aa\/[a-f0-9]{64}\.bin$/u);
@@ -102,6 +103,13 @@ describe("Android attachment cache IO", () => {
         expect(f.fs.setTimes).toHaveBeenCalledWith(`${base}/${path}`, stat.ctime, stat.mtime);
         expect(f.adapter.reconcileFile).toHaveBeenCalledWith(path, path, true);
         expect(f.files.has(`${base}/${path}`)).toBe(true);
+    });
+    it("checks native presence when the host still reports a retired file", async () => {
+        const f = await harness();
+        f.adapter.stat = async () => stat;
+        await f.io.moveToCache(path, key);
+        expect(await f.io.sourceStat(path)).toBeNull();
+        expect(await f.io.cacheStat(key)).toEqual({ size: 3, ctime: 100, mtime: 200 });
     });
     it("refuses unsafe logical paths and cache keys before native IO", async () => {
         const f = await harness();
