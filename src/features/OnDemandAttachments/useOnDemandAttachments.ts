@@ -18,7 +18,7 @@ import { DeferredAttachmentLinks } from "./attachmentLink";
 import { waitForAttachmentReadiness } from "./attachmentReadiness";
 import { AttachmentBatch, type AttachmentBatchResult } from "./AttachmentBatch";
 import { AttachmentRegistry } from "./AttachmentRegistry";
-import { prepareAttachmentOffload } from "./AttachmentPreparation";
+import { prepareAttachmentOffload, selectAttachmentTargets } from "./AttachmentPreparation";
 
 export const ATTACHMENT_CACHE_MIN_RELEASE = 22;
 
@@ -43,6 +43,7 @@ export class OnDemandAttachments {
     private preparingReplicator?: LiveSyncJournalReplicator;
     private migrationPrepared = false;
     private preparedRemote?: string;
+    private preparedTargets?: ReadonlySet<string>;
     private preparationNotice?: Notice;
     private recoveryIO?: MobileAttachmentCacheIO;
     private recovering = false;
@@ -66,6 +67,10 @@ export class OnDemandAttachments {
                 ),
             -1000
         );
+        s.setting.onSettingRealised.addHandler(() => {
+            this.batchControl?.stop();
+            return Promise.resolve(true);
+        });
         s.appLifecycle.onSettingLoaded.addHandler(async () => {
             try {
                 await this.initialise();
@@ -168,12 +173,14 @@ export class OnDemandAttachments {
             withPathLock: async (path, task) =>
                 await serialized(`processFileEvent-${await s.path.path2id(path as FilePathWithPrefix)}`, task),
             revision: async (path, hash, stat) => {
+                if (!this.preparedTargets?.has(path)) return undefined;
                 const record = await provenance.get(path as FilePathWithPrefix);
                 if (record?.pendingPublication || record?.incompleteWriteRevision)
                     throw new Error("An attachment write has not finished");
                 const db = this.core.serviceModules.databaseFileAccess;
                 const target = path as FilePathWithPrefix;
-                const meta = await db.fetchEntryMeta(target, record?.revision, true);
+                // The target policy was checked before native moves began; retain the exact revision checks here.
+                const meta = await db.fetchEntryMeta(target, record?.revision, false);
                 if (
                     !meta ||
                     !meta._rev ||
@@ -183,7 +190,7 @@ export class OnDemandAttachments {
                     s.path.getPath(meta) !== path
                 )
                     return undefined;
-                const content = await db.fetchEntryFromMeta(meta, true, true);
+                const content = await db.fetchEntryFromMeta(meta, true, false);
                 if (!content || (await sha256Buffer(await readAsBlob(content).arrayBuffer())) !== hash)
                     return undefined;
                 if (this.disposed || s.appLifecycle.hasUnloaded()) throw new Error("Attachment preparation stopped");
@@ -310,6 +317,7 @@ export class OnDemandAttachments {
             .finally(() => {
                 this.batch = undefined;
                 this.batchControl = undefined;
+                this.preparedTargets = undefined;
             })
             .catch(() => {});
         return operation;
@@ -355,8 +363,22 @@ export class OnDemandAttachments {
             const files = this.plugin.app.vault
                 .getFiles()
                 .filter((file) => canCacheAttachment(file.path, file.stat, Date.now()));
-            const result = await control.run(
+            const targets = await selectAttachmentTargets(
                 files.map((file) => file.path),
+                {
+                    isTarget: (path) => s.vault.isTargetFile(path),
+                    isStopped: () => control.isStopped,
+                    mayRun: () => !this.disposed && !s.appLifecycle.hasUnloaded(),
+                    progress: async (checked) => {
+                        notice.setMessage(`Checking attachment targets: ${checked}/${files.length}`);
+                        await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+                    },
+                }
+            );
+            if (!targets) return { moved: 0, retained: 0, stopped: true };
+            this.preparedTargets = new Set(targets);
+            const result = await control.run(
+                targets,
                 (path) => {
                     if (this.replicator().client.getRemoteKey() !== this.preparedRemote)
                         throw new Error("The remote changed after attachment preparation");
@@ -369,6 +391,7 @@ export class OnDemandAttachments {
                 },
                 4
             );
+            result.retained += files.length - targets.length;
             if (!this.disposed)
                 notice.setMessage(
                     result.stopped
