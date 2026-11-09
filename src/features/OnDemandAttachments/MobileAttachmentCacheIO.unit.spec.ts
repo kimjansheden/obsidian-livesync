@@ -49,13 +49,25 @@ async function harness() {
         stat: async (path: string) => files.get(`${base}/${path}`) ?? null,
         readBinary: fs.readBinary,
     };
-    const app = { vault: { adapter } } as unknown as App;
+    const metadataCache = {
+        fileCache: { [path]: { hash: "" } } as Record<string, unknown>,
+        preload: vi.fn(async () => {}),
+        initialize: vi.fn(async () => {}),
+        db: {
+            transaction: vi.fn(() => ({
+                store: { delete: vi.fn(async (_path: string) => {}) },
+                done: Promise.resolve(),
+            })),
+        },
+    };
+    const app = { vault: { adapter }, metadataCache } as unknown as App;
     return {
         io: await MobileAttachmentCacheIO.create(app, () => running),
         adapter,
         fs,
         files,
         contents,
+        metadataCache,
         stop: () => {
             running = false;
         },
@@ -63,6 +75,29 @@ async function harness() {
 }
 
 describe("Android attachment cache IO", () => {
+    it("commits derived-cache removal before moving an original", async () => {
+        const f = await harness();
+        f.fs.rename.mockImplementation(async (from, to) => {
+            expect(f.metadataCache.fileCache[path]).toBeUndefined();
+            expect(f.metadataCache.db.transaction).toHaveBeenCalledExactlyOnceWith("file", "readwrite");
+            const found = f.files.get(from);
+            if (!found || f.files.has(to)) throw new Error("cannot replace");
+            f.files.set(to, found);
+            f.files.delete(from);
+        });
+        await f.io.moveToCache(path, key);
+        expect(f.fs.rename).toHaveBeenCalledOnce();
+    });
+    it("keeps the original resident if the derived-cache transaction fails", async () => {
+        const f = await harness();
+        f.metadataCache.db.transaction.mockImplementation(() => {
+            throw new Error("database unavailable");
+        });
+        await expect(f.io.moveToCache(path, key)).rejects.toThrow("database unavailable");
+        expect(f.fs.rename).not.toHaveBeenCalled();
+        expect(f.files.has(`${base}/${path}`)).toBe(true);
+        expect(f.metadataCache.fileCache[path]).toBeDefined();
+    });
     it("defers only events for retired originals while forwarding live note changes", async () => {
         const f = await harness(),
             original = vi.fn((_path: unknown) => {});

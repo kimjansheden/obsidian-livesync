@@ -2,6 +2,7 @@ import type { App, DataAdapter, Stat } from "obsidian";
 import type { AttachmentCacheIO, AttachmentStat } from "./AttachmentCache";
 import { parseAttachmentCacheRecord, validAttachmentPath, type AttachmentCacheRecord } from "./AttachmentCache";
 import type { AttachmentRecoveryIO } from "./AttachmentRegistry";
+import { MobileMetadataCache } from "@/serviceFeatures/metadataCache/MobileMetadataCache";
 
 interface NativeStat {
     type: "file" | "directory";
@@ -71,6 +72,7 @@ export class MobileAttachmentCacheIO implements AttachmentCacheIO, AttachmentRec
         private readonly adapter: MobileVaultAdapter,
         private readonly vaultRoot: string,
         private readonly cacheRoot: string,
+        private readonly metadataCache: MobileMetadataCache,
         private readonly mayRun: () => boolean
     ) {}
 
@@ -114,7 +116,13 @@ export class MobileAttachmentCacheIO implements AttachmentCacheIO, AttachmentRec
         }
         const parent = base.slice(0, base.lastIndexOf("/"));
         const identity = await sha256Buffer(new TextEncoder().encode(base).buffer);
-        return new MobileAttachmentCacheIO(adapter, base, `${parent}/.livesync-attachment-cache/${identity}`, mayRun);
+        return new MobileAttachmentCacheIO(
+            adapter,
+            base,
+            `${parent}/.livesync-attachment-cache/${identity}`,
+            new MobileMetadataCache(app),
+            mayRun
+        );
     }
 
     private checkRunning(): void {
@@ -288,6 +296,8 @@ export class MobileAttachmentCacheIO implements AttachmentCacheIO, AttachmentRec
                 throw new Error("Attachment cache move cannot replace another file");
             }
             await this.ensureDirectory(target.slice(0, target.lastIndexOf("/")));
+            // Commit the derived-cache removal before the original can leave the Vault.
+            await this.metadataCache.forget([path]);
             this.checkRunning();
             await this.adapter.fs.rename(source, target);
             // The deferred registry owns this path until restoration. Rebuild the file cache on restart.

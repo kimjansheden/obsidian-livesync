@@ -6,6 +6,10 @@ import { ReleaseRuntime, type BootstrapRuntimePort } from "./releaseRuntime";
 import { parseTrustedReleaseKeys, TRUSTED_RELEASE_KEYS_FILE } from "./trustedReleaseKeys";
 import type { VerifiedReleasePackage } from "./releasePackage";
 import type { SecurityReleaseStatus } from "./releaseInstaller";
+import {
+    MobileMetadataCache,
+    MOBILE_METADATA_CACHE_FAILURE,
+} from "@/serviceFeatures/metadataCache/MobileMetadataCache";
 
 declare const LIVESYNC_BOOTSTRAP_BASELINE_SHA256: string;
 // Obsidian supplies this CommonJS require, including the exact Plugin class used by its instanceof check.
@@ -90,6 +94,11 @@ export default class LiveSyncBootstrap extends Plugin {
     }
 
     override async onload(): Promise<void> {
+        if (Platform.isAndroidApp)
+            new MobileMetadataCache(this.app).install(
+                (cleanup) => this.register(cleanup),
+                () => new Notice(MOBILE_METADATA_CACHE_FAILURE)
+            );
         const pluginDirectory = this.manifest.dir ?? `${this.app.vault.configDir}/plugins/${this.manifest.id}`;
         this.stopped = false;
         this.runtime = new ReleaseRuntime({

@@ -50,7 +50,7 @@ async function fixture() {
     ]);
     const events: string[] = [];
     const controls: Record<string, unknown> = {};
-    const compatibility = { apiAvailable: true, desktopApp: true };
+    const compatibility = { apiAvailable: true, desktopApp: true, androidApp: false };
     const styles: { textContent?: string; dataset: Record<string, string>; remove(): void; removed: boolean }[] = [];
     class Plugin {
         _loaded = false;
@@ -146,6 +146,9 @@ async function fixture() {
                 Plugin,
                 Notice: class {},
                 Platform: {
+                    get isAndroidApp() {
+                        return compatibility.androidApp;
+                    },
                     get isDesktopApp() {
                         return compatibility.desktopApp;
                     },
@@ -199,7 +202,7 @@ async function fixture() {
         if (verdict.status !== "verified") throw new Error("fixture signature");
         return { verified: verdict.package, sha256: await sha256HexOf(bytes) };
     };
-    return { create, candidate, disk, styles, events, baseline, controls, compatibility };
+    return { create, candidate, disk, styles, events, baseline, controls, compatibility, app };
 }
 function deferred() {
     let resolve!: () => void;
@@ -220,6 +223,36 @@ async function activateFixture(behavior: string) {
     return f;
 }
 describe("the real compiled CommonJS bootstrap boundary", () => {
+    it("installs Android cache preparation before waiting for the payload", async () => {
+        const f = await fixture();
+        f.compatibility.androidApp = true;
+        const fileCache: Record<string, unknown> = { "Notes/resident.md": {}, "Missing/image.png": {} };
+        const initialize = vi.fn(async () => {
+            expect(Object.keys(fileCache)).toEqual(["Notes/resident.md"]);
+        });
+        const metadataCache = {
+            fileCache,
+            preload: async () => {},
+            initialize,
+            db: { transaction: () => ({ store: { delete: async (_path: string) => {} }, done: Promise.resolve() }) },
+        };
+        Reflect.set(f.app, "metadataCache", metadataCache);
+        Reflect.set(f.app.vault, "getFileByPath", (path: string) => (path === "Notes/resident.md" ? { path } : null));
+        const gate = deferred(),
+            read = f.app.vault.adapter.readBinary;
+        vi.spyOn(f.app.vault.adapter, "readBinary").mockImplementationOnce(async (path) => {
+            await gate.promise;
+            return read(path);
+        });
+        const plugin = f.create(),
+            loading = plugin.load();
+        expect(metadataCache.initialize).not.toBe(initialize);
+        await metadataCache.initialize();
+        gate.resolve();
+        await loading;
+        plugin.unload();
+        expect(metadataCache.initialize).toBe(initialize);
+    });
     it("uses the captured Obsidian require, awaits a real child, forwards host hooks and removes CSS/events", async () => {
         const f = await fixture();
         const plugin = f.create();
