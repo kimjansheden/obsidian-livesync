@@ -58,7 +58,219 @@ function fixture(count = 3) {
     };
 }
 
+function writeFixture(staleCount = 0) {
+    const f = fixture(staleCount),
+        path = "Archive/example.png";
+    const entry = { hash: "", mtime: 100, size: 12 };
+    const files = new Map([
+        ["Notes/resident.md", { path: "Notes/resident.md", extension: "md" }],
+        [path, { path, extension: "png" }],
+    ]);
+    f.resident.mockImplementation((path) => files.get(path) ?? null);
+    f.host.fileCache[path] = { ...entry };
+    f.persisted.set(path, { ...entry });
+    const save = vi.fn(async (store: string, key: string, value: unknown) => {
+        if (store === "file") {
+            if (value === null) f.persisted.delete(key);
+            else f.persisted.set(key, value);
+        }
+        return key;
+    });
+    const host: typeof f.host & {
+        initialized: boolean;
+        transactionSave: (store: string, key: string, value: unknown) => unknown;
+    } = Object.assign(f.host, { initialized: false, transactionSave: save });
+    const cleanups: (() => void)[] = [],
+        failure = vi.fn();
+    const install = () => f.pruner.install((fn) => cleanups.push(fn), failure);
+    return { ...f, host, path, entry, save, cleanups, failure, install, files };
+}
+
 describe("Android derived file cache", () => {
+    it("retains native cache updates while skipping identical preloaded binary rows during startup", async () => {
+        const f = writeFixture();
+        const updated = { ...f.entry };
+        f.host.initialize.mockImplementation(async () => {
+            f.host.fileCache[f.path] = updated;
+            expect(await f.host.transactionSave("file", f.path, updated)).toBe(f.path);
+            await f.host.transactionSave("file", f.path, { ...updated });
+        });
+        f.install();
+        await f.host.initialize();
+        expect(f.save).not.toHaveBeenCalled();
+        expect(f.host.fileCache[f.path]).toBe(updated);
+        expect(f.persisted.get(f.path)).toEqual(f.entry);
+        expect(f.host.transactionSave).toBe(f.save);
+        await f.host.transactionSave("file", f.path, updated);
+        expect(f.save).toHaveBeenCalledOnce();
+    });
+    it("persists a changed binary row and a later reversion to its preloaded value", async () => {
+        const f = writeFixture();
+        f.host.initialize.mockImplementation(async () => {
+            await f.host.transactionSave("file", f.path, { ...f.entry, size: 13 });
+            await f.host.transactionSave("file", f.path, { ...f.entry });
+        });
+        f.install();
+        await f.host.initialize();
+        expect(f.save).toHaveBeenCalledTimes(2);
+        expect(f.persisted.get(f.path)).toEqual(f.entry);
+    });
+    it("forwards unfamiliar own fields even when expected values are inherited", async () => {
+        const f = writeFixture();
+        const incoming: unknown = Object.create(f.entry, {
+            first: { value: 1, enumerable: true },
+            second: { value: 2, enumerable: true },
+            third: { value: 3, enumerable: true },
+        });
+        f.host.initialize.mockImplementation(async () => {
+            await f.host.transactionSave("file", f.path, incoming);
+        });
+        f.install();
+        await f.host.initialize();
+        expect(f.save).toHaveBeenCalledOnce();
+        expect(f.persisted.get(f.path)).toBe(incoming);
+    });
+    it("persists a deletion and a later recreation with the same cache values", async () => {
+        const f = writeFixture();
+        f.host.initialize.mockImplementation(async () => {
+            await f.host.transactionSave("file", f.path, null);
+            await f.host.transactionSave("file", f.path, { ...f.entry });
+        });
+        f.install();
+        await f.host.initialize();
+        expect(f.save).toHaveBeenCalledTimes(2);
+        expect(f.persisted.get(f.path)).toEqual(f.entry);
+    });
+    it("forwards Markdown rows, parsed metadata, and cache records with additional fields", async () => {
+        const f = writeFixture();
+        f.host.fileCache["Notes/resident.md"] = { ...f.entry };
+        f.host.fileCache[f.path] = { ...f.entry, custom: true };
+        f.files.set("Notes/UPPER.MD", { path: "Notes/UPPER.MD", extension: "MD" });
+        f.host.fileCache["Notes/UPPER.MD"] = { ...f.entry };
+        f.host.initialize.mockImplementation(async () => {
+            await f.host.transactionSave("file", "Notes/resident.md", { ...f.entry });
+            await f.host.transactionSave("metadata", f.path, { ...f.entry });
+            await f.host.transactionSave("file", f.path, { ...f.entry, custom: true });
+            await f.host.transactionSave("file", "Notes/UPPER.MD", { ...f.entry });
+        });
+        f.install();
+        await f.host.initialize();
+        expect(f.save).toHaveBeenCalledTimes(4);
+        expect(f.host.metadataCache).toBe(f.parsedMetadata);
+    });
+    it("restores native persistence after an initialisation failure", async () => {
+        const f = writeFixture();
+        f.host.initialize.mockRejectedValue(new Error("host failed"));
+        f.install();
+        await expect(f.host.initialize()).rejects.toThrow("host failed");
+        expect(f.host.transactionSave).toBe(f.save);
+    });
+    it("restores persistence when the owner unloads during initialisation", async () => {
+        const f = writeFixture();
+        let entered!: () => void, finish!: () => void;
+        const starting = new Promise<void>((resolve) => {
+            entered = resolve;
+        });
+        const paused = new Promise<void>((resolve) => {
+            finish = resolve;
+        });
+        f.host.initialize.mockImplementation(async () => {
+            entered();
+            await paused;
+            await f.host.transactionSave("file", f.path, { ...f.entry });
+        });
+        f.install();
+        const initialising = f.host.initialize();
+        await starting;
+        f.cleanups[0]();
+        expect(f.host.transactionSave).toBe(f.save);
+        finish();
+        await initialising;
+        expect(f.save).toHaveBeenCalledOnce();
+    });
+    it("preserves a later persistence owner and disables its own write filter", async () => {
+        const f = writeFixture();
+        let later: typeof f.host.transactionSave | undefined;
+        f.host.initialize.mockImplementation(async () => {
+            const filtered = f.host.transactionSave;
+            later = (store, key, value) => filtered(store, key, value);
+            f.host.transactionSave = later;
+            await later("file", f.path, { ...f.entry });
+        });
+        f.install();
+        await f.host.initialize();
+        expect(f.host.transactionSave).toBe(later);
+        expect(f.save).not.toHaveBeenCalled();
+        await f.host.transactionSave("file", f.path, { ...f.entry });
+        expect(f.save).toHaveBeenCalledOnce();
+    });
+    it("keeps native writes when preload or pruning did not finish safely", async () => {
+        const f = writeFixture(1);
+        f.fail();
+        f.host.initialize.mockImplementation(async () => {
+            await f.host.transactionSave("file", f.path, { ...f.entry });
+        });
+        f.install();
+        await f.host.initialize();
+        expect(f.failure).toHaveBeenCalledOnce();
+        expect(f.save).toHaveBeenCalledOnce();
+    });
+    it("leaves a read-only native persistence method unchanged", async () => {
+        const f = writeFixture();
+        Object.defineProperty(f.host, "transactionSave", { value: f.save, writable: false });
+        f.host.initialize.mockImplementation(async () => {
+            await f.host.transactionSave("file", f.path, { ...f.entry });
+        });
+        f.install();
+        await f.host.initialize();
+        expect(f.host.transactionSave).toBe(f.save);
+        expect(f.save).toHaveBeenCalledOnce();
+    });
+    it.each([true, undefined])(
+        "retains ordinary writes with an existing or unknown initialisation state: %s",
+        async (state) => {
+            const f = writeFixture();
+            Reflect.set(f.host, "initialized", state);
+            f.host.initialize.mockImplementation(async () => {
+                await f.host.transactionSave("file", f.path, { ...f.entry });
+            });
+            f.install();
+            await f.host.initialize();
+            expect(f.save).toHaveBeenCalledOnce();
+        }
+    );
+    it("restores persistence after overlapping initialisation requests", async () => {
+        const f = writeFixture();
+        let firstFinish!: () => void,
+            secondFinish!: () => void,
+            entered!: () => void,
+            calls = 0;
+        const firstWait = new Promise<void>((resolve) => {
+            firstFinish = resolve;
+        });
+        const secondWait = new Promise<void>((resolve) => {
+            secondFinish = resolve;
+        });
+        const starting = new Promise<void>((resolve) => {
+            entered = resolve;
+        });
+        f.host.initialize.mockImplementation(async () => {
+            const index = calls++;
+            if (calls === 2) entered();
+            await (index === 0 ? firstWait : secondWait);
+            await f.host.transactionSave("file", f.path, { ...f.entry });
+        });
+        f.install();
+        const first = f.host.initialize(),
+            second = f.host.initialize();
+        await starting;
+        firstFinish();
+        await first;
+        secondFinish();
+        await second;
+        expect(f.host.transactionSave).toBe(f.save);
+        expect(f.save).toHaveBeenCalledOnce();
+    });
     it("keeps cache ownership bound to its Vault when the app switches Vaults", async () => {
         const original = fixture(),
             next = fixture();
