@@ -6,6 +6,14 @@ const base = "/storage/emulated/0/Documents/Synthetic Vault";
 const path = "Archive/example.png";
 const key = "a".repeat(64);
 const stat = { type: "file" as const, size: 3, ctime: 100, mtime: 200 };
+const recoveryRecord = (hash = "b".repeat(64)) => ({
+    version: 1 as const,
+    path,
+    key,
+    hash,
+    stat,
+    phase: "planned" as const,
+});
 async function harness() {
     let running = true;
     const files = new Map([[`${base}/${path}`, { ...stat }]]);
@@ -75,6 +83,69 @@ async function harness() {
 }
 
 describe("Android attachment cache IO", () => {
+    it("writes independent recovery metadata while retaining the Vault queue for original moves", async () => {
+        const f = await harness();
+        f.adapter.queue = async () => {
+            throw new Error("Vault queue unavailable");
+        };
+        await f.io.saveRecoveryRecord(recoveryRecord());
+        await f.io.writeRegistryFingerprint(key);
+        expect(await f.io.readRegistryFingerprint()).toBe(key);
+        await expect(f.io.moveToCache(path, key)).rejects.toThrow("Vault queue unavailable");
+        expect(f.files.has(`${base}/${path}`)).toBe(true);
+        expect(f.fs.rename).not.toHaveBeenCalled();
+    });
+    it("serialises competing immutable recovery descriptions before either original can be replaced", async () => {
+        const f = await harness();
+        const first = f.io.saveRecoveryRecord(recoveryRecord());
+        const second = f.io.saveRecoveryRecord(recoveryRecord("c".repeat(64)));
+        await expect(first).resolves.toBeUndefined();
+        await expect(second).rejects.toThrow("cannot replace");
+        expect(f.fs.writeBinary).toHaveBeenCalledOnce();
+        const saved = f.contents.get(f.fs.writeBinary.mock.calls[0][0]);
+        expect(JSON.parse(new TextDecoder().decode(saved)).hash).toBe("b".repeat(64));
+    });
+    it("settles the active metadata write and rejects queued metadata after unload", async () => {
+        const f = await harness(),
+            originalWrite = f.fs.writeBinary.getMockImplementation()!;
+        let release!: () => void, entered!: () => void;
+        const blocked = new Promise<void>((resolve) => {
+            release = resolve;
+        });
+        const writing = new Promise<void>((resolve) => {
+            entered = resolve;
+        });
+        f.fs.writeBinary.mockImplementation(async (target, data) => {
+            entered();
+            await blocked;
+            await originalWrite(target, data);
+        });
+        const first = f.io.writeRegistryFingerprint(key);
+        await writing;
+        const second = f.io.writeRegistryFingerprint("c".repeat(64));
+        const rejected = expect(second).rejects.toThrow("stopped");
+        let drained = false;
+        const drain = f.io.waitForRecoveryMetadata().then(() => {
+            drained = true;
+        });
+        await Promise.resolve();
+        expect(drained).toBe(false);
+        f.stop();
+        release();
+        await first;
+        await rejected;
+        await drain;
+        expect(drained).toBe(true);
+        expect(f.fs.writeBinary).toHaveBeenCalledOnce();
+        expect(await f.io.readRegistryFingerprint()).toBe(key);
+    });
+    it("keeps the metadata queue usable after a failed checkpoint write", async () => {
+        const f = await harness();
+        f.fs.writeBinary.mockRejectedValueOnce(new Error("storage unavailable"));
+        await expect(f.io.writeRegistryFingerprint(key)).rejects.toThrow("storage unavailable");
+        await f.io.writeRegistryFingerprint("c".repeat(64));
+        expect(await f.io.readRegistryFingerprint()).toBe("c".repeat(64));
+    });
     it("commits derived-cache removal before moving an original", async () => {
         const f = await harness();
         f.fs.rename.mockImplementation(async (from, to) => {

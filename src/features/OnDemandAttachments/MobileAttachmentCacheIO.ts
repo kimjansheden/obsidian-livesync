@@ -68,6 +68,7 @@ function attachmentStat(stat: Stat | NativeStat | null): AttachmentStat | null {
 /** An Android-only, opaque cache beside the Vault. Every raw native path is confined before use. */
 export class MobileAttachmentCacheIO implements AttachmentCacheIO, AttachmentRecoveryIO {
     private eventLease?: Promise<() => void>;
+    private recoveryMetadataTail: Promise<unknown> = Promise.resolve();
     private constructor(
         private readonly adapter: MobileVaultAdapter,
         private readonly vaultRoot: string,
@@ -129,6 +130,19 @@ export class MobileAttachmentCacheIO implements AttachmentCacheIO, AttachmentRec
         if (!this.mayRun()) throw new Error("Attachment file operations stopped");
     }
 
+    private queueRecoveryMetadata<T>(task: () => Promise<T>): Promise<T> {
+        const next = this.recoveryMetadataTail.then(() => {
+            this.checkRunning();
+            return task();
+        });
+        this.recoveryMetadataTail = next.catch(() => {});
+        return next;
+    }
+
+    async waitForRecoveryMetadata(): Promise<void> {
+        await this.recoveryMetadataTail;
+    }
+
     private source(path: string): string {
         if (!validAttachmentPath(path)) throw new Error("Unsafe attachment path");
         const full = this.adapter.getFullPath(path);
@@ -169,7 +183,7 @@ export class MobileAttachmentCacheIO implements AttachmentCacheIO, AttachmentRec
 
     async writeRegistryFingerprint(value: string): Promise<void> {
         if (!/^[a-f0-9]{64}$/u.test(value)) throw new Error("Invalid attachment recovery checkpoint");
-        await this.adapter.queue(async () => {
+        await this.queueRecoveryMetadata(async () => {
             this.checkRunning();
             await this.writeJson(`${this.cacheRoot}/registry.json`, value);
         });
@@ -178,7 +192,7 @@ export class MobileAttachmentCacheIO implements AttachmentCacheIO, AttachmentRec
     async saveRecoveryRecord(record: AttachmentCacheRecord): Promise<void> {
         parseAttachmentCacheRecord(record, record.path);
         const path = this.cached(record.key).replace(/\.bin$/u, ".json");
-        await this.adapter.queue(async () => {
+        await this.queueRecoveryMetadata(async () => {
             this.checkRunning();
             const existing = await this.readJson(path);
             if (existing !== undefined) {
@@ -239,7 +253,7 @@ export class MobileAttachmentCacheIO implements AttachmentCacheIO, AttachmentRec
             (await sha256Buffer(await this.sourceRead(restoredPath))) !== record.hash
         )
             return;
-        await this.adapter.queue(async () => {
+        await this.queueRecoveryMetadata(async () => {
             this.checkRunning();
             await this.writeJson(this.cached(record.key).replace(/\.bin$/u, ".done.json"), record.hash);
         });

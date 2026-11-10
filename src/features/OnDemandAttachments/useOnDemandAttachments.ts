@@ -81,6 +81,7 @@ export class OnDemandAttachments {
         });
         s.appLifecycle.onUnload.addHandler(async () => {
             await this.stopOffloading();
+            await this.recoveryIO?.waitForRecoveryMetadata();
             return true;
         });
         s.appLifecycle.onSettingLoaded.addHandler(async () => {
