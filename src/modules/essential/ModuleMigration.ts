@@ -93,12 +93,44 @@ export class ModuleMigration extends AbstractModule<LiveSyncCore> {
         showOnboardingInvitation(this.core, manager);
     }
 
-    async hasIncompleteDocs(force: boolean = false): Promise<boolean> {
+    private incompleteDocumentCheck?: { cancelled: boolean; waitingForDecision: boolean; promise: Promise<boolean> };
+
+    private canCheckIncompleteDocuments(force = false): boolean {
+        return !this.services.appLifecycle.hasUnloaded() && (force || !this.services.appLifecycle.isSuspended());
+    }
+
+    hasIncompleteDocs(force: boolean = false): Promise<boolean> {
+        if (this.incompleteDocumentCheck) return this.incompleteDocumentCheck.promise;
+        const operation = { cancelled: false, waitingForDecision: false, promise: Promise.resolve(true) };
+        this.incompleteDocumentCheck = operation;
+        const check = this.checkIncompleteDocuments(force, () => operation.cancelled);
+        operation.promise = check;
+        void check
+            .finally(() => {
+                if (this.incompleteDocumentCheck === operation) this.incompleteDocumentCheck = undefined;
+            })
+            .catch(() => {});
+        return check;
+    }
+
+    private async stopIncompleteDocumentCheck(): Promise<boolean> {
+        const operation = this.incompleteDocumentCheck;
+        if (operation) {
+            operation.cancelled = true;
+            if (!operation.waitingForDecision) await Promise.allSettled([operation.promise]);
+        }
+        return true;
+    }
+
+    private async checkIncompleteDocuments(force: boolean, cancelled: () => boolean): Promise<boolean> {
+        const canContinue = () => !cancelled() && this.canCheckIncompleteDocuments(force);
+        if (!canContinue()) return true;
         const incompleteDocsChecked = (await this.core.kvDB.get<boolean>("checkIncompleteDocs")) || false;
         if (incompleteDocsChecked && !force) {
             this._log("Incomplete docs check already done, skipping.", LOG_LEVEL_VERBOSE);
             return Promise.resolve(true);
         }
+        if (!canContinue()) return true;
 
         const noticeGroups = this.core.services.context.noticeGroups;
         noticeGroups.setItem(INCOMPLETE_DOCUMENT_NOTICE_GROUP, "checking", {
@@ -109,6 +141,7 @@ export class ModuleMigration extends AbstractModule<LiveSyncCore> {
         try {
             const errorFiles = [] as ErrorInfo[];
             for await (const metaDoc of this.localDatabase.findAllNormalDocs({ conflicts: true })) {
+                if (!canContinue()) return true;
                 const path = this.getPath(metaDoc);
 
                 if (!isValidPath(path)) {
@@ -117,11 +150,13 @@ export class ModuleMigration extends AbstractModule<LiveSyncCore> {
                 if (!(await this.services.vault.isTargetFile(path))) {
                     continue;
                 }
+                if (!canContinue()) return true;
                 if (!isMetaEntry(metaDoc)) {
                     continue;
                 }
 
                 const doc = await this.localDatabase.getDBEntryFromMeta(metaDoc);
+                if (!canContinue()) return true;
                 if (!doc || !isLoadedEntry(doc)) {
                     continue;
                 }
@@ -130,25 +165,36 @@ export class ModuleMigration extends AbstractModule<LiveSyncCore> {
                 }
                 const isConflicted = metaDoc?._conflicts && metaDoc._conflicts.length > 0;
 
-                let storageFileContent;
+                let storageStat;
                 try {
-                    storageFileContent = await this.core.storageAccess.readHiddenFileBinary(path);
+                    storageStat = await this.core.storageAccess.statHidden(path);
                 } catch (e) {
                     Logger(`Failed to read file ${path}: Possibly unprocessed or missing`);
                     Logger(e, LOG_LEVEL_VERBOSE);
                     continue;
                 }
-                // const storageFileBlob = createBlob(storageFileContent);
-                const sizeOnStorage = storageFileContent.byteLength;
+                if (!canContinue()) return true;
+                if (!storageStat || storageStat.type !== "file") continue;
                 const recordedSize = doc.size;
                 const docBlob = readAsBlob(doc);
                 const actualSize = docBlob.size;
                 if (
                     recordedSize !== actualSize ||
-                    sizeOnStorage !== actualSize ||
-                    sizeOnStorage !== recordedSize ||
+                    storageStat.size !== actualSize ||
+                    storageStat.size !== recordedSize ||
                     isConflicted
                 ) {
+                    let storageFileContent;
+                    try {
+                        storageFileContent = await this.core.storageAccess.readHiddenFileBinary(path);
+                    } catch (e) {
+                        Logger(`Failed to read file ${path}: Possibly unprocessed or missing`);
+                        Logger(e, LOG_LEVEL_VERBOSE);
+                        continue;
+                    }
+                    if (!canContinue()) return true;
+                    const sizeOnStorage = storageFileContent.byteLength;
+                    if (recordedSize === actualSize && sizeOnStorage === actualSize && !isConflicted) continue;
                     const contentMatched = await isDocContentSame(doc.data, storageFileContent);
                     errorFiles.push({
                         path,
@@ -163,6 +209,7 @@ export class ModuleMigration extends AbstractModule<LiveSyncCore> {
                     );
                 }
             }
+            if (!canContinue()) return true;
             if (errorFiles.length == 0) {
                 Logger("No size mismatches found", LOG_LEVEL_INFO);
                 noticeGroups.setItem(INCOMPLETE_DOCUMENT_NOTICE_GROUP, "result", {
@@ -212,14 +259,23 @@ export class ModuleMigration extends AbstractModule<LiveSyncCore> {
             const FIX = $msg("moduleMigration.fix0256.buttons.fix");
             const DISMISS = $msg("moduleMigration.fix0256.buttons.DismissForever");
             const buttons = recoverable.length > 0 ? [CHECK_IT_LATER, FIX, DISMISS] : [CHECK_IT_LATER, DISMISS];
-            const ret = await this.core.confirm.askSelectStringDialogue(message, buttons, {
-                title: $msg("moduleMigration.fix0256.title"),
-                defaultAction: CHECK_IT_LATER,
-            });
+            const operation = this.incompleteDocumentCheck;
+            if (operation) operation.waitingForDecision = true;
+            const ret = await this.core.confirm
+                .askSelectStringDialogue(message, buttons, {
+                    title: $msg("moduleMigration.fix0256.title"),
+                    defaultAction: CHECK_IT_LATER,
+                })
+                .finally(() => {
+                    if (operation) operation.waitingForDecision = false;
+                });
+            if (!canContinue()) return true;
             if (ret == FIX) {
                 for (const file of recoverable) {
+                    if (!canContinue()) return true;
                     // Overwrite the database with the files on the storage
                     const stubFile = await this.core.storageAccess.getFileStub(file.path);
+                    if (!canContinue()) return true;
                     if (stubFile == null) {
                         Logger(`Could not find stub file for ${file.path}`, LOG_LEVEL_NOTICE);
                         continue;
@@ -240,6 +296,7 @@ export class ModuleMigration extends AbstractModule<LiveSyncCore> {
 
             return Promise.resolve(true);
         } catch (error) {
+            if (!canContinue()) return true;
             noticeGroups.setItem(INCOMPLETE_DOCUMENT_NOTICE_GROUP, "result", {
                 message: "The incomplete document check could not be completed.",
             });
@@ -250,6 +307,7 @@ export class ModuleMigration extends AbstractModule<LiveSyncCore> {
     }
 
     async checkIncompleteDocsAfterInitialReplication(): Promise<boolean> {
+        if (!this.canCheckIncompleteDocuments()) return true;
         const incompleteDocsChecked = (await this.core.kvDB.get<boolean>("checkIncompleteDocs")) || false;
         if (incompleteDocsChecked) return true;
         const replicated = await this.services.replication.replicateByEvent();
@@ -353,5 +411,7 @@ export class ModuleMigration extends AbstractModule<LiveSyncCore> {
         services.appLifecycle.onScanningStartupIssues.addHandler(
             this.checkIncompleteDocsAfterInitialReplication.bind(this)
         );
+        services.appLifecycle.onSuspending.addHandler(this.stopIncompleteDocumentCheck.bind(this), 1000);
+        services.appLifecycle.onUnload.addHandler(this.stopIncompleteDocumentCheck.bind(this), 1000);
     }
 }
