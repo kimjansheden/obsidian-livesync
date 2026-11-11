@@ -29,6 +29,13 @@ export class ModuleReplicatorMinIO extends AbstractModule {
         )
             return Promise.resolve(true);
         const replicator = new LiveSyncJournalReplicator(this.core);
+        replicator.retainStartupPreparationOnClose = () =>
+            !this.resumedOnce &&
+            this.services.control.isApplyingSettings() &&
+            !isApplicationHidden() &&
+            !this.services.appLifecycle.hasUnloaded() &&
+            !this.settings.suspendFileWatching &&
+            !this.settings.suspendParseReplicationResult;
         this.prepared = {
             replicator,
             settings: JSON.stringify(this.settings),
@@ -41,6 +48,7 @@ export class ModuleReplicatorMinIO extends AbstractModule {
     private async stopPreparedListing(): Promise<boolean> {
         const prepared = this.prepared;
         if (prepared) {
+            prepared.replicator.retainStartupPreparationOnClose = undefined;
             prepared.replicator.closeReplication();
             await prepared.done;
             this.prepared = undefined;

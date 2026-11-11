@@ -47,6 +47,22 @@ function createModule(
 }
 
 describe("owned startup listing preparation", () => {
+    it("retains the read only during initial foreground settings application", async () => {
+        const h = preparedModule();
+        await h.start();
+        const replicator = await h.module._anyNewReplicator();
+        if (!(replicator instanceof LiveSyncJournalReplicator)) throw new Error("Synthetic replicator required");
+        expect(replicator.retainStartupPreparationOnClose?.()).toBe(false);
+        h.state.applyingSettings = true;
+        expect(replicator.retainStartupPreparationOnClose?.()).toBe(true);
+        Object.assign(h.module.core.settings, { suspendFileWatching: true });
+        expect(replicator.retainStartupPreparationOnClose?.()).toBe(false);
+        Object.assign(h.module.core.settings, { suspendFileWatching: false });
+        await h.module._everyAfterResumeProcess();
+        expect(replicator.retainStartupPreparationOnClose?.()).toBe(false);
+        await h.stop();
+        expect(replicator.retainStartupPreparationOnClose).toBeUndefined();
+    });
     function preparedModule(mobile = true, configured = true) {
         const h = createModule({
             syncOnStart: true,
@@ -62,18 +78,21 @@ describe("owned startup listing preparation", () => {
         } as unknown as ReturnType<LiveSyncJournalReplicator["setupJournalSyncClient"]>);
         const onSettingLoaded = { addHandler: vi.fn() },
             onUnload = { addHandler: vi.fn() };
-        h.module.onBindFunction(h.module.core as never, {
-            appLifecycle: {
-                onSettingLoaded,
-                onUnload,
-                onResumed: { addHandler: vi.fn() },
-                onSuspending: { addHandler: vi.fn() },
-            },
-            replicator: {
-                getNewReplicator: { addHandler: vi.fn() },
-                finiteReplicationActivityCount: reactiveSource(0),
-            },
-        } as never);
+        h.module.onBindFunction(
+            h.module.core as never,
+            {
+                appLifecycle: {
+                    onSettingLoaded,
+                    onUnload,
+                    onResumed: { addHandler: vi.fn() },
+                    onSuspending: { addHandler: vi.fn() },
+                },
+                replicator: {
+                    getNewReplicator: { addHandler: vi.fn() },
+                    finiteReplicationActivityCount: reactiveSource(0),
+                },
+            } as never
+        );
         return {
             ...h,
             prepareRemoteListing,

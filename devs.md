@@ -14,6 +14,8 @@ The first Object Storage replication precedes the background storage scan. A fiv
 
 Configured mobile hosts can prepare the ordered Object Storage listing during local startup. The prepared replicator remains owned until normal activation or teardown; preparation performs remote reads only and has a finite cancellation deadline. Normal replication revalidates both the encryption epoch and remote change marker before using that listing.
 
+Only the initial foreground settings transition may retain the bounded preparation read across replication closure. The policy ends at the first resume and refuses hidden, unloading or explicitly suspended file-processing states. Teardown clears the retention policy before closing and draining its owned reader.
+
 The Android loader can reuse a compressed snapshot of native metadata beside the Vault. It still enumerates the canonical metadata keys and reads missing entries from IndexedDB; the native decoder and file-stat reconciliation remain in use. The snapshot never replaces canonical records. Its version, checksum, and size bounds must validate before reuse; an absent or invalid snapshot uses normal native loading.
 
 Bootstrap baselines use format 2 with gzip-compressed file contents. The permanent loader verifies the pinned package hash before decoding, bounds each decompressed file and their total size, and checks the original file hashes and release marker before execution. Format 1 baselines remain readable for recovery.
