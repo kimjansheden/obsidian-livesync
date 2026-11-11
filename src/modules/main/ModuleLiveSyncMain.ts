@@ -33,6 +33,8 @@ export class ModuleLiveSyncMain extends AbstractModule {
     private deferredScanRun?: Promise<void>;
     private deferredStartup?: CompatTimeoutHandle;
     private initialReplicationStarted = false;
+    private initialReplicationPending = false;
+    private startupScanDeadline?: CompatTimeoutHandle;
     private deferredStopped = false;
     private readinessAttempts = 0;
     private resumeRequested = false;
@@ -56,7 +58,26 @@ export class ModuleLiveSyncMain extends AbstractModule {
         this.readinessAttempts = 0;
         if (!this.initialReplicationStarted && this.settings.syncOnStart) {
             this.initialReplicationStarted = true;
-            fireAndForget(() => this.services.replication.replicate());
+            this.initialReplicationPending = true;
+            fireAndForget(async () => {
+                try {
+                    await this.services.replication.replicate();
+                } finally {
+                    this.initialReplicationPending = false;
+                    if (this.startupScanDeadline) compatGlobal.clearTimeout(this.startupScanDeadline);
+                    this.startupScanDeadline = undefined;
+                    this.startDeferredMobileStartup();
+                }
+            });
+        }
+        if (this.initialReplicationPending) {
+            // Incoming notes get the first storage operations; an unavailable remote cannot hold back offline work.
+            if (!this.startupScanDeadline)
+                this.startupScanDeadline = compatGlobal.setTimeout(() => {
+                    this.startupScanDeadline = undefined;
+                    this.startDeferredScan();
+                }, 5_000);
+            return;
         }
         this.startDeferredScan();
         void this.retryPostScanReplication();
@@ -82,8 +103,10 @@ export class ModuleLiveSyncMain extends AbstractModule {
     private clearDeferredTimers(): void {
         if (this.deferredStartup) compatGlobal.clearTimeout(this.deferredStartup);
         if (this.postScanRetry) compatGlobal.clearTimeout(this.postScanRetry);
+        if (this.startupScanDeadline) compatGlobal.clearTimeout(this.startupScanDeadline);
         this.deferredStartup = undefined;
         this.postScanRetry = undefined;
+        this.startupScanDeadline = undefined;
     }
 
     private async retryPostScanReplication(): Promise<void> {

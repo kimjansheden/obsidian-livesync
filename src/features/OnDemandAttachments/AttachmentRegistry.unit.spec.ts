@@ -39,6 +39,24 @@ function harness() {
 }
 
 describe("durable attachment registry", () => {
+    it("retains the nibble-wise checkpoint format across mixed high-bit words and leading zeros", async () => {
+        const f = harness(),
+            registry = f.registry();
+        await registry.load();
+        const keys = ["ffffffff000000008000000000000001".repeat(2), "0123456789abcdef".repeat(4), "00000001".repeat(8)];
+        let expected = "0".repeat(64);
+        for (let index = 0; index < keys.length; index++) {
+            expected = [...expected]
+                .map((digit, position) => (parseInt(digit, 16) ^ parseInt(keys[index][position], 16)).toString(16))
+                .join("");
+            const path = `Archive/mixed-${index}.png`;
+            await registry.set(path, { ...record, path, key: keys[index] });
+            expect(f.io.writeRegistryFingerprint).toHaveBeenLastCalledWith(expected);
+        }
+        await expect(f.registry().load()).resolves.toBeUndefined();
+        await registry.delete("Archive/mixed-1.png");
+        await expect(f.registry().load()).resolves.toBeUndefined();
+    });
     it("starts from keys and one checkpoint without reading every record", async () => {
         const f = harness(),
             first = f.registry();

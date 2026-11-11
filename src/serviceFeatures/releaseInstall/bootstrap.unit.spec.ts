@@ -49,6 +49,7 @@ async function fixture() {
         [`${directory}/trusted-release-keys.json`, packageBytesOf({ format: 1, keys: [key.spkiBase64] })],
     ]);
     const events: string[] = [];
+    const notices: string[] = [];
     const controls: Record<string, unknown> = {};
     const compatibility = { apiAvailable: true, desktopApp: true, androidApp: false };
     const styles: { textContent?: string; dataset: Record<string, string>; remove(): void; removed: boolean }[] = [];
@@ -144,7 +145,11 @@ async function fixture() {
             if (name !== "obsidian") throw new Error("unexpected require");
             return {
                 Plugin,
-                Notice: class {},
+                Notice: class {
+                    constructor(message: string) {
+                        notices.push(message);
+                    }
+                },
                 Platform: {
                     get isAndroidApp() {
                         return compatibility.androidApp;
@@ -202,7 +207,7 @@ async function fixture() {
         if (verdict.status !== "verified") throw new Error("fixture signature");
         return { verified: verdict.package, sha256: await sha256HexOf(bytes) };
     };
-    return { create, candidate, disk, styles, events, baseline, controls, compatibility, app };
+    return { create, candidate, disk, styles, events, notices, baseline, controls, compatibility, app };
 }
 function deferred() {
     let resolve!: () => void;
@@ -223,6 +228,64 @@ async function activateFixture(behavior: string) {
     return f;
 }
 describe("the real compiled CommonJS bootstrap boundary", () => {
+    it("allows Android host loading to finish while retaining ownership of pending runtime startup", async () => {
+        const f = await activateFixture("await controls.startup;");
+        const startup = deferred();
+        f.controls.startup = startup.promise;
+        f.compatibility.androidApp = true;
+        vi.useFakeTimers();
+        const plugin = f.create();
+        await plugin.load();
+        await vi.advanceTimersByTimeAsync(0);
+        await vi.waitFor(() => expect(f.events).toContain("load:7"));
+        expect(plugin.releaseRuntimeInstance).toBeUndefined();
+        plugin.onUserEnable();
+        const settings = plugin.onExternalSettingsChange();
+        expect(f.events).not.toContain("enable:7");
+        expect(f.events).not.toContain("settings:7");
+        startup.resolve();
+        await vi.runAllTimersAsync();
+        await settings;
+        expect(plugin.releaseRuntimeInstance).toBeDefined();
+        expect(f.events).toContain("enable:7");
+        expect(f.events).toContain("settings:7");
+        plugin.unload();
+        await vi.runAllTimersAsync();
+        expect(f.events).toContain("teardown:7");
+    });
+
+    it("drains late Android startup after unload without publishing it or forwarding enable", async () => {
+        const f = await activateFixture('await controls.startup; this.register(() => events.push("late-cleanup:7"));');
+        const startup = deferred();
+        f.controls.startup = startup.promise;
+        f.compatibility.androidApp = true;
+        vi.useFakeTimers();
+        const plugin = f.create();
+        await plugin.load();
+        await vi.advanceTimersByTimeAsync(0);
+        await vi.waitFor(() => expect(f.events).toContain("load:7"));
+        plugin.onUserEnable();
+        plugin.unload();
+        startup.resolve();
+        await vi.runAllTimersAsync();
+        expect(plugin.releaseRuntimeInstance).toBeUndefined();
+        expect(f.events).not.toContain("enable:7");
+        expect(f.events).toContain("late-cleanup:7");
+        expect(f.notices).toHaveLength(0);
+    });
+
+    it("reports a failed Android background startup without publishing a runtime", async () => {
+        const f = await fixture();
+        f.compatibility.androidApp = true;
+        f.disk.delete([...f.disk.keys()].find((path) => path.endsWith(".livesync-release"))!);
+        const plugin = f.create();
+        await plugin.load();
+        await vi.waitFor(() =>
+            expect(f.notices).toContain("LiveSync could not finish starting. Reopen the vault to retry.")
+        );
+        expect(plugin.releaseRuntimeInstance).toBeUndefined();
+        plugin.unload();
+    });
     it("installs Android cache preparation before waiting for the payload", async () => {
         const f = await fixture();
         f.compatibility.androidApp = true;

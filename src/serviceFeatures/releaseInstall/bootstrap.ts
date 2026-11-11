@@ -79,6 +79,8 @@ export default class LiveSyncBootstrap extends Plugin {
     private startupAbort: AbortController | undefined;
     private payloadStopping: Promise<void> | undefined;
     private recoveryBlocked = false;
+    private initialStartup: Promise<void> | undefined;
+    private enablePending = false;
     /** Explicit host boundary; the installer compares real payload identities, not the facade. */
     get releaseRuntimeInstance(): PayloadPlugin | undefined {
         return this.published ? this.payload : undefined;
@@ -135,9 +137,23 @@ export default class LiveSyncBootstrap extends Plugin {
                 new Notice(message, 0);
             },
         });
-        await this.runtime.start();
-        if (this.stopped) throw new Error("The bootstrap unloaded during startup");
-        this.published = true;
+        this.initialStartup = this.runtime.start().then(() => {
+            if (this.stopped) throw new Error("The bootstrap unloaded during startup");
+            this.published = true;
+            if (this.enablePending) {
+                this.enablePending = false;
+                this.payload?.onUserEnable();
+            }
+        });
+        if (Platform.isAndroidApp) {
+            // The host can initialise its metadata and layout while the owned runtime opens its database.
+            // Runtime publication and release acceptance still wait for the complete verified startup.
+            void this.initialStartup.catch(() => {
+                if (!this.stopped) new Notice("LiveSync could not finish starting. Reopen the vault to retry.", 0);
+            });
+            return;
+        }
+        await this.initialStartup;
     }
     /** Keep ownership until startup and every teardown have actually settled. Timeout blocks recovery. */
     private async stopPayload(): Promise<void> {
@@ -280,14 +296,18 @@ export default class LiveSyncBootstrap extends Plugin {
         return Promise.resolve();
     }
     override onUserEnable(): void {
-        this.payload?.onUserEnable();
+        if (this.published) this.payload?.onUserEnable();
+        else this.enablePending = true;
     }
     override async onExternalSettingsChange(): Promise<void> {
+        await this.initialStartup;
+        if (this.stopped) return;
         await this.payload?.onExternalSettingsChange?.();
         Reflect.set(this, "settingTab", this.payload ? Reflect.get(this.payload, "settingTab") : null);
     }
     override onunload(): void {
         this.published = false;
+        this.enablePending = false;
         this.stopped = true;
         this.generation++;
         this.runtime?.cancel();

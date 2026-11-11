@@ -6,6 +6,12 @@ Self-hosted LiveSync is an Obsidian plugin for synchronising vaults across devic
 
 ## Build & Development Workflow
 
+### Android startup ownership
+
+The Android bootstrap permits host metadata and layout initialisation while the authenticated LiveSync runtime starts. `releaseRuntimeInstance` remains unavailable until runtime startup completes; release acceptance still waits for the loaded payload. Enable requests and external settings changes wait for that startup. Unloading cancels publication and drains the owned payload, including callbacks registered by a late startup.
+
+The first Object Storage replication precedes the background storage scan. A five-second bound permits the offline scan to proceed when the remote operation remains pending. Suspension and unload clear the delayed scan, and a late receive cannot restart an unloaded host. Tests of startup consumers must therefore distinguish completion of the Android host load from availability of the runtime.
+
 ### Environment Setup
 
 #### First-time Setup
