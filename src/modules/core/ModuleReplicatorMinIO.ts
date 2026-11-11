@@ -31,7 +31,6 @@ export class ModuleReplicatorMinIO extends AbstractModule {
         const replicator = new LiveSyncJournalReplicator(this.core);
         replicator.retainStartupPreparationOnClose = () =>
             !this.resumedOnce &&
-            this.services.control.isApplyingSettings() &&
             !isApplicationHidden() &&
             !this.services.appLifecycle.hasUnloaded() &&
             !this.settings.suspendFileWatching &&
@@ -60,7 +59,7 @@ export class ModuleReplicatorMinIO extends AbstractModule {
         const settings = { ...this.settings, ...settingOverride };
         if (settings.remoteType == REMOTE_MINIO) {
             const prepared = this.prepared;
-            const canReuse = prepared && !prepared.taken && prepared.settings === JSON.stringify(settings);
+            const canReuse = prepared && !this.resumedOnce && prepared.settings === JSON.stringify(settings);
             const replicator = canReuse ? prepared.replicator : new LiveSyncJournalReplicator(this.core);
             if (canReuse) prepared.taken = true;
             // Every synchronisation asks, also the one which sends what was written when the application is hidden.

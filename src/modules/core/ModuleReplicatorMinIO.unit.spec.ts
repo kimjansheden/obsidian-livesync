@@ -5,7 +5,10 @@ import { ModuleReplicatorMinIO } from "./ModuleReplicatorMinIO.ts";
 import { LiveSyncJournalReplicator } from "@vrtmrz/livesync-commonlib/compat/replication/journal/LiveSyncJournalReplicator";
 
 type LifecycleState = { ready: boolean; suspended: boolean; applyingSettings: boolean };
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+});
 
 function createModule(
     settings: { remoteType?: string; syncOnStart: boolean; isConfigured?: boolean; endpoint?: string; bucket?: string },
@@ -47,12 +50,15 @@ function createModule(
 }
 
 describe("owned startup listing preparation", () => {
-    it("retains the read only during initial foreground settings application", async () => {
+    it("retains the read only through initial foreground activation", async () => {
         const h = preparedModule();
         await h.start();
         const replicator = await h.module._anyNewReplicator();
         if (!(replicator instanceof LiveSyncJournalReplicator)) throw new Error("Synthetic replicator required");
+        expect(replicator.retainStartupPreparationOnClose?.()).toBe(true);
+        vi.stubGlobal("activeWindow", { document: { hidden: true } });
         expect(replicator.retainStartupPreparationOnClose?.()).toBe(false);
+        vi.stubGlobal("activeWindow", { document: { hidden: false } });
         h.state.applyingSettings = true;
         expect(replicator.retainStartupPreparationOnClose?.()).toBe(true);
         Object.assign(h.module.core.settings, { suspendFileWatching: true });
@@ -111,7 +117,9 @@ describe("owned startup listing preparation", () => {
             second = await h.module._anyNewReplicator();
         expect(first).toBeInstanceOf(LiveSyncJournalReplicator);
         expect(first).toBe(h.setup.mock.contexts[0]);
-        expect(second).not.toBe(first);
+        expect(second).toBe(first);
+        await h.module._everyAfterResumeProcess();
+        expect(await h.module._anyNewReplicator()).not.toBe(first);
         await h.stop();
         expect(h.close).toHaveBeenCalledOnce();
     });
