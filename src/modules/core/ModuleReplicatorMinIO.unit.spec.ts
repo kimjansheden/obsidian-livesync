@@ -2,14 +2,23 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { reactiveSource } from "octagonal-wheels/dataobject/reactive";
 import { REMOTE_COUCHDB, REMOTE_MINIO } from "@vrtmrz/livesync-commonlib/compat/common/types";
 import { ModuleReplicatorMinIO } from "./ModuleReplicatorMinIO.ts";
+import { LiveSyncJournalReplicator } from "@vrtmrz/livesync-commonlib/compat/replication/journal/LiveSyncJournalReplicator";
 
 type LifecycleState = { ready: boolean; suspended: boolean; applyingSettings: boolean };
+afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+});
 
-function createModule(settings: { remoteType?: string; syncOnStart: boolean }, initial: Partial<LifecycleState> = {}) {
+function createModule(
+    settings: { remoteType?: string; syncOnStart: boolean; isConfigured?: boolean; endpoint?: string; bucket?: string },
+    initial: Partial<LifecycleState> = {}
+) {
     const state: LifecycleState = { ready: true, suspended: false, applyingSettings: false, ...initial };
     const replicate = vi.fn(async () => true);
     const services = {
         API: {
+            isMobile: vi.fn(() => false),
             addLog: vi.fn(),
             addCommand: vi.fn(),
             registerWindow: vi.fn(),
@@ -17,6 +26,10 @@ function createModule(settings: { remoteType?: string; syncOnStart: boolean }, i
             registerProtocolHandler: vi.fn(),
         },
         appLifecycle: {
+            hasUnloaded: vi.fn(() => false),
+            onSettingLoaded: { addHandler: vi.fn() },
+            onUnload: { addHandler: vi.fn() },
+            onSuspending: { addHandler: vi.fn() },
             isReady: vi.fn(() => state.ready),
             isSuspended: vi.fn(() => state.suspended),
         },
@@ -36,6 +49,120 @@ function createModule(settings: { remoteType?: string; syncOnStart: boolean }, i
     return { module: new ModuleReplicatorMinIO(core), replicate, state };
 }
 
+describe("owned startup listing preparation", () => {
+    it("retains the read only through initial foreground activation", async () => {
+        const h = preparedModule();
+        await h.start();
+        const replicator = await h.module._anyNewReplicator();
+        if (!(replicator instanceof LiveSyncJournalReplicator)) throw new Error("Synthetic replicator required");
+        expect(replicator.retainStartupPreparationOnClose?.()).toBe(true);
+        vi.stubGlobal("activeWindow", { document: { hidden: true } });
+        expect(replicator.retainStartupPreparationOnClose?.()).toBe(false);
+        vi.stubGlobal("activeWindow", { document: { hidden: false } });
+        h.state.applyingSettings = true;
+        expect(replicator.retainStartupPreparationOnClose?.()).toBe(true);
+        Object.assign(h.module.core.settings, { suspendFileWatching: true });
+        expect(replicator.retainStartupPreparationOnClose?.()).toBe(false);
+        Object.assign(h.module.core.settings, { suspendFileWatching: false });
+        await h.module._everyAfterResumeProcess();
+        expect(replicator.retainStartupPreparationOnClose?.()).toBe(false);
+        await h.stop();
+        expect(replicator.retainStartupPreparationOnClose).toBeUndefined();
+    });
+    function preparedModule(mobile = true, configured = true) {
+        const h = createModule({
+            syncOnStart: true,
+            isConfigured: configured,
+            endpoint: "https://storage.example.invalid",
+            bucket: "synthetic",
+        });
+        vi.mocked(h.module.core.services.API.isMobile).mockReturnValue(mobile);
+        const prepareRemoteListing = vi.fn(async () => {});
+        const close = vi.spyOn(LiveSyncJournalReplicator.prototype, "closeReplication").mockImplementation(() => {});
+        const setup = vi.spyOn(LiveSyncJournalReplicator.prototype, "setupJournalSyncClient").mockReturnValue({
+            prepareRemoteListing,
+        } as unknown as ReturnType<LiveSyncJournalReplicator["setupJournalSyncClient"]>);
+        const onSettingLoaded = { addHandler: vi.fn() },
+            onUnload = { addHandler: vi.fn() };
+        h.module.onBindFunction(
+            h.module.core as never,
+            {
+                appLifecycle: {
+                    onSettingLoaded,
+                    onUnload,
+                    onResumed: { addHandler: vi.fn() },
+                    onSuspending: { addHandler: vi.fn() },
+                },
+                replicator: {
+                    getNewReplicator: { addHandler: vi.fn() },
+                    finiteReplicationActivityCount: reactiveSource(0),
+                },
+            } as never
+        );
+        return {
+            ...h,
+            prepareRemoteListing,
+            close,
+            setup,
+            start: onSettingLoaded.addHandler.mock.calls[0][0] as () => Promise<boolean>,
+            stop: onUnload.addHandler.mock.calls[0][0] as () => Promise<boolean>,
+        };
+    }
+    it("prepares once and hands the same instance to normal activation", async () => {
+        const h = preparedModule();
+        await h.start();
+        await h.start();
+        expect(h.prepareRemoteListing).toHaveBeenCalledOnce();
+        const first = await h.module._anyNewReplicator(),
+            second = await h.module._anyNewReplicator();
+        expect(first).toBeInstanceOf(LiveSyncJournalReplicator);
+        expect(first).toBe(h.setup.mock.contexts[0]);
+        expect(second).toBe(first);
+        await h.module._everyAfterResumeProcess();
+        expect(await h.module._anyNewReplicator()).not.toBe(first);
+        await h.stop();
+        expect(h.close).toHaveBeenCalledOnce();
+    });
+    it.each([
+        [false, true],
+        [true, false],
+    ])("avoids unrequested preparation for mobile=%s configured=%s", async (mobile, configured) => {
+        const h = preparedModule(mobile, configured);
+        await h.start();
+        expect(h.prepareRemoteListing).not.toHaveBeenCalled();
+    });
+    it("keeps ownership until an interrupted read has settled", async () => {
+        const h = preparedModule();
+        let finish!: () => void;
+        h.prepareRemoteListing.mockImplementationOnce(
+            () =>
+                new Promise((resolve) => {
+                    finish = resolve;
+                })
+        );
+        await h.start();
+        let stopped = false;
+        const stopping = h.stop().then(() => {
+            stopped = true;
+        });
+        await Promise.resolve();
+        expect(stopped).toBe(false);
+        expect(h.close).toHaveBeenCalledOnce();
+        finish();
+        await stopping;
+        expect(stopped).toBe(true);
+    });
+    it("does not hand a prepared instance to another remote configuration", async () => {
+        const h = preparedModule();
+        await h.start();
+        const other = await h.module._anyNewReplicator({ bucket: "another-synthetic-bucket" });
+        const prepared = await h.module._anyNewReplicator();
+        expect(prepared).toBe(h.setup.mock.contexts[0]);
+        expect(other).not.toBe(prepared);
+        await h.stop();
+    });
+});
+
 describe("ModuleReplicatorMinIO synchronisation when the application starts or returns", () => {
     it("synchronises from the handler it adds for the resumed application", async () => {
         const { module, replicate } = createModule({ syncOnStart: true });
@@ -45,7 +172,12 @@ describe("ModuleReplicatorMinIO synchronisation when the application starts or r
                 getNewReplicator: { addHandler: vi.fn() },
                 finiteReplicationActivityCount: reactiveSource(0),
             },
-            appLifecycle: { onResumed },
+            appLifecycle: {
+                onResumed,
+                onSettingLoaded: { addHandler: vi.fn() },
+                onUnload: { addHandler: vi.fn() },
+                onSuspending: { addHandler: vi.fn() },
+            },
         };
 
         module.onBindFunction(module.core as never, hub as never);

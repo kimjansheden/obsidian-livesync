@@ -8,11 +8,60 @@ import { AbstractModule } from "@/modules/AbstractModule";
 export class ModuleReplicatorMinIO extends AbstractModule {
     /** Whether the application has resumed since it was loaded, which the start-up does first. */
     private resumedOnce = false;
+    private prepared?: {
+        replicator: LiveSyncJournalReplicator;
+        settings: string;
+        done: Promise<void>;
+        taken: boolean;
+    };
+
+    private prepareStartupListing(): Promise<boolean> {
+        if (
+            !this.services.API.isMobile() ||
+            isApplicationHidden() ||
+            this.prepared ||
+            !this.settings.isConfigured ||
+            !this.settings.syncOnStart ||
+            this.settings.remoteType !== REMOTE_MINIO ||
+            !this.settings.endpoint ||
+            !this.settings.bucket ||
+            this.services.appLifecycle.hasUnloaded()
+        )
+            return Promise.resolve(true);
+        const replicator = new LiveSyncJournalReplicator(this.core);
+        replicator.retainStartupPreparationOnClose = () =>
+            !this.resumedOnce &&
+            !isApplicationHidden() &&
+            !this.services.appLifecycle.hasUnloaded() &&
+            !this.settings.suspendFileWatching &&
+            !this.settings.suspendParseReplicationResult;
+        this.prepared = {
+            replicator,
+            settings: JSON.stringify(this.settings),
+            done: replicator.client.prepareRemoteListing().catch(() => {}),
+            taken: false,
+        };
+        return Promise.resolve(true);
+    }
+
+    private async stopPreparedListing(): Promise<boolean> {
+        const prepared = this.prepared;
+        if (prepared) {
+            prepared.replicator.retainStartupPreparationOnClose = undefined;
+            prepared.replicator.closeReplication();
+            await prepared.done;
+            this.prepared = undefined;
+        }
+        return true;
+    }
 
     _anyNewReplicator(settingOverride: Partial<RemoteDBSettings> = {}): Promise<LiveSyncAbstractReplicator | false> {
         const settings = { ...this.settings, ...settingOverride };
         if (settings.remoteType == REMOTE_MINIO) {
-            const replicator = new LiveSyncJournalReplicator(this.core);
+            const prepared = this.prepared;
+            const canReuse = prepared && !this.resumedOnce && prepared.settings === JSON.stringify(settings);
+            const replicator = canReuse ? prepared.replicator : new LiveSyncJournalReplicator(this.core);
+            if (canReuse) prepared.taken = true;
             // Every synchronisation asks, also the one which sends what was written when the application is hidden.
             replicator.mayReceiveDeferredContent = () => this.mayReceiveDeferredContent();
             return Promise.resolve(replicator);
@@ -68,6 +117,11 @@ export class ModuleReplicatorMinIO extends AbstractModule {
     }
 
     override onBindFunction(core: LiveSyncCore, services: typeof core.services): void {
+        services.appLifecycle.onSettingLoaded.addHandler(() => this.prepareStartupListing(), 50);
+        services.appLifecycle.onSuspending.addHandler(() =>
+            this.prepared?.taken ? Promise.resolve(true) : this.stopPreparedListing()
+        );
+        services.appLifecycle.onUnload.addHandler(() => this.stopPreparedListing());
         services.replicator.getNewReplicator.addHandler(this._anyNewReplicator.bind(this));
         services.appLifecycle.onResumed.addHandler(this._everyAfterResumeProcess.bind(this));
         services.replicator.finiteReplicationActivityCount.onChanged(() => this._continueAfterDeferredReceive());

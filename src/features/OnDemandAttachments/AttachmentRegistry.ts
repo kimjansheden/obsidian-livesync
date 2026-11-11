@@ -22,11 +22,19 @@ export interface AttachmentRecoveryIO {
 const emptyFingerprint = "0".repeat(64);
 const separator = "\u0000";
 
+function xorInto(words: Uint32Array, value: string): void {
+    for (let index = 0; index < words.length; index++) {
+        words[index] ^= Number.parseInt(value.slice(index * 8, index * 8 + 8), 16);
+    }
+}
+function encodeFingerprint(words: Uint32Array): string {
+    return [...words].map((word) => word.toString(16).padStart(8, "0")).join("");
+}
 function xor(a: string, b: string): string {
-    return a
-        .split("")
-        .map((value, index) => (parseInt(value, 16) ^ parseInt(b[index], 16)).toString(16))
-        .join("");
+    const words = new Uint32Array(8);
+    xorInto(words, a);
+    xorInto(words, b);
+    return encodeFingerprint(words);
 }
 
 /** A small native checkpoint detects lost database entries without opening every cached original. */
@@ -46,6 +54,7 @@ export class AttachmentRegistry implements AttachmentCacheStore {
         this.entries.clear();
         this.fingerprint = emptyFingerprint;
         const identities = new Set<string>();
+        const fingerprint = new Uint32Array(8);
         for (const encoded of await this.storage.keys()) {
             const [path, key, extra] = encoded.split(separator);
             if (
@@ -59,8 +68,9 @@ export class AttachmentRegistry implements AttachmentCacheStore {
             }
             this.entries.set(path, key);
             identities.add(key);
-            this.fingerprint = xor(this.fingerprint, key);
+            xorInto(fingerprint, key);
         }
+        this.fingerprint = encodeFingerprint(fingerprint);
         const checkpoint = await this.io.readRegistryFingerprint();
         if ((checkpoint ?? emptyFingerprint) !== this.fingerprint) {
             throw new Error("The attachment registry needs recovery from its preserved originals");

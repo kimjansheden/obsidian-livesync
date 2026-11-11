@@ -115,6 +115,10 @@ export class LiveSyncBaseCore<
         // Move to registerModules
     ] as AbstractModule[];
 
+    get isStartupScanRunning(): boolean {
+        return this.getModule(ModuleLiveSyncMain).isStartupScanRunning;
+    }
+
     /**
      * Get a module by its class. Throws an error if not found.
      * Mostly used for getting SetupManager.

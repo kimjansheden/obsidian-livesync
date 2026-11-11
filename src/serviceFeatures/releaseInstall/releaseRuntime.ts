@@ -1,5 +1,6 @@
 /** Immutable runtime packages and activation records for the permanent bootstrap (protocol 1). */
 import { decodeCanonicalBase64, decodeStrictUtf8, hasExactKeys, isPlainObject, sha256Hex } from "./releaseBytes";
+import { readBoundedGzip } from "@/common/boundedGzip";
 import {
     readPinnedReleasePackage,
     readReleaseMarker,
@@ -12,7 +13,7 @@ import {
 export const RELEASE_RUNTIME_DIRECTORY = "release-runtime";
 export const BOOTSTRAP_PROTOCOL = 1;
 const HASH = /^[0-9a-f]{64}$/;
-const MAX_PACKAGE_BYTES = 32 * 1024 * 1024;
+export const MAX_PACKAGE_BYTES = 32 * 1024 * 1024;
 const RECORD_FIELDS = ["protocol", "packageSha256", "previousSha256"];
 export interface ReleaseRuntimeAdapter {
     readBinary(path: string): Promise<ArrayBuffer>;
@@ -260,7 +261,7 @@ export async function readBootstrapBaseline(
     if (
         !isPlainObject(parsed) ||
         !hasExactKeys(parsed, ["format", "pluginId", "releaseNumber", "files"]) ||
-        parsed.format !== "livesync-bootstrap-baseline:1" ||
+        !["livesync-bootstrap-baseline:1", "livesync-bootstrap-baseline:2"].includes(String(parsed.format)) ||
         parsed.pluginId !== context.pluginId ||
         !Number.isSafeInteger(parsed.releaseNumber) ||
         Number(parsed.releaseNumber) < 1 ||
@@ -268,6 +269,7 @@ export async function readBootstrapBaseline(
     )
         throw new Error("Invalid bootstrap baseline");
     const files: VerifiedReleasePackage["files"] = [];
+    let unpackedSize = 0;
     for (const name of RELEASE_FILE_NAMES) {
         const entries = parsed.files.filter((entry: unknown) => isPlainObject(entry) && entry.name === name);
         if (entries.length !== 1 || parsed.files.length !== RELEASE_FILE_NAMES.length)
@@ -277,11 +279,20 @@ export async function readBootstrapBaseline(
             !hasExactKeys(entry, ["name", "size", "sha256", "content"]) ||
             typeof entry.sha256 !== "string" ||
             !HASH.test(entry.sha256) ||
-            typeof entry.content !== "string"
+            typeof entry.content !== "string" ||
+            !Number.isSafeInteger(entry.size) ||
+            Number(entry.size) < 0 ||
+            Number(entry.size) > MAX_PACKAGE_BYTES ||
+            (unpackedSize += Number(entry.size)) > MAX_PACKAGE_BYTES
         )
             throw new Error("Invalid baseline file");
-        const content = decodeCanonicalBase64(entry.content);
-        if (!content || content.length !== entry.size || (await sha256Hex(context.subtle, content)) !== entry.sha256)
+        const encoded = decodeCanonicalBase64(entry.content);
+        if (!encoded) throw new Error("Invalid baseline file encoding");
+        const content =
+            parsed.format === "livesync-bootstrap-baseline:2"
+                ? await readBoundedGzip(encoded, Number(entry.size))
+                : encoded;
+        if (content.length !== entry.size || (await sha256Hex(context.subtle, content)) !== entry.sha256)
             throw new Error("Invalid baseline file hash");
         files.push({ name, bytes: content, sha256: entry.sha256 });
     }

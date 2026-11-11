@@ -267,6 +267,64 @@ describe("deferred mobile scan lifecycle", () => {
         vi.useRealTimers();
     });
 
+    it("lets the initial receive finish before the bulk scan starts", async () => {
+        vi.useFakeTimers();
+        const h = createMobileLifecycleHarness();
+        let finish!: () => void;
+        h.services.replication.replicate.mockImplementation(
+            () =>
+                new Promise((resolve) => {
+                    finish = () => resolve(true);
+                })
+        );
+        await h.module._onLiveSyncReady();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(h.services.vault.scanVault).not.toHaveBeenCalled();
+        finish();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(h.services.vault.scanVault).toHaveBeenCalledOnce();
+        await vi.runAllTimersAsync();
+    });
+
+    it("starts the offline scan within its bound even while the initial remote operation remains pending", async () => {
+        vi.useFakeTimers();
+        const h = createMobileLifecycleHarness();
+        let finish!: () => void;
+        h.services.replication.replicate.mockImplementation(
+            () =>
+                new Promise((resolve) => {
+                    finish = () => resolve(true);
+                })
+        );
+        await h.module._onLiveSyncReady();
+        await vi.advanceTimersByTimeAsync(4_999);
+        expect(h.services.vault.scanVault).not.toHaveBeenCalled();
+        await vi.advanceTimersByTimeAsync(1);
+        expect(h.services.vault.scanVault).toHaveBeenCalledOnce();
+        finish();
+        await vi.runAllTimersAsync();
+        expect(h.services.vault.scanVault).toHaveBeenCalledOnce();
+    });
+
+    it("cancels delayed startup scanning and a late receive continuation on unload", async () => {
+        vi.useFakeTimers();
+        const h = createMobileLifecycleHarness();
+        let finish!: () => void;
+        h.services.replication.replicate.mockImplementation(
+            () =>
+                new Promise((resolve) => {
+                    finish = () => resolve(true);
+                })
+        );
+        await h.module._onLiveSyncReady();
+        await vi.advanceTimersByTimeAsync(0);
+        await h.services.appLifecycle.onBeforeUnload();
+        finish();
+        await vi.runAllTimersAsync();
+        expect(h.services.vault.scanVault).not.toHaveBeenCalled();
+        expect(vi.getTimerCount()).toBe(0);
+    });
+
     it("schedules replication with the real migration gate while a 174k historical rescan is blocked", async () => {
         vi.useFakeTimers();
         const h = createMobileLifecycleHarness();

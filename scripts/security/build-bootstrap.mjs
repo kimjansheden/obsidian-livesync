@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
+import { gzipSync } from "node:zlib";
 import esbuild from "esbuild";
 import { enforceReleaseMarker, readReleaseNumber, releaseMarkerText } from "./verify-release-marker.mjs";
 
@@ -12,15 +13,17 @@ export async function buildBootstrap() {
     const files = [];
     for (const name of ["main.js", "manifest.json", "styles.css"]) {
         const bytes = await readFile(name);
-        files.push({ name, size: bytes.length, sha256: hash(bytes), content: bytes.toString("base64") });
+        if (name === "main.js") enforceReleaseMarker({ mainJs: bytes, releaseNumber: readReleaseNumber(security) });
+        files.push({
+            name,
+            size: bytes.length,
+            sha256: hash(bytes),
+            content: gzipSync(bytes, { level: 9 }).toString("base64"),
+        });
     }
-    enforceReleaseMarker({
-        mainJs: Buffer.from(files[0].content, "base64"),
-        releaseNumber: readReleaseNumber(security),
-    });
     const baseline = Buffer.from(
         JSON.stringify({
-            format: "livesync-bootstrap-baseline:1",
+            format: "livesync-bootstrap-baseline:2",
             pluginId: manifest.id,
             releaseNumber: readReleaseNumber(security),
             files,

@@ -19,6 +19,10 @@ import { waitForAttachmentReadiness } from "./attachmentReadiness";
 import { AttachmentBatch, type AttachmentBatchResult } from "./AttachmentBatch";
 import { AttachmentRegistry } from "./AttachmentRegistry";
 import { prepareAttachmentOffload, selectAttachmentTargets } from "./AttachmentPreparation";
+import {
+    MobileMetadataCache,
+    MOBILE_METADATA_CACHE_FAILURE,
+} from "@/serviceFeatures/metadataCache/MobileMetadataCache";
 
 export const ATTACHMENT_CACHE_MIN_RELEASE = 22;
 
@@ -54,6 +58,10 @@ export class OnDemandAttachments {
         private readonly core: LiveSyncCore
     ) {
         const s = core.services;
+        new MobileMetadataCache(plugin.app).install(
+            (cleanup) => plugin.register(cleanup),
+            () => new Notice(MOBILE_METADATA_CACHE_FAILURE)
+        );
         plugin.register(() => {
             this.disposed = true;
             this.batchControl?.stop();
@@ -73,6 +81,7 @@ export class OnDemandAttachments {
         });
         s.appLifecycle.onUnload.addHandler(async () => {
             await this.stopOffloading();
+            await this.recoveryIO?.waitForRecoveryMetadata();
             return true;
         });
         s.appLifecycle.onSettingLoaded.addHandler(async () => {

@@ -1,11 +1,22 @@
 /** Permanent Obsidian entry point. Its executable is installed locally once and never updated through the vault. */
-import { Platform, Plugin, Notice, requireApiVersion, type PluginManifest } from "obsidian";
+import { Platform, Plugin, Notice, requireApiVersion, apiVersion, type PluginManifest } from "obsidian";
+import { MobileAttachmentCacheIO } from "@/features/OnDemandAttachments/MobileAttachmentCacheIO";
+import {
+    NativeMetadataSnapshot,
+    type NativeMetadataHost,
+} from "@/serviceFeatures/metadataCache/NativeMetadataSnapshot";
+import type { LiveSyncCore } from "@/main";
+import { LocalRuntimeReader } from "./LocalRuntimeReader";
 import { RELEASE_MARKER_PREFIX } from "./runningRelease";
 import { decodeStrictUtf8 } from "./releaseBytes";
 import { ReleaseRuntime, type BootstrapRuntimePort } from "./releaseRuntime";
 import { parseTrustedReleaseKeys, TRUSTED_RELEASE_KEYS_FILE } from "./trustedReleaseKeys";
 import type { VerifiedReleasePackage } from "./releasePackage";
 import type { SecurityReleaseStatus } from "./releaseInstaller";
+import {
+    MobileMetadataCache,
+    MOBILE_METADATA_CACHE_FAILURE,
+} from "@/serviceFeatures/metadataCache/MobileMetadataCache";
 
 declare const LIVESYNC_BOOTSTRAP_BASELINE_SHA256: string;
 // Obsidian supplies this CommonJS require, including the exact Plugin class used by its instanceof check.
@@ -75,6 +86,10 @@ export default class LiveSyncBootstrap extends Plugin {
     private startupAbort: AbortController | undefined;
     private payloadStopping: Promise<void> | undefined;
     private recoveryBlocked = false;
+    private initialStartup: Promise<void> | undefined;
+    private enablePending = false;
+    private metadataSnapshot: NativeMetadataSnapshot | undefined;
+    private localRuntimeReader: LocalRuntimeReader | undefined;
     /** Explicit host boundary; the installer compares real payload identities, not the facade. */
     get releaseRuntimeInstance(): PayloadPlugin | undefined {
         return this.published ? this.payload : undefined;
@@ -90,10 +105,58 @@ export default class LiveSyncBootstrap extends Plugin {
     }
 
     override async onload(): Promise<void> {
+        if (Platform.isAndroidApp) {
+            const host = this.app.metadataCache as unknown as Partial<NativeMetadataHost>;
+            if (typeof host?._preload === "function" && typeof host.inProgressTaskCount === "number") {
+                let io: Promise<MobileAttachmentCacheIO> | undefined;
+                const storage = () => (io ??= MobileAttachmentCacheIO.create(this.app, () => !this.stopped));
+                this.metadataSnapshot = new NativeMetadataSnapshot(
+                    host as NativeMetadataHost,
+                    {
+                        readMetadataSnapshot: async () => await (await storage()).readMetadataSnapshot(),
+                        writeMetadataSnapshot: async (bytes) => await (await storage()).writeMetadataSnapshot(bytes),
+                    },
+                    apiVersion,
+                    () => {
+                        const core = this.payload?.core as Partial<LiveSyncCore> | undefined;
+                        return (
+                            !this.stopped &&
+                            this.published &&
+                            !document.hidden &&
+                            core?.services?.appLifecycle?.isReady() === true &&
+                            core.services.fileProcessing.processing.value === 0 &&
+                            core.services.fileProcessing.totalQueued.value === 0 &&
+                            core.services.replicator.boundedRemoteActivityCount.value === 0 &&
+                            core.isStartupScanRunning === false &&
+                            core.services.replicator.replicationStatics.value.syncStatus === "COMPLETED"
+                        );
+                    }
+                );
+                this.metadataSnapshot.install((cleanup) => this.register(cleanup));
+                const resolved = this.app.metadataCache.on("resolved", () =>
+                    this.metadataSnapshot?.requestPreparation()
+                );
+                this.registerEvent(resolved);
+            }
+            new MobileMetadataCache(this.app).install(
+                (cleanup) => this.register(cleanup),
+                () => new Notice(MOBILE_METADATA_CACHE_FAILURE)
+            );
+        }
         const pluginDirectory = this.manifest.dir ?? `${this.app.vault.configDir}/plugins/${this.manifest.id}`;
+        const adapter = this.app.vault.adapter;
+        if (Platform.isAndroidApp) this.localRuntimeReader = new LocalRuntimeReader(adapter, pluginDirectory);
+        const readRuntime = (path: string) =>
+            this.stopped ? adapter.readBinary(path) : (this.localRuntimeReader?.read(path) ?? adapter.readBinary(path));
         this.stopped = false;
         this.runtime = new ReleaseRuntime({
-            adapter: this.app.vault.adapter,
+            adapter: {
+                readBinary: readRuntime,
+                writeBinary: adapter.writeBinary.bind(adapter),
+                exists: adapter.exists.bind(adapter),
+                mkdir: adapter.mkdir.bind(adapter),
+                list: adapter.list.bind(adapter),
+            },
             pluginDirectory,
             baselineSha256: LIVESYNC_BOOTSTRAP_BASELINE_SHA256,
             verification: async () => {
@@ -103,9 +166,7 @@ export default class LiveSyncBootstrap extends Plugin {
                 };
                 try {
                     trustedKeys = await parseTrustedReleaseKeys(
-                        new Uint8Array(
-                            await this.app.vault.adapter.readBinary(`${pluginDirectory}/${TRUSTED_RELEASE_KEYS_FILE}`)
-                        ),
+                        new Uint8Array(await readRuntime(`${pluginDirectory}/${TRUSTED_RELEASE_KEYS_FILE}`)),
                         window.crypto.subtle
                     );
                 } catch {
@@ -126,13 +187,43 @@ export default class LiveSyncBootstrap extends Plugin {
                 new Notice(message, 0);
             },
         });
-        await this.runtime.start();
-        if (this.stopped) throw new Error("The bootstrap unloaded during startup");
-        this.published = true;
+        this.initialStartup = this.runtime.start().then(() => {
+            if (this.stopped) throw new Error("The bootstrap unloaded during startup");
+            this.published = true;
+            if (this.enablePending) {
+                this.enablePending = false;
+                this.payload?.onUserEnable();
+            }
+        });
+        if (Platform.isAndroidApp) {
+            // The host can initialise its metadata and layout while the owned runtime opens its database.
+            // Runtime publication and release acceptance still wait for the complete verified startup.
+            void this.initialStartup.catch(() => {
+                if (!this.stopped) new Notice("LiveSync could not finish starting. Reopen the vault to retry.", 0);
+            });
+            return;
+        }
+        await this.initialStartup;
     }
     /** Keep ownership until startup and every teardown have actually settled. Timeout blocks recovery. */
     private async stopPayload(): Promise<void> {
         if (this.recoveryBlocked) throw new Error("Runtime cleanup did not settle; restart Obsidian before recovery");
+        if (this.localRuntimeReader?.hasPendingReads) {
+            try {
+                await bounded(this.localRuntimeReader.waitForIdle(), 30_000);
+            } catch (error) {
+                this.recoveryBlocked = true;
+                throw error;
+            }
+        }
+        if (this.metadataSnapshot?.hasPendingPreparation) {
+            try {
+                await bounded(this.metadataSnapshot.waitForPreparation(), 30_000);
+            } catch (error) {
+                this.recoveryBlocked = true;
+                throw error;
+            }
+        }
         if (this.payloadStopping) return await this.payloadStopping;
         const child = this.payload;
         if (!child) return;
@@ -270,16 +361,29 @@ export default class LiveSyncBootstrap extends Plugin {
     loadCSS(): Promise<void> {
         return Promise.resolve();
     }
+    /** Optional cache preparation for a trusted installation; no canonical metadata or Vault content is replaced. */
+    async prepareMobileMetadataCache(): Promise<boolean> {
+        try {
+            return (await this.metadataSnapshot?.prepare()) ?? false;
+        } catch {
+            return false;
+        }
+    }
     override onUserEnable(): void {
-        this.payload?.onUserEnable();
+        if (this.published) this.payload?.onUserEnable();
+        else this.enablePending = true;
     }
     override async onExternalSettingsChange(): Promise<void> {
+        await this.initialStartup;
+        if (this.stopped) return;
         await this.payload?.onExternalSettingsChange?.();
         Reflect.set(this, "settingTab", this.payload ? Reflect.get(this.payload, "settingTab") : null);
     }
     override onunload(): void {
         this.published = false;
+        this.enablePending = false;
         this.stopped = true;
+        this.localRuntimeReader?.stop();
         this.generation++;
         this.runtime?.cancel();
         // Protocol 1 payloads share the same durable queue format. Recovery never depends on rejected code

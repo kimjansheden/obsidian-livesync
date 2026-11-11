@@ -2,6 +2,7 @@ import type { App, DataAdapter, Stat } from "obsidian";
 import type { AttachmentCacheIO, AttachmentStat } from "./AttachmentCache";
 import { parseAttachmentCacheRecord, validAttachmentPath, type AttachmentCacheRecord } from "./AttachmentCache";
 import type { AttachmentRecoveryIO } from "./AttachmentRegistry";
+import { MobileMetadataCache } from "@/serviceFeatures/metadataCache/MobileMetadataCache";
 
 interface NativeStat {
     type: "file" | "directory";
@@ -67,10 +68,12 @@ function attachmentStat(stat: Stat | NativeStat | null): AttachmentStat | null {
 /** An Android-only, opaque cache beside the Vault. Every raw native path is confined before use. */
 export class MobileAttachmentCacheIO implements AttachmentCacheIO, AttachmentRecoveryIO {
     private eventLease?: Promise<() => void>;
+    private recoveryMetadataTail: Promise<unknown> = Promise.resolve();
     private constructor(
         private readonly adapter: MobileVaultAdapter,
         private readonly vaultRoot: string,
         private readonly cacheRoot: string,
+        private readonly metadataCache: MobileMetadataCache,
         private readonly mayRun: () => boolean
     ) {}
 
@@ -114,11 +117,50 @@ export class MobileAttachmentCacheIO implements AttachmentCacheIO, AttachmentRec
         }
         const parent = base.slice(0, base.lastIndexOf("/"));
         const identity = await sha256Buffer(new TextEncoder().encode(base).buffer);
-        return new MobileAttachmentCacheIO(adapter, base, `${parent}/.livesync-attachment-cache/${identity}`, mayRun);
+        return new MobileAttachmentCacheIO(
+            adapter,
+            base,
+            `${parent}/.livesync-attachment-cache/${identity}`,
+            new MobileMetadataCache(app),
+            mayRun
+        );
     }
 
     private checkRunning(): void {
         if (!this.mayRun()) throw new Error("Attachment file operations stopped");
+    }
+
+    async readMetadataSnapshot(): Promise<ArrayBuffer | null> {
+        this.checkRunning();
+        try {
+            return await this.adapter.fs.readBinary(`${this.cacheRoot}/metadata-startup-v1.cache`);
+        } catch (error) {
+            if (missing(error)) return null;
+            throw error;
+        }
+    }
+
+    async writeMetadataSnapshot(bytes: ArrayBuffer): Promise<void> {
+        await this.queueRecoveryMetadata(async () => {
+            this.checkRunning();
+            await this.ensureDirectory(this.cacheRoot);
+            this.checkRunning();
+            // This is a disposable derivative; an interrupted write falls back to the unchanged native cache.
+            await this.adapter.fs.writeBinary(`${this.cacheRoot}/metadata-startup-v1.cache`, bytes);
+        });
+    }
+
+    private queueRecoveryMetadata<T>(task: () => Promise<T>): Promise<T> {
+        const next = this.recoveryMetadataTail.then(() => {
+            this.checkRunning();
+            return task();
+        });
+        this.recoveryMetadataTail = next.catch(() => {});
+        return next;
+    }
+
+    async waitForRecoveryMetadata(): Promise<void> {
+        await this.recoveryMetadataTail;
     }
 
     private source(path: string): string {
@@ -161,7 +203,7 @@ export class MobileAttachmentCacheIO implements AttachmentCacheIO, AttachmentRec
 
     async writeRegistryFingerprint(value: string): Promise<void> {
         if (!/^[a-f0-9]{64}$/u.test(value)) throw new Error("Invalid attachment recovery checkpoint");
-        await this.adapter.queue(async () => {
+        await this.queueRecoveryMetadata(async () => {
             this.checkRunning();
             await this.writeJson(`${this.cacheRoot}/registry.json`, value);
         });
@@ -170,7 +212,7 @@ export class MobileAttachmentCacheIO implements AttachmentCacheIO, AttachmentRec
     async saveRecoveryRecord(record: AttachmentCacheRecord): Promise<void> {
         parseAttachmentCacheRecord(record, record.path);
         const path = this.cached(record.key).replace(/\.bin$/u, ".json");
-        await this.adapter.queue(async () => {
+        await this.queueRecoveryMetadata(async () => {
             this.checkRunning();
             const existing = await this.readJson(path);
             if (existing !== undefined) {
@@ -231,7 +273,7 @@ export class MobileAttachmentCacheIO implements AttachmentCacheIO, AttachmentRec
             (await sha256Buffer(await this.sourceRead(restoredPath))) !== record.hash
         )
             return;
-        await this.adapter.queue(async () => {
+        await this.queueRecoveryMetadata(async () => {
             this.checkRunning();
             await this.writeJson(this.cached(record.key).replace(/\.bin$/u, ".done.json"), record.hash);
         });
@@ -288,6 +330,8 @@ export class MobileAttachmentCacheIO implements AttachmentCacheIO, AttachmentRec
                 throw new Error("Attachment cache move cannot replace another file");
             }
             await this.ensureDirectory(target.slice(0, target.lastIndexOf("/")));
+            // Commit the derived-cache removal before the original can leave the Vault.
+            await this.metadataCache.forget([path]);
             this.checkRunning();
             await this.adapter.fs.rename(source, target);
             // The deferred registry owns this path until restoration. Rebuild the file cache on restart.
