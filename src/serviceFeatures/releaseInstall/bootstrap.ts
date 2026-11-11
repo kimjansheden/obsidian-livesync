@@ -1,5 +1,11 @@
 /** Permanent Obsidian entry point. Its executable is installed locally once and never updated through the vault. */
-import { Platform, Plugin, Notice, requireApiVersion, type PluginManifest } from "obsidian";
+import { Platform, Plugin, Notice, requireApiVersion, apiVersion, type PluginManifest } from "obsidian";
+import { MobileAttachmentCacheIO } from "@/features/OnDemandAttachments/MobileAttachmentCacheIO";
+import {
+    NativeMetadataSnapshot,
+    type NativeMetadataHost,
+} from "@/serviceFeatures/metadataCache/NativeMetadataSnapshot";
+import type { LiveSyncCore } from "@/main";
 import { RELEASE_MARKER_PREFIX } from "./runningRelease";
 import { decodeStrictUtf8 } from "./releaseBytes";
 import { ReleaseRuntime, type BootstrapRuntimePort } from "./releaseRuntime";
@@ -81,6 +87,7 @@ export default class LiveSyncBootstrap extends Plugin {
     private recoveryBlocked = false;
     private initialStartup: Promise<void> | undefined;
     private enablePending = false;
+    private metadataSnapshot: NativeMetadataSnapshot | undefined;
     /** Explicit host boundary; the installer compares real payload identities, not the facade. */
     get releaseRuntimeInstance(): PayloadPlugin | undefined {
         return this.published ? this.payload : undefined;
@@ -96,11 +103,44 @@ export default class LiveSyncBootstrap extends Plugin {
     }
 
     override async onload(): Promise<void> {
-        if (Platform.isAndroidApp)
+        if (Platform.isAndroidApp) {
+            const host = this.app.metadataCache as unknown as Partial<NativeMetadataHost>;
+            if (typeof host?._preload === "function" && typeof host.inProgressTaskCount === "number") {
+                let io: Promise<MobileAttachmentCacheIO> | undefined;
+                const storage = () => (io ??= MobileAttachmentCacheIO.create(this.app, () => !this.stopped));
+                this.metadataSnapshot = new NativeMetadataSnapshot(
+                    host as NativeMetadataHost,
+                    {
+                        readMetadataSnapshot: async () => await (await storage()).readMetadataSnapshot(),
+                        writeMetadataSnapshot: async (bytes) => await (await storage()).writeMetadataSnapshot(bytes),
+                    },
+                    apiVersion,
+                    () => {
+                        const core = this.payload?.core as Partial<LiveSyncCore> | undefined;
+                        return (
+                            !this.stopped &&
+                            this.published &&
+                            !document.hidden &&
+                            core?.services?.appLifecycle?.isReady() === true &&
+                            core.services.fileProcessing.processing.value === 0 &&
+                            core.services.fileProcessing.totalQueued.value === 0 &&
+                            core.services.replicator.boundedRemoteActivityCount.value === 0 &&
+                            core.isStartupScanRunning === false &&
+                            core.services.replicator.replicationStatics.value.syncStatus === "COMPLETED"
+                        );
+                    }
+                );
+                this.metadataSnapshot.install((cleanup) => this.register(cleanup));
+                const resolved = this.app.metadataCache.on("resolved", () =>
+                    this.metadataSnapshot?.requestPreparation()
+                );
+                this.registerEvent(resolved);
+            }
             new MobileMetadataCache(this.app).install(
                 (cleanup) => this.register(cleanup),
                 () => new Notice(MOBILE_METADATA_CACHE_FAILURE)
             );
+        }
         const pluginDirectory = this.manifest.dir ?? `${this.app.vault.configDir}/plugins/${this.manifest.id}`;
         this.stopped = false;
         this.runtime = new ReleaseRuntime({
@@ -158,6 +198,14 @@ export default class LiveSyncBootstrap extends Plugin {
     /** Keep ownership until startup and every teardown have actually settled. Timeout blocks recovery. */
     private async stopPayload(): Promise<void> {
         if (this.recoveryBlocked) throw new Error("Runtime cleanup did not settle; restart Obsidian before recovery");
+        if (this.metadataSnapshot?.hasPendingPreparation) {
+            try {
+                await bounded(this.metadataSnapshot.waitForPreparation(), 30_000);
+            } catch (error) {
+                this.recoveryBlocked = true;
+                throw error;
+            }
+        }
         if (this.payloadStopping) return await this.payloadStopping;
         const child = this.payload;
         if (!child) return;
@@ -294,6 +342,14 @@ export default class LiveSyncBootstrap extends Plugin {
     /** The root CSS belongs to the loader; the selected payload's verified CSS was already installed above. */
     loadCSS(): Promise<void> {
         return Promise.resolve();
+    }
+    /** Optional cache preparation for a trusted installation; no canonical metadata or Vault content is replaced. */
+    async prepareMobileMetadataCache(): Promise<boolean> {
+        try {
+            return (await this.metadataSnapshot?.prepare()) ?? false;
+        } catch {
+            return false;
+        }
     }
     override onUserEnable(): void {
         if (this.published) this.payload?.onUserEnable();

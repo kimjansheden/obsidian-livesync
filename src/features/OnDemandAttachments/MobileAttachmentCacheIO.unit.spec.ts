@@ -83,6 +83,29 @@ async function harness() {
 }
 
 describe("Android attachment cache IO", () => {
+    it("keeps the native metadata snapshot beside the Vault without using its file queue", async () => {
+        const f = await harness(),
+            bytes = new Uint8Array([7, 8, 9]).buffer;
+        f.adapter.queue = async () => {
+            throw new Error("Vault queue must remain available");
+        };
+        await f.io.writeMetadataSnapshot(bytes);
+        const [target] = f.fs.writeBinary.mock.calls[0];
+        expect(target).not.toContain(`${base}/`);
+        expect(target).toMatch(/\/metadata-startup-v1\.cache$/u);
+        expect(await f.io.readMetadataSnapshot()).toEqual(bytes);
+        expect(f.files.get(`${base}/${path}`)).toEqual(stat);
+        expect(f.fs.rename).not.toHaveBeenCalled();
+    });
+    it("treats an absent metadata snapshot as optional and stops its IO after unload", async () => {
+        const f = await harness();
+        f.fs.readBinary.mockRejectedValueOnce(Object.assign(new Error("missing"), { code: "ENOENT" }));
+        expect(await f.io.readMetadataSnapshot()).toBeNull();
+        f.stop();
+        await expect(f.io.readMetadataSnapshot()).rejects.toThrow("stopped");
+        await expect(f.io.writeMetadataSnapshot(new ArrayBuffer(0))).rejects.toThrow("stopped");
+        expect(f.fs.writeBinary).not.toHaveBeenCalled();
+    });
     it("writes independent recovery metadata while retaining the Vault queue for original moves", async () => {
         const f = await harness();
         f.adapter.queue = async () => {

@@ -130,6 +130,26 @@ export class MobileAttachmentCacheIO implements AttachmentCacheIO, AttachmentRec
         if (!this.mayRun()) throw new Error("Attachment file operations stopped");
     }
 
+    async readMetadataSnapshot(): Promise<ArrayBuffer | null> {
+        this.checkRunning();
+        try {
+            return await this.adapter.fs.readBinary(`${this.cacheRoot}/metadata-startup-v1.cache`);
+        } catch (error) {
+            if (missing(error)) return null;
+            throw error;
+        }
+    }
+
+    async writeMetadataSnapshot(bytes: ArrayBuffer): Promise<void> {
+        await this.queueRecoveryMetadata(async () => {
+            this.checkRunning();
+            await this.ensureDirectory(this.cacheRoot);
+            this.checkRunning();
+            // This is a disposable derivative; an interrupted write falls back to the unchanged native cache.
+            await this.adapter.fs.writeBinary(`${this.cacheRoot}/metadata-startup-v1.cache`, bytes);
+        });
+    }
+
     private queueRecoveryMetadata<T>(task: () => Promise<T>): Promise<T> {
         const next = this.recoveryMetadataTail.then(() => {
             this.checkRunning();

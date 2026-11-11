@@ -42,6 +42,9 @@ export class ModuleLiveSyncMain extends AbstractModule {
     private postScanReplicationRun?: Promise<void>;
     private postScanRetry?: CompatTimeoutHandle;
     private postScanRetryBudget = 1;
+    get isStartupScanRunning(): boolean {
+        return this.deferredScanRun !== undefined;
+    }
 
     private startDeferredMobileStartup(): void {
         if (!this.deferredScan || this.deferredStopped || this.services.appLifecycle.hasUnloaded()) return;

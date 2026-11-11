@@ -12,6 +12,10 @@ The Android bootstrap permits host metadata and layout initialisation while the 
 
 The first Object Storage replication precedes the background storage scan. A five-second bound permits the offline scan to proceed when the remote operation remains pending. Suspension and unload clear the delayed scan, and a late receive cannot restart an unloaded host. Tests of startup consumers must therefore distinguish completion of the Android host load from availability of the runtime.
 
+The Android loader can reuse a compressed snapshot of native metadata beside the Vault. It still enumerates the canonical metadata keys and reads missing entries from IndexedDB; the native decoder and file-stat reconciliation remain in use. The snapshot never replaces canonical records. Its version, checksum, and size bounds must validate before reuse; an absent or invalid snapshot uses normal native loading.
+
+Trusted installations can call the bootstrap's `prepareMobileMetadataCache()` after native indexing finishes. Automatic preparation makes one idle attempt per session after initial synchronisation; it does not run while startup reconciliation, file processing, or remote work is active. Unload cancels pending maintenance and waits for an operation already in flight. Installing a payload alone does not install this loader change.
+
 ### Environment Setup
 
 #### First-time Setup
