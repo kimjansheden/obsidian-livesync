@@ -51,31 +51,6 @@ async function digest(bytes: ArrayBuffer): Promise<string> {
         .join("");
 }
 
-async function readBounded(stream: ReadableStream<Uint8Array>, limit: number): Promise<ArrayBuffer> {
-    const reader = stream.getReader(),
-        chunks: Uint8Array[] = [];
-    let length = 0;
-    try {
-        for (;;) {
-            const next = await reader.read();
-            if (next.done) break;
-            length += next.value.byteLength;
-            if (length > limit) throw new Error("Metadata snapshot exceeds its size bound");
-            chunks.push(next.value);
-        }
-    } finally {
-        await reader.cancel().catch(() => {});
-        reader.releaseLock();
-    }
-    const result = new Uint8Array(length);
-    let offset = 0;
-    for (const chunk of chunks) {
-        result.set(chunk, offset);
-        offset += chunk.byteLength;
-    }
-    return result.buffer;
-}
-
 function plainMetadata(value: unknown, ancestors = new WeakSet<object>()): boolean {
     if (value === null || value === undefined || typeof value === "string" || typeof value === "boolean") return true;
     if (typeof value === "number") return Number.isFinite(value);
@@ -365,3 +340,4 @@ export class NativeMetadataSnapshot {
         return this.active;
     }
 }
+import { readBoundedBytes as readBounded } from "@/common/boundedStream";

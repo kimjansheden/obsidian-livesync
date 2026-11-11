@@ -1,4 +1,5 @@
 import { beforeAll, describe, expect, it, vi } from "vitest";
+import { gzipSync } from "node:zlib";
 import {
     ReleaseRuntime,
     type BootstrapRuntimePort,
@@ -104,6 +105,45 @@ async function staged(f: Awaited<ReturnType<typeof fixture>>) {
     return port;
 }
 describe("permanent bootstrap storage and recovery", () => {
+    async function compressedBaseline() {
+        const f = await fixture();
+        const value = JSON.parse(new TextDecoder().decode(f.baseline)) as {
+            format: string;
+            files: { name: string; size: number; sha256: string; content: string }[];
+        };
+        value.format = "livesync-bootstrap-baseline:2";
+        for (const file of value.files)
+            file.content = gzipSync(new Uint8Array(Buffer.from(file.content, "base64"))).toString("base64");
+        return { f, value };
+    }
+    it("verifies compressed baselines against the same exact uncompressed file hashes", async () => {
+        const { f, value } = await compressedBaseline();
+        const bytes = packageBytesOf(value),
+            hash = await sha256HexOf(bytes);
+        const context = await f.env.verification();
+        expect(await readBootstrapBaseline(bytes, context, hash)).toEqual(
+            await readBootstrapBaseline(f.baseline, context, f.baselineSha256)
+        );
+        f.files.set(runtimePath(`${hash}.livesync-release`), bytes);
+        await new ReleaseRuntime({ ...f.env, baselineSha256: hash }).start();
+        expect(f.loaded).toEqual([6]);
+    });
+    it.each(["crc", "overflow", "size", "hash"])("rejects a compressed baseline with invalid %s", async (fault) => {
+        const { f, value } = await compressedBaseline(),
+            file = value.files[0];
+        if (fault === "crc") {
+            const bytes = Buffer.from(file.content, "base64");
+            bytes[bytes.length - 1] ^= 1;
+            file.content = bytes.toString("base64");
+        }
+        if (fault === "overflow") file.size = 1;
+        if (fault === "size") file.size = Number.MAX_SAFE_INTEGER;
+        if (fault === "hash") file.sha256 = "0".repeat(64);
+        const bytes = packageBytesOf(value);
+        await expect(
+            readBootstrapBaseline(bytes, await f.env.verification(), await sha256HexOf(bytes))
+        ).rejects.toThrow();
+    });
     it("starts the hash-pinned baseline without trusting any sync key", async () => {
         const f = await fixture();
         f.noKeys();

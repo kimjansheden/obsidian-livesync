@@ -14,6 +14,8 @@ The first Object Storage replication precedes the background storage scan. A fiv
 
 The Android loader can reuse a compressed snapshot of native metadata beside the Vault. It still enumerates the canonical metadata keys and reads missing entries from IndexedDB; the native decoder and file-stat reconciliation remain in use. The snapshot never replaces canonical records. Its version, checksum, and size bounds must validate before reuse; an absent or invalid snapshot uses normal native loading.
 
+Bootstrap baselines use format 2 with gzip-compressed file contents. The permanent loader verifies the pinned package hash before decoding, bounds each decompressed file and their total size, and checks the original file hashes and release marker before execution. Format 1 baselines remain readable for recovery.
+
 Trusted installations can call the bootstrap's `prepareMobileMetadataCache()` after native indexing finishes. Automatic preparation makes one idle attempt per session after initial synchronisation; it does not run while startup reconciliation, file processing, or remote work is active. Unload cancels pending maintenance and waits for an operation already in flight. Installing a payload alone does not install this loader change.
 
 ### Environment Setup
