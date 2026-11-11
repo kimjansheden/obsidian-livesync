@@ -13,7 +13,7 @@ import {
 export const RELEASE_RUNTIME_DIRECTORY = "release-runtime";
 export const BOOTSTRAP_PROTOCOL = 1;
 const HASH = /^[0-9a-f]{64}$/;
-const MAX_PACKAGE_BYTES = 32 * 1024 * 1024;
+export const MAX_PACKAGE_BYTES = 32 * 1024 * 1024;
 const RECORD_FIELDS = ["protocol", "packageSha256", "previousSha256"];
 export interface ReleaseRuntimeAdapter {
     readBinary(path: string): Promise<ArrayBuffer>;

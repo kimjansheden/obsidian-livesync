@@ -516,10 +516,12 @@ describe("the real compiled CommonJS bootstrap boundary", () => {
         plugin.unload();
         expect(f.events).toContain("disabled:6");
     });
-    it("loads a signed payload after reload without replacing root code, then keeps running after restart", async () => {
+    it.each([false, true])("loads a signed payload after reload and restart on Android=%s", async (android) => {
         const f = await fixture();
+        f.compatibility.androidApp = android;
         const first = f.create();
         await first.load();
+        await first.onExternalSettingsChange();
         const candidate = await f.candidate();
         const port = first.releaseRuntimeInstance.securityRelease.bootstrapRuntime;
         await port.stage(candidate.verified, candidate.sha256);
@@ -527,12 +529,14 @@ describe("the real compiled CommonJS bootstrap boundary", () => {
         await port.activate(candidate.sha256);
         const second = f.create();
         await second.load();
+        await second.onExternalSettingsChange();
         expect(second.core.release).toBe(7);
         expect(f.styles[0].removed).toBe(true);
         expect(f.styles[1].removed).toBe(false);
         second.unload();
         const third = f.create();
         await third.load();
+        await third.onExternalSettingsChange();
         expect(third.core.release).toBe(7);
         expect(
             [...f.disk.keys()].every(

@@ -20,6 +20,8 @@ The Android loader can reuse a compressed snapshot of native metadata beside the
 
 Bootstrap baselines use format 2 with gzip-compressed file contents. The permanent loader verifies the pinned package hash before decoding, bounds each decompressed file and their total size, and checks the original file hashes and release marker before execution. Format 1 baselines remain readable for recovery.
 
+The Android bootstrap streams owned runtime packages and trusted-key files through the app's local resource server, avoiding Base64 bridge copies. Reads have a size bound, bypass browser caching, and are aborted and drained when the loader unloads. Package authentication follows the read and precedes execution. Trusted installation ports retain regular adapter access after loader unload.
+
 Trusted installations can call the bootstrap's `prepareMobileMetadataCache()` after native indexing finishes. Automatic preparation makes one idle attempt per session after initial synchronisation; it does not run while startup reconciliation, file processing, or remote work is active. Unload cancels pending maintenance and waits for an operation already in flight. Installing a payload alone does not install this loader change.
 
 ### Environment Setup

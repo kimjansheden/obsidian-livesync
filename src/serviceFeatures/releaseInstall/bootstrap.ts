@@ -6,6 +6,7 @@ import {
     type NativeMetadataHost,
 } from "@/serviceFeatures/metadataCache/NativeMetadataSnapshot";
 import type { LiveSyncCore } from "@/main";
+import { LocalRuntimeReader } from "./LocalRuntimeReader";
 import { RELEASE_MARKER_PREFIX } from "./runningRelease";
 import { decodeStrictUtf8 } from "./releaseBytes";
 import { ReleaseRuntime, type BootstrapRuntimePort } from "./releaseRuntime";
@@ -88,6 +89,7 @@ export default class LiveSyncBootstrap extends Plugin {
     private initialStartup: Promise<void> | undefined;
     private enablePending = false;
     private metadataSnapshot: NativeMetadataSnapshot | undefined;
+    private localRuntimeReader: LocalRuntimeReader | undefined;
     /** Explicit host boundary; the installer compares real payload identities, not the facade. */
     get releaseRuntimeInstance(): PayloadPlugin | undefined {
         return this.published ? this.payload : undefined;
@@ -142,9 +144,19 @@ export default class LiveSyncBootstrap extends Plugin {
             );
         }
         const pluginDirectory = this.manifest.dir ?? `${this.app.vault.configDir}/plugins/${this.manifest.id}`;
+        const adapter = this.app.vault.adapter;
+        if (Platform.isAndroidApp) this.localRuntimeReader = new LocalRuntimeReader(adapter, pluginDirectory);
+        const readRuntime = (path: string) =>
+            this.stopped ? adapter.readBinary(path) : (this.localRuntimeReader?.read(path) ?? adapter.readBinary(path));
         this.stopped = false;
         this.runtime = new ReleaseRuntime({
-            adapter: this.app.vault.adapter,
+            adapter: {
+                readBinary: readRuntime,
+                writeBinary: adapter.writeBinary.bind(adapter),
+                exists: adapter.exists.bind(adapter),
+                mkdir: adapter.mkdir.bind(adapter),
+                list: adapter.list.bind(adapter),
+            },
             pluginDirectory,
             baselineSha256: LIVESYNC_BOOTSTRAP_BASELINE_SHA256,
             verification: async () => {
@@ -154,9 +166,7 @@ export default class LiveSyncBootstrap extends Plugin {
                 };
                 try {
                     trustedKeys = await parseTrustedReleaseKeys(
-                        new Uint8Array(
-                            await this.app.vault.adapter.readBinary(`${pluginDirectory}/${TRUSTED_RELEASE_KEYS_FILE}`)
-                        ),
+                        new Uint8Array(await readRuntime(`${pluginDirectory}/${TRUSTED_RELEASE_KEYS_FILE}`)),
                         window.crypto.subtle
                     );
                 } catch {
@@ -198,6 +208,14 @@ export default class LiveSyncBootstrap extends Plugin {
     /** Keep ownership until startup and every teardown have actually settled. Timeout blocks recovery. */
     private async stopPayload(): Promise<void> {
         if (this.recoveryBlocked) throw new Error("Runtime cleanup did not settle; restart Obsidian before recovery");
+        if (this.localRuntimeReader?.hasPendingReads) {
+            try {
+                await bounded(this.localRuntimeReader.waitForIdle(), 30_000);
+            } catch (error) {
+                this.recoveryBlocked = true;
+                throw error;
+            }
+        }
         if (this.metadataSnapshot?.hasPendingPreparation) {
             try {
                 await bounded(this.metadataSnapshot.waitForPreparation(), 30_000);
@@ -365,6 +383,7 @@ export default class LiveSyncBootstrap extends Plugin {
         this.published = false;
         this.enablePending = false;
         this.stopped = true;
+        this.localRuntimeReader?.stop();
         this.generation++;
         this.runtime?.cancel();
         // Protocol 1 payloads share the same durable queue format. Recovery never depends on rejected code
