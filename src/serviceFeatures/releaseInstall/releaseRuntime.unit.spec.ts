@@ -128,6 +128,19 @@ describe("permanent bootstrap storage and recovery", () => {
         await new ReleaseRuntime({ ...f.env, baselineSha256: hash }).start();
         expect(f.loaded).toEqual([6]);
     });
+    it("starts a compressed baseline without native decompression support", async () => {
+        const { f, value } = await compressedBaseline();
+        const bytes = packageBytesOf(value),
+            hash = await sha256HexOf(bytes);
+        f.files.set(runtimePath(`${hash}.livesync-release`), bytes);
+        vi.stubGlobal("DecompressionStream", undefined);
+        try {
+            await new ReleaseRuntime({ ...f.env, baselineSha256: hash }).start();
+            expect(f.loaded).toEqual([6]);
+        } finally {
+            vi.unstubAllGlobals();
+        }
+    });
     it.each(["crc", "overflow", "size", "hash"])("rejects a compressed baseline with invalid %s", async (fault) => {
         const { f, value } = await compressedBaseline(),
             file = value.files[0];

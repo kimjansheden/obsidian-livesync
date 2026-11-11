@@ -1,6 +1,6 @@
 /** Immutable runtime packages and activation records for the permanent bootstrap (protocol 1). */
 import { decodeCanonicalBase64, decodeStrictUtf8, hasExactKeys, isPlainObject, sha256Hex } from "./releaseBytes";
-import { readBoundedBytes } from "@/common/boundedStream";
+import { readBoundedGzip } from "@/common/boundedGzip";
 import {
     readPinnedReleasePackage,
     readReleaseMarker,
@@ -290,12 +290,7 @@ export async function readBootstrapBaseline(
         if (!encoded) throw new Error("Invalid baseline file encoding");
         const content =
             parsed.format === "livesync-bootstrap-baseline:2"
-                ? new Uint8Array(
-                      await readBoundedBytes(
-                          new Blob([encoded]).stream().pipeThrough(new DecompressionStream("gzip")),
-                          Number(entry.size)
-                      )
-                  )
+                ? await readBoundedGzip(encoded, Number(entry.size))
                 : encoded;
         if (content.length !== entry.size || (await sha256Hex(context.subtle, content)) !== entry.sha256)
             throw new Error("Invalid baseline file hash");
