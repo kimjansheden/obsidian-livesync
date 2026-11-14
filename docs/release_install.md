@@ -10,6 +10,8 @@ The feature is off until a trust file is placed on the device. There is no setti
 
 Mobile Object Storage installations can begin receiving after the local database and safety gates are ready, before completing the full storage/database reconciliation. Incoming paths are prepared under their storage-event locks so offline edits and deletions are preserved. Uncertain paths remain pending, and the full scan continues with persistent retries and lifecycle cancellation.
 
+A received deletion can settle without an earlier local provenance record when both the storage cache and the file system confirm that the file is absent and the database entry is deleted. A live database entry, an existing file, or an unresolved local publication prevents that shortcut.
+
 The local chunk-safety check requires a complete inspection when it has no valid receipt. Subsequent checks bind that receipt to the physical database identity, policy, and verified sequence, inspecting changes when possible and returning to a complete check when that evidence is unavailable. This does not bypass Obsidian's own Vault loading or indexing.
 
 The bootstrap waits up to ten minutes for a payload to finish loading. Opening a large mobile database while storage is busy can exceed the former one-minute limit. A payload is still accepted only after its startup completes; a timed-out startup retains ownership of its cleanup and cannot overlap a fallback runtime.
