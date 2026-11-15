@@ -12,6 +12,8 @@ Mobile Object Storage installations can begin receiving after the local database
 
 A received deletion can settle without an earlier local provenance record when both the storage cache and the file system confirm that the file is absent and the database entry is deleted. A live database entry, an existing file, or an unresolved local publication prevents that shortcut.
 
+The storage event of a database write retains its reflection provenance while the recorded revision and modification time agree. An unchanged empty file whose recorded revision is in the incoming revision's history can be replaced without creating another empty conflict, including when its reflection mark is missing. Independently emptied files remain protected. Existing conflict branches require their own review and resolution; this correction does not select their content automatically.
+
 The local chunk-safety check requires a complete inspection when it has no valid receipt. Subsequent checks bind that receipt to the physical database identity, policy, and verified sequence, inspecting changes when possible and returning to a complete check when that evidence is unavailable. This does not bypass Obsidian's own Vault loading or indexing.
 
 The bootstrap waits up to ten minutes for a payload to finish loading. Opening a large mobile database while storage is busy can exceed the former one-minute limit. A payload is still accepted only after its startup completes; a timed-out startup retains ownership of its cleanup and cannot overlap a fallback runtime.

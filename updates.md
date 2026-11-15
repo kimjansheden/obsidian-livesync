@@ -16,6 +16,7 @@ Earlier releases remain available in the 1.0 release history, the 1.0 preview hi
 
 #### Fixed
 
+- An empty file written from the database no longer becomes a fresh empty conflict when the storage event records the same revision and modification time again. An unchanged recorded empty revision can also be replaced by an incoming revision made on it when its reflection mark is missing; independently emptied files retain their conflict protection.
 - A received deletion of a file which is already absent can complete during mobile start-up even when the path has no earlier local provenance. Existing files and paths with unresolved local publications retain their conflict protection.
 - Object Storage start-up can prepare the local checkpoint alongside the remote listing. Replication reuses it only while the database, checkpoint writes, and validity interval still agree; stopping or changing the connection discards it and drains its pending read.
 - Mobile devices using Object Storage can receive changes before the full local file/database scan finishes. Each incoming path protects offline edits and deletions before storage is changed, while the complete scan and persistent retries continue. The local chunk-safety check still performs a full initial inspection; a valid database-bound receipt lets subsequent starts inspect changes instead of repeating the complete history check.
