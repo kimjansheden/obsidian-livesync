@@ -193,6 +193,77 @@ describe("ModuleConflictResolver independent same-path creation", () => {
 
 describe("ModuleConflictResolver remote conflict policy", () => {
     it.each([
+        ["data.json", false, false, false],
+        ["nested/data.json", false, true, false],
+        ["nested/DATA.JSON", false, false, false],
+        ["data.json", true, false, false],
+        ["format-only.json", false, false, true],
+    ])(
+        "retains exact JSON branches for %s (prompt: %s, newer: %s, format only: %s)",
+        async (name, prompt, newer, formatOnly) => {
+            const { module, resolveByDeletingRevision, tryAutoMerge } = createModule();
+            module.core.settings.disableMarkdownAutoMerge = prompt;
+            module.core.settings.resolveConflictsByNewerFile = newer;
+            const path = name as FilePathWithPrefix;
+            const leftLeaf = {
+                rev: "2-left",
+                data: '{\n  "alpha": 1,\n  "beta": 0\n}\n',
+                mtime: 2,
+                ctime: 1,
+                deleted: false,
+            };
+            const rightLeaf = {
+                rev: "2-right",
+                data: formatOnly ? '{\r\n\t"beta": 0,\r\n\t"alpha": 1\r\n}\r\n' : '{\n  "beta": 2,\n  "alpha": 0\n}\n',
+                mtime: 3,
+                ctime: 1,
+                deleted: false,
+            };
+            tryAutoMerge.mockImplementation(async (_path: FilePathWithPrefix, enabled: boolean) =>
+                enabled
+                    ? {
+                          result: formatOnly ? '{"alpha":1,"beta":0}' : '{"alpha":1,"beta":2}',
+                          conflictedRev: "2-right",
+                          mergedOn: { revision: "2-left", ctime: 1, mtime: 3 },
+                      }
+                    : { leftRev: "2-left", rightRev: "2-right", leftLeaf, rightLeaf }
+            );
+
+            const result = await module.checkConflictAndPerformAutoMerge(path);
+
+            expect(tryAutoMerge).toHaveBeenCalledWith(path, false, true);
+            expect(result).toMatchObject({ left: leftLeaf, right: rightLeaf });
+            expect(module.core.databaseFileAccess.storeContent).not.toHaveBeenCalled();
+            expect(resolveByDeletingRevision).not.toHaveBeenCalled();
+        }
+    );
+
+    it.each([false, true])("retains Markdown auto-merge policy when prompting is %s", async (prompt) => {
+        const { module, tryAutoMerge } = createModule();
+        module.core.settings.disableMarkdownAutoMerge = prompt;
+        tryAutoMerge.mockResolvedValue({ ok: MISSING_OR_ERROR });
+        await module.checkConflictAndPerformAutoMerge("note.md" as FilePathWithPrefix);
+        expect(tryAutoMerge).toHaveBeenCalledWith("note.md", !prompt, true);
+    });
+
+    it("collapses byte-identical JSON leaves without synthesising content", async () => {
+        const { module, tryAutoMerge, resolveByDeletingRevision } = createModule();
+        const data = '{\n  "beta": 2,\n  "alpha": 1\n}\n';
+        tryAutoMerge.mockResolvedValue({
+            leftRev: "2-left",
+            rightRev: "2-right",
+            leftLeaf: { rev: "2-left", data, mtime: 2, deleted: false },
+            rightLeaf: { rev: "2-right", data, mtime: 3, deleted: false },
+        });
+        await expect(module.checkConflictAndPerformAutoMerge("data.json" as FilePathWithPrefix)).resolves.toBe(
+            AUTO_MERGED
+        );
+        expect(tryAutoMerge).toHaveBeenCalledWith("data.json", false, true);
+        expect(module.core.databaseFileAccess.storeContent).not.toHaveBeenCalled();
+        expect(resolveByDeletingRevision).toHaveBeenCalledOnce();
+    });
+
+    it.each([
         ["binary content", "image.png", false],
         ["newer-file setting", "note.md", true],
     ])("keeps different %s for a manual Object Storage decision", async (_, name, newerFile) => {

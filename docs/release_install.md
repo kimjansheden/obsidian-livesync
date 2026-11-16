@@ -16,6 +16,8 @@ The storage event of a database write retains its reflection provenance while th
 
 Recorded and selected binary revisions compare their decoded bytes with storage content. An unchanged binary file still showing an earlier revision does not become a new conflict when a later revision arrives. Actual local edits remain preserved on their original branch. This comparison also applies during offline preparation and explicit conflict selections.
 
+JSON conflicts in Object Storage vaults retain both byte sequences for an explicit decision. The automatic Markdown-merge setting does not enable structural JSON merging, so JSON indentation, key order, and line endings are preserved. Identical byte sequences can still be recognised as duplicates without creating rewritten content.
+
 The local chunk-safety check requires a complete inspection when it has no valid receipt. Subsequent checks bind that receipt to the physical database identity, policy, and verified sequence, inspecting changes when possible and returning to a complete check when that evidence is unavailable. This does not bypass Obsidian's own Vault loading or indexing.
 
 The bootstrap waits up to ten minutes for a payload to finish loading. Opening a large mobile database while storage is busy can exceed the former one-minute limit. A payload is still accepted only after its startup completes; a timed-out startup retains ownership of its cleanup and cannot overlap a fallback runtime.

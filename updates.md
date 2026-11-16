@@ -16,6 +16,7 @@ Earlier releases remain available in the 1.0 release history, the 1.0 preview hi
 
 #### Fixed
 
+- JSON conflicts in Object Storage vaults retain their original bytes for an explicit decision, even when automatic Markdown merging is enabled. Structural JSON merging no longer rewrites indentation, key order, or line endings. Byte-identical duplicate leaves can still collapse without synthesising content.
 - Object Storage binary files compare decoded revision bytes during offline preparation, storage events, and explicit conflict selections. Unchanged content no longer creates a conflict beside an incoming change; real local edits remain preserved on their original branch. The plug-in pins attested Commonlib `0.1.19-security.30`.
 - An empty file written from the database no longer becomes a fresh empty conflict when the storage event records the same revision and modification time again. An unchanged recorded empty revision can also be replaced by an incoming revision made on it when its reflection mark is missing; independently emptied files retain their conflict protection.
 - A received deletion of a file which is already absent can complete during mobile start-up even when the path has no earlier local provenance. Existing files and paths with unresolved local publications retain their conflict protection.
