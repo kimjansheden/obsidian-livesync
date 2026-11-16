@@ -14,6 +14,8 @@ A received deletion can settle without an earlier local provenance record when b
 
 The storage event of a database write retains its reflection provenance while the recorded revision and modification time agree. An unchanged empty file whose recorded revision is in the incoming revision's history can be replaced without creating another empty conflict, including when its reflection mark is missing. Independently emptied files remain protected. Existing conflict branches require their own review and resolution; this correction does not select their content automatically.
 
+Recorded and selected binary revisions compare their decoded bytes with storage content. An unchanged binary file still showing an earlier revision does not become a new conflict when a later revision arrives. Actual local edits remain preserved on their original branch. This comparison also applies during offline preparation and explicit conflict selections.
+
 The local chunk-safety check requires a complete inspection when it has no valid receipt. Subsequent checks bind that receipt to the physical database identity, policy, and verified sequence, inspecting changes when possible and returning to a complete check when that evidence is unavailable. This does not bypass Obsidian's own Vault loading or indexing.
 
 The bootstrap waits up to ten minutes for a payload to finish loading. Opening a large mobile database while storage is busy can exceed the former one-minute limit. A payload is still accepted only after its startup completes; a timed-out startup retains ownership of its cleanup and cannot overlap a fallback runtime.
@@ -170,30 +172,30 @@ A unit test verifies the example with its published key and compares its canonic
 
 The rules are applied in this order, and the first one which does not hold decides. No file content is decoded before the signature has been accepted.
 
-| No. | Code                                                                           | Rule                                                                                                                                                                                            |
-| --- | ------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 0   | `invalid-json`                                                                 | The file is valid UTF-8 and can be read with `JSON.parse`                                                                                                                                       |
-| 1   | `no-trusted-key`                                                               | The device has one or more trusted keys. Without any the feature is off                                                                                                                         |
-| 2   | `not-an-object`                                                                | The package is a JSON object                                                                                                                                                                    |
-| 3   | `unknown-format`                                                               | `format` is the number `1`                                                                                                                                                                      |
-| 4   | `unknown-field`                                                                | The top level has no other keys than the six in the table above                                                                                                                                 |
-| 5   | `wrong-plugin-id`                                                              | `pluginId` is a string and exactly the identifier of the verifying plug-in                                                                                                                      |
-| 6   | `invalid-release-number`                                                       | `releaseNumber` is an integer greater than 0 and no greater than 2^53 − 1                                                                                                                       |
-| 7   | `invalid-release-name`                                                         | `releaseName` matches the pattern above                                                                                                                                                         |
-| 8   | `invalid-file-list`                                                            | `files` is a list in which every entry has exactly the keys `name`, `size`, `sha256`, `content` with the right types; `sha256` is 64 hexadecimal characters in lower case                       |
-| 9   | `wrong-file-set`                                                               | The names are exactly `main.js`, `manifest.json` and `styles.css`, once each. A missing, additional or repeated name is rejected, and so is anything which is not one of these three names      |
-| 10  | `missing-signature`                                                            | `signature` is present and has exactly the keys `algorithm`, `keyId`, `value`, all of them strings                                                                                              |
-| 11  | `unknown-algorithm`                                                            | `signature.algorithm` is `ECDSA-P256-SHA256`                                                                                                                                                    |
-| 12  | `unknown-key-id`                                                               | `signature.keyId` is the identifier of one of the device's trusted keys                                                                                                                         |
-| 13  | `bad-signature`                                                                | `signature.value` is base64 of exactly 64 bytes, and the signature holds for the canonical bytes under the key which rule 12 selected                                                           |
-| 14  | `invalid-file-content`                                                         | Each `content` is base64 in the single accepted spelling                                                                                                                                        |
-| 15  | `file-size-mismatch`                                                           | The number of decoded bytes equals `size`                                                                                                                                                       |
-| 16  | `file-hash-mismatch`                                                           | The SHA-256 of the decoded bytes equals `sha256`                                                                                                                                                |
-| 17  | `missing-release-marker`, `duplicate-release-marker`, `invalid-release-marker` | The decoded bytes of `main.js` hold the text `livesync-security-release:` exactly once, and the digits directly after it are a positive integer without leading zeros, no greater than 2^53 − 1 |
-| 18  | `release-marker-mismatch`                                                      | The number of the marker equals `releaseNumber`                                                                                                                                                 |
-| 19  | `invalid-manifest`                                                             | The decoded `manifest.json` bytes are valid UTF-8 and `JSON.parse` yields a plain object (not null, not an array)                                                                               |
-| 20  | `wrong-manifest-id`                                                            | That object's `id` is a string exactly equal to the package's top-level `pluginId`                                                                                                              |
-| –   | none                                                                           | `releaseNumber` is greater than the number which the running build carries. A package with the same or a lower number is passed over without a notice                                           |
+| No. | Code | Rule |
+| --- | --- | --- |
+| 0 | `invalid-json` | The file is valid UTF-8 and can be read with `JSON.parse` |
+| 1 | `no-trusted-key` | The device has one or more trusted keys. Without any the feature is off |
+| 2 | `not-an-object` | The package is a JSON object |
+| 3 | `unknown-format` | `format` is the number `1` |
+| 4 | `unknown-field` | The top level has no other keys than the six in the table above |
+| 5 | `wrong-plugin-id` | `pluginId` is a string and exactly the identifier of the verifying plug-in |
+| 6 | `invalid-release-number` | `releaseNumber` is an integer greater than 0 and no greater than 2^53 − 1 |
+| 7 | `invalid-release-name` | `releaseName` matches the pattern above |
+| 8 | `invalid-file-list` | `files` is a list in which every entry has exactly the keys `name`, `size`, `sha256`, `content` with the right types; `sha256` is 64 hexadecimal characters in lower case |
+| 9 | `wrong-file-set` | The names are exactly `main.js`, `manifest.json` and `styles.css`, once each. A missing, additional or repeated name is rejected, and so is anything which is not one of these three names |
+| 10 | `missing-signature` | `signature` is present and has exactly the keys `algorithm`, `keyId`, `value`, all of them strings |
+| 11 | `unknown-algorithm` | `signature.algorithm` is `ECDSA-P256-SHA256` |
+| 12 | `unknown-key-id` | `signature.keyId` is the identifier of one of the device's trusted keys |
+| 13 | `bad-signature` | `signature.value` is base64 of exactly 64 bytes, and the signature holds for the canonical bytes under the key which rule 12 selected |
+| 14 | `invalid-file-content` | Each `content` is base64 in the single accepted spelling |
+| 15 | `file-size-mismatch` | The number of decoded bytes equals `size` |
+| 16 | `file-hash-mismatch` | The SHA-256 of the decoded bytes equals `sha256` |
+| 17 | `missing-release-marker`, `duplicate-release-marker`, `invalid-release-marker` | The decoded bytes of `main.js` hold the text `livesync-security-release:` exactly once, and the digits directly after it are a positive integer without leading zeros, no greater than 2^53 − 1 |
+| 18 | `release-marker-mismatch` | The number of the marker equals `releaseNumber` |
+| 19 | `invalid-manifest` | The decoded `manifest.json` bytes are valid UTF-8 and `JSON.parse` yields a plain object (not null, not an array) |
+| 20 | `wrong-manifest-id` | That object's `id` is a string exactly equal to the package's top-level `pluginId` |
+| – | none | `releaseNumber` is greater than the number which the running build carries. A package with the same or a lower number is passed over without a notice |
 
 Rules 19 and 20 are the device's own, after the format's rules 0–18; they run on the already hash-verified bytes of `manifest.json`, so no file content is decoded for them before the signature was accepted.
 
@@ -238,26 +240,26 @@ From the moment its unload begins, the unloaded instance starts no replication, 
 
 Every outcome raises a notice. Notices about anything but a successful installation stay until they are dismissed.
 
-| Outcome                                                                | State afterwards                                                               | Tried again                  |
-| ---------------------------------------------------------------------- | ------------------------------------------------------------------------------ | ---------------------------- |
-| Installed                                                              | The new build runs; the previous one is in `<name>.previous`                   | Not needed                   |
-| Package rejected                                                       | Nothing was written                                                            | Verified again at every look |
-| Package not newer                                                      | Nothing was written, and no notice is raised                                   | Verified again at every look |
-| A staged file or a backup does not read back                           | Nothing which the plug-in uses was changed                                     | At the next start            |
-| The app cannot unload and load a plug-in                               | Nothing was written                                                            | At the next start            |
-| The app did not unload the running build                               | No installed file was replaced. Restart the app if synchronisation has stopped | At the next start            |
-| A file could not be put in place                                       | The previous files are back and the previous build runs                        | Never, on this device        |
-| The new build did not load, did not finish, or reports another release | The previous files are back, byte for byte, and the previous build runs        | Never, on this device        |
-| The previous build could not be started again either                   | The plug-in is not running. Reinstall it by hand                               | Never, on this device        |
+| Outcome | State afterwards | Tried again |
+| --- | --- | --- |
+| Installed | The new build runs; the previous one is in `<name>.previous` | Not needed |
+| Package rejected | Nothing was written | Verified again at every look |
+| Package not newer | Nothing was written, and no notice is raised | Verified again at every look |
+| A staged file or a backup does not read back | Nothing which the plug-in uses was changed | At the next start |
+| The app cannot unload and load a plug-in | Nothing was written | At the next start |
+| The app did not unload the running build | No installed file was replaced. Restart the app if synchronisation has stopped | At the next start |
+| A file could not be put in place | The previous files are back and the previous build runs | Never, on this device |
+| The new build did not load, did not finish, or reports another release | The previous files are back, byte for byte, and the previous build runs | Never, on this device |
+| The previous build could not be started again either | The plug-in is not running. Reinstall it by hand | Never, on this device |
 
 ## Reporting the running build
 
 Each device writes the build it runs into its entry of the remote milestone, `node_info[<node id>]`, beside the versions it already reports there:
 
-| Field                   | Value                                                                                                                                                                              |
-| ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Field | Value |
+| --- | --- |
 | `plugin_main_js_sha256` | SHA-256, in lower-case hexadecimal, of the executable payload bytes which this instance loaded; with the bootstrap this is the package's main.js, rather than the permanent loader |
-| `plugin_release_number` | The release number which the running build carries                                                                                                                                 |
+| `plugin_release_number` | The release number which the running build carries |
 
 A change of either value is written with the next synchronisation, like any other change of the device's entry, so the first synchronisation after an installation reports the new build. The entry is the device's own statement about itself, which anyone able to write the remote can change: it tells the operator what a healthy device reports it is running, and proves nothing about a device which has been compromised, since such a device, or whoever controls the remote, can write any value. Another device, or anyone who can read the remote, can compare the hash with the checksums published for the release. The milestone is not encrypted; the hash of a published build is not a secret. A locked remote does not have its milestone rewritten, as before.
 
