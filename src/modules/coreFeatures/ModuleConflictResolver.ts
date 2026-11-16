@@ -62,7 +62,9 @@ export class ModuleConflictResolver extends AbstractModule {
     async checkConflictAndPerformAutoMerge(path: FilePathWithPrefix): Promise<diff_check_result> {
         //
         const objectStorage = this.settings.remoteType === REMOTE_MINIO;
-        const ret = await this.localDatabase.tryAutoMerge(path, !this.settings.disableMarkdownAutoMerge, objectStorage);
+        const preserveJsonBytes = objectStorage && stripAllPrefixes(path).toLowerCase().endsWith(".json");
+        const enableAutoMerge = !this.settings.disableMarkdownAutoMerge && !preserveJsonBytes;
+        const ret = await this.localDatabase.tryAutoMerge(path, enableAutoMerge, objectStorage);
         if ("ok" in ret) {
             return ret.ok;
         }
