@@ -51,12 +51,12 @@ test("ordinary paths, fixed repetition, escaped stars, and character classes ret
     assert.equal(posix.isMatch("src/example.ts", "**/*.ts"), true);
 });
 
-test("vendored source retains its recorded upstream distribution except for the parser patch", () => {
+test("vendored source retains its recorded upstream distribution except for the declared patches", () => {
     const receipt = /** @type {{upstreamFiles: Record<string, string>}} */ (
         readJson(new URL("./picomatch/upstream.json", import.meta.url))
     );
     for (const [path, digest] of Object.entries(receipt.upstreamFiles)) {
-        if (path === "lib/parse.js") continue;
+        if (path === "lib/parse.js" || path === "lib/utils.js") continue;
         assert.equal(
             createHash("sha256")
                 .update(readFileSync(new URL("./picomatch/" + path, import.meta.url)))
@@ -71,6 +71,34 @@ test("vendored source retains its recorded upstream distribution except for the 
         .replace("  // Repeating an unbounded wildcard nests quantifiers even with a single branch.\n", "")
         .replace(/return \{ risky: hasUnboundedWildcard\(body\) \};/gu, "return { risky: false };");
     assert.equal(createHash("sha256").update(original).digest("hex"), receipt.upstreamFiles["lib/parse.js"]);
+    const patchedUtils = readFileSync(new URL("./picomatch/lib/utils.js", import.meta.url), "utf8");
+    const originalUtils = patchedUtils.replace(
+        /exports.removeBackslashes = str => \{[\s\S]*?\n\};/u,
+        "exports.removeBackslashes = str => {\n  return str.replace(REGEX_REMOVE_BACKSLASH, match => {\n    return match === '\\\\' ? '' : match;\n  });\n};"
+    );
+    assert.equal(createHash("sha256").update(originalUtils).digest("hex"), receipt.upstreamFiles["lib/utils.js"]);
+});
+
+test("backslash removal preserves the upstream matching contract with linear scans", () => {
+    /** @type {unknown} */
+    const loaded = require("./picomatch/lib/utils.js");
+    const utils = /** @type {{removeBackslashes: (value: string) => string}} */ (loaded);
+    const oracle = (/** @type {string} */ value) =>
+        value.replace(/(?:\[.*?[^\\]\]|\\(?=.))/g, (match) => (match === "\\" ? "" : match));
+    const alphabet = ["[", "]", "\\", "a", "\n", "\r", "\u2028", "\u2029"];
+    let seed = 17;
+    for (let n = 0; n < 5000; n++) {
+        let value = "";
+        for (let i = 0; i < n % 24; i++) {
+            seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+            value += alphabet[(seed >>> 16) % alphabet.length];
+        }
+        assert.equal(utils.removeBackslashes(value), oracle(value), JSON.stringify(value));
+    }
+    const script = `require(${JSON.stringify(require.resolve("./picomatch/lib/utils.js"))}).removeBackslashes('['.repeat(262144))`;
+    const result = spawnSync(process.execPath, ["-e", script], { timeout: 3000, windowsHide: true });
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 0);
 });
 
 test("the complete installed lock graph uses the patched package for picomatch consumers", () => {

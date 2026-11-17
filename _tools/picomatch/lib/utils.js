@@ -28,9 +28,27 @@ exports.isWindows = () => {
 };
 
 exports.removeBackslashes = str => {
-  return str.replace(REGEX_REMOVE_BACKSLASH, match => {
-    return match === '\\' ? '' : match;
-  });
+  const length = str.length;
+  const closing = new Uint32Array(length + 1);
+  const lineBreak = new Uint32Array(length + 1);
+  closing[length] = length;
+  lineBreak[length] = length;
+  const isLineBreak = ch => ch === '\n' || ch === '\r' || ch === '\u2028' || ch === '\u2029';
+  for (let i = length - 1; i >= 0; i--) {
+    closing[i] = str[i] === ']' && i > 0 && str[i - 1] !== '\\' ? i : closing[i + 1];
+    lineBreak[i] = isLineBreak(str[i]) ? i : lineBreak[i + 1];
+  }
+  const output = [];
+  for (let i = 0; i < length; i++) {
+    const end = i + 2 <= length ? closing[i + 2] : length;
+    if (str[i] === '[' && end < length && lineBreak[i + 1] >= end - 1) {
+      output.push(str.slice(i, end + 1));
+      i = end;
+    } else if (str[i] !== '\\' || i + 1 === length || isLineBreak(str[i + 1])) {
+      output.push(str[i]);
+    }
+  }
+  return output.join('');
 };
 
 exports.escapeLast = (input, char, lastIdx) => {
