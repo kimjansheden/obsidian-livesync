@@ -148,7 +148,7 @@
         "events": "^3.3.0",
         "fake-indexeddb": "6.2.5",
         "globals": "^14.0.0",
-        "picomatch": "4.0.7",
+        "picomatch": "file:./_tools/picomatch",
         "playwright": "^1.58.2",
         "postcss": "^8.5.6",
         "pouchdb-adapter-http": "^9.0.0",
@@ -205,9 +205,6 @@
     "overrides": {
         "@puppeteer/browsers": "3.2.1",
         "deepmerge-ts": "8.0.2",
-        "fdir": {
-            "picomatch": "4.0.7"
-        },
         "typed-rest-client": {
             "qs": "6.17.1"
         },
@@ -221,7 +218,8 @@
         "minimatch": "$minimatch",
         "glob": "14.0.3",
         "deepmerge": "$deepmerge",
-        "@aws-sdk/xml-builder": "3.972.31"
+        "@aws-sdk/xml-builder": "3.972.31",
+        "picomatch": "$picomatch"
     },
     "workspaces": [
         "src/apps/cli",

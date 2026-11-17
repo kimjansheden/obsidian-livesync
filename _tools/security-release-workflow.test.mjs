@@ -1,6 +1,7 @@
 const assert = process.getBuiltinModule("node:assert/strict");
 const { readFile } = process.getBuiltinModule("node:fs/promises");
 const { describe, it } = process.getBuiltinModule("node:test");
+import "./picomatch.test.mjs";
 import commonlibIdentity from "../docs/security/commonlib-release.json" with { type: "json" };
 import { normaliseCycloneDxSbom } from "../scripts/security/generate-sbom.mjs";
 import { validateCommonlibSourceReceipt } from "../scripts/security/verify-commonlib-source-receipt.mjs";

@@ -19,6 +19,8 @@ export default defineConfig(
         "**/svelte.config.js",
         "**/*.unit.spec.ts",
         "**/test/**",
+        // The distribution retains upstream CommonJS style; its patch has dedicated contract tests.
+        "_tools/picomatch/**",
         "src/apps/_test/**",
         "src/apps/cli/testdeno/**",
     ]),

@@ -68,6 +68,57 @@ export class ModuleInteractiveConflictResolver extends AbstractObsidianModule {
         await this.services.conflict.ensureAllProcessed();
     }
 
+    private watchForRemoteResolution(filename: FilePathWithPrefix, dialog: ConflictResolveModal): () => void {
+        let stopped = false;
+        let stopFeed: (() => void) | undefined;
+        const stop = () => {
+            if (stopped) return;
+            stopped = true;
+            stopFeed?.();
+        };
+        fireAndForget(async () => {
+            try {
+                const id = await this.services.path.path2id(filename);
+                if (stopped) return;
+                const database = this.localDatabase.localDatabase;
+                const check = async () => {
+                    if (stopped) return;
+                    try {
+                        const current = await database.get(id, { conflicts: true });
+                        if (!stopped && !current._conflicts?.length) {
+                            stop();
+                            dialog.sendResponse(CANCELLED);
+                            await this.refreshConflictState(filename);
+                        }
+                    } catch (error) {
+                        this._log(error, LOG_LEVEL_VERBOSE);
+                    }
+                };
+                const feed = database.changes({
+                    since: "now",
+                    live: true,
+                    doc_ids: [id],
+                    include_docs: false,
+                    return_docs: false,
+                });
+                stopFeed = () => {
+                    feed.cancel();
+                };
+                void feed.on("change", () => {
+                    fireAndForget(check);
+                });
+                void feed.on("error", (error: unknown) => {
+                    this._log(error, LOG_LEVEL_VERBOSE);
+                });
+                // Recheck after subscribing so a resolution during setup is observed too.
+                await check();
+            } catch (error) {
+                this._log(error, LOG_LEVEL_VERBOSE);
+            }
+        });
+        return stop;
+    }
+
     _everyOnloadStart(): Promise<boolean> {
         this.addCommand({
             id: "livesync-checkdoc-conflicted",
@@ -106,7 +157,8 @@ export class ModuleInteractiveConflictResolver extends AbstractObsidianModule {
             this._log("Merge:open conflict dialog", LOG_LEVEL_VERBOSE);
             const dialog = new ConflictResolveModal(this.app, filename, conflictCheckResult);
             dialog.open();
-            const selected = await dialog.waitForResult();
+            const stopWatching = this.watchForRemoteResolution(filename, dialog);
+            const selected = await dialog.waitForResult().finally(stopWatching);
             if (selected === POSTPONED) {
                 this.postponedConflictEpisodes.add(filename);
                 eventHub.emitEvent(EVENT_ON_UNRESOLVED_ERROR);
