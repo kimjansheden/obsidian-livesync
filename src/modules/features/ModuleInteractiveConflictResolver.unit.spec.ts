@@ -13,6 +13,8 @@ const modalState = vi.hoisted(() => ({
     constructed: 0,
     result: undefined as unknown,
     postponed: Symbol("postponed"),
+    responses: [] as unknown[],
+    pending: undefined as undefined | { promise: Promise<unknown>; resolve: (value: unknown) => void },
 }));
 
 vi.mock("@/common/utils.ts", () => ({
@@ -28,8 +30,13 @@ vi.mock("./InteractiveConflictResolving/ConflictResolveModal.ts", () => ({
 
         open() {}
 
+        sendResponse(value: unknown) {
+            modalState.responses.push(value);
+            modalState.pending?.resolve(value);
+        }
+
         async waitForResult() {
-            return modalState.result;
+            return modalState.pending ? await modalState.pending.promise : modalState.result;
         }
     },
 }));
@@ -49,7 +56,24 @@ async function* documents(items: unknown[]) {
     }
 }
 
+function holdModal() {
+    let resolveResult!: (value: unknown) => void;
+    modalState.pending = {
+        promise: new Promise((resolve) => {
+            resolveResult = resolve;
+        }),
+        resolve: (value) => resolveResult(value),
+    };
+    return (value: unknown) => resolveResult(value);
+}
+
 function createModule(conflictedRevisions: string[] = ["2-right"]) {
+    const changeHandlers = new Map<string, () => void>();
+    const changeFeed = { on: vi.fn(), cancel: vi.fn() };
+    changeFeed.on.mockImplementation((event: string, handler: () => void) => {
+        changeHandlers.set(event, handler);
+        return changeFeed;
+    });
     const handlers = {
         unresolvedMessages: undefined as undefined | (() => Promise<string[]>),
     };
@@ -79,13 +103,20 @@ function createModule(conflictedRevisions: string[] = ["2-right"]) {
         },
         replication: { replicateByEvent: vi.fn(async () => true) },
         vault: { getActiveFilePath: vi.fn(() => path) },
-        path: { getPath: vi.fn((entry: { path: FilePathWithPrefix }) => entry.path) },
+        path: {
+            getPath: vi.fn((entry: { path: FilePathWithPrefix }) => entry.path),
+            path2id: vi.fn(async () => "synthetic-note-id"),
+        },
     };
     const core = {
         _services: services,
         services,
         settings: { ...DEFAULT_SETTINGS, syncAfterMerge: false },
         localDatabase: {
+            localDatabase: {
+                changes: vi.fn(() => changeFeed),
+                get: vi.fn(async () => ({ _rev: "2-left", _conflicts: conflictedRevisions })),
+            },
             getDBEntry: vi.fn(async (): Promise<false | { _rev: string; _conflicts?: string[] }> => false),
             findAllDocs: vi.fn(() => documents([])),
         },
@@ -100,13 +131,115 @@ function createModule(conflictedRevisions: string[] = ["2-right"]) {
     const plugin = { app: {} };
     const module = new ModuleInteractiveConflictResolver(plugin as never, core as never);
     module._log = vi.fn();
-    return { core, handlers, module, services };
+    return { core, handlers, module, services, changeFeed, changeHandlers };
 }
 
 describe("ModuleInteractiveConflictResolver postponement", () => {
     beforeEach(() => {
         modalState.constructed = 0;
         modalState.result = modalState.postponed;
+        modalState.responses = [];
+        modalState.pending = undefined;
+    });
+
+    it("closes the open dialogue when another device resolves its conflict", async () => {
+        const revisions = ["2-right"];
+        const { module, core, services, changeFeed, changeHandlers } = createModule(revisions);
+        holdModal();
+        const result = module._anyResolveConflictByUI(path, conflict);
+        await vi.waitFor(() => expect(changeFeed.on).toHaveBeenCalledWith("change", expect.any(Function)));
+        await vi.waitFor(() => expect(core.localDatabase.localDatabase.get).toHaveBeenCalled());
+        revisions.splice(0);
+        changeHandlers.get("change")?.();
+
+        await expect(result).resolves.toBe(false);
+        expect(modalState.responses).toEqual([CANCELLED]);
+        expect(services.conflict.resolveByDeletingRevision).not.toHaveBeenCalled();
+        expect(core.databaseFileAccess.storeContent).not.toHaveBeenCalled();
+        expect(changeFeed.cancel).toHaveBeenCalledOnce();
+        expect(core.localDatabase.localDatabase.changes).toHaveBeenCalledWith(
+            expect.objectContaining({
+                live: true,
+                since: "now",
+                doc_ids: ["synthetic-note-id"],
+                include_docs: false,
+            })
+        );
+    });
+
+    it("keeps the dialogue open while real conflicts remain", async () => {
+        const { module, core, changeFeed, changeHandlers } = createModule();
+        const respond = holdModal();
+        const result = module._anyResolveConflictByUI(path, conflict);
+        try {
+            await vi.waitFor(() => expect(core.localDatabase.localDatabase.get).toHaveBeenCalledOnce());
+            changeHandlers.get("change")?.();
+            await vi.waitFor(() => expect(core.localDatabase.localDatabase.get).toHaveBeenCalledTimes(2));
+            expect(modalState.responses).toEqual([]);
+            expect(changeFeed.cancel).not.toHaveBeenCalled();
+        } finally {
+            respond(CANCELLED);
+            await result;
+        }
+        expect(changeFeed.cancel).toHaveBeenCalledOnce();
+    });
+
+    it("does not mistake a database read error for a resolved conflict", async () => {
+        const { module, core, changeHandlers } = createModule();
+        core.localDatabase.localDatabase.get.mockRejectedValue(new Error("synthetic read failure"));
+        const respond = holdModal();
+        const result = module._anyResolveConflictByUI(path, conflict);
+        try {
+            await vi.waitFor(() => expect(core.localDatabase.localDatabase.get).toHaveBeenCalledOnce());
+            changeHandlers.get("change")?.();
+            await vi.waitFor(() => expect(core.localDatabase.localDatabase.get).toHaveBeenCalledTimes(2));
+            expect(modalState.responses).toEqual([]);
+        } finally {
+            respond(CANCELLED);
+            await result;
+        }
+    });
+
+    it("observes a resolution which happens before the change subscription is ready", async () => {
+        const { module, services, changeFeed } = createModule([]);
+        holdModal();
+        await expect(module._anyResolveConflictByUI(path, conflict)).resolves.toBe(false);
+        expect(modalState.responses).toEqual([CANCELLED]);
+        expect(changeFeed.cancel).toHaveBeenCalledOnce();
+        expect(services.conflict.resolveByDeletingRevision).not.toHaveBeenCalled();
+    });
+
+    it("does not create a late subscription after the user has postponed the dialogue", async () => {
+        const { module, core, services } = createModule();
+        let resolveId!: (value: string) => void;
+        services.path.path2id.mockReturnValue(
+            new Promise((resolve) => {
+                resolveId = resolve;
+            })
+        );
+        await module._anyResolveConflictByUI(path, conflict);
+        resolveId("synthetic-note-id");
+        await Promise.resolve();
+        await Promise.resolve();
+        expect(core.localDatabase.localDatabase.changes).not.toHaveBeenCalled();
+    });
+
+    it("cancels once for a burst of changes and ignores callbacks after closure", async () => {
+        const revisions = ["2-right"];
+        const { module, core, changeFeed, changeHandlers } = createModule(revisions);
+        holdModal();
+        const result = module._anyResolveConflictByUI(path, conflict);
+        await vi.waitFor(() => expect(core.localDatabase.localDatabase.get).toHaveBeenCalledOnce());
+        revisions.splice(0);
+        changeHandlers.get("change")?.();
+        changeHandlers.get("change")?.();
+        await result;
+        const calls = core.localDatabase.localDatabase.get.mock.calls.length;
+        changeHandlers.get("change")?.();
+        await Promise.resolve();
+        expect(core.localDatabase.localDatabase.get).toHaveBeenCalledTimes(calls);
+        expect(modalState.responses).toEqual([CANCELLED]);
+        expect(changeFeed.cancel).toHaveBeenCalledOnce();
     });
 
     it("does not reopen an unchanged conflict after the user chooses Not now", async () => {
