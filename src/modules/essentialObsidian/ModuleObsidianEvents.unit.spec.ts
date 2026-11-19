@@ -614,6 +614,103 @@ describe("watchWindowVisibilityAsync — remote requests left waiting from the b
     });
 });
 
+describe("requests of a replication cycle which never get an answer on the desktop app", () => {
+    afterEach(() => {
+        vi.useRealTimers();
+        delete (globalThis as any).activeWindow;
+    });
+
+    function startWatching(opts: { isMobile: boolean; abortedStaleRequests?: number; hidden?: boolean }) {
+        vi.useFakeTimers();
+        const context = setup({ hidden: opts.hidden ?? false, ...opts });
+        const registerInterval = vi.fn((id: number) => id);
+        (context.module.plugin as any).registerInterval = registerInterval;
+        (context.module as any).watchStalledDesktopRemoteRequests();
+        return { ...context, registerInterval };
+    }
+
+    function runReplicationCycle(context: ReturnType<typeof startWatching>) {
+        context.boundedRemoteActivityCount.value = 1;
+        context.finiteReplicationActivityCount.value = 1;
+    }
+
+    it("aborts requests which have waited more than three minutes and runs the replication again", async () => {
+        const context = startWatching({ isMobile: false, abortedStaleRequests: 1 });
+        runReplicationCycle(context);
+
+        await vi.advanceTimersByTimeAsync(59_999);
+        expect(context.abortStaleRemoteRequests).not.toHaveBeenCalled();
+
+        await vi.advanceTimersByTimeAsync(1);
+        expect(context.abortStaleRemoteRequests).toHaveBeenCalledExactlyOnceWith(Date.now() - 180_000);
+        expect(context.replicate).not.toHaveBeenCalled();
+
+        context.boundedRemoteActivityCount.value = 0;
+        await vi.waitFor(() => expect(context.replicate).toHaveBeenCalledTimes(1));
+    });
+
+    it("also recovers while the desktop window is hidden", async () => {
+        const context = startWatching({ isMobile: false, abortedStaleRequests: 1, hidden: true });
+        runReplicationCycle(context);
+
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(context.abortStaleRemoteRequests).toHaveBeenCalledTimes(1);
+
+        context.boundedRemoteActivityCount.value = 0;
+        await vi.waitFor(() => expect(context.replicate).toHaveBeenCalledTimes(1));
+    });
+
+    it("checks again every minute while the cycle keeps waiting", async () => {
+        const context = startWatching({ isMobile: false, abortedStaleRequests: 0 });
+        runReplicationCycle(context);
+
+        await vi.advanceTimersByTimeAsync(180_000);
+
+        expect(context.abortStaleRemoteRequests).toHaveBeenCalledTimes(3);
+        expect(context.replicate).not.toHaveBeenCalled();
+    });
+
+    it("leaves a rebuild or other remote work which is not a replication cycle alone", async () => {
+        const context = startWatching({ isMobile: false, abortedStaleRequests: 1 });
+        context.boundedRemoteActivityCount.value = 1;
+        context.finiteReplicationActivityCount.value = 0;
+
+        await vi.advanceTimersByTimeAsync(60_000);
+
+        expect(context.abortStaleRemoteRequests).not.toHaveBeenCalled();
+    });
+
+    it("does nothing while no remote work is running", async () => {
+        const context = startWatching({ isMobile: false, abortedStaleRequests: 1 });
+
+        await vi.advanceTimersByTimeAsync(60_000);
+
+        expect(context.abortStaleRemoteRequests).not.toHaveBeenCalled();
+    });
+
+    it("does not run the replication again once the plug-in is suspended", async () => {
+        const context = startWatching({ isMobile: false, abortedStaleRequests: 1 });
+        runReplicationCycle(context);
+
+        await vi.advanceTimersByTimeAsync(60_000);
+        context.lifecycleState.unloaded = true;
+        context.boundedRemoteActivityCount.value = 0;
+        await vi.advanceTimersByTimeAsync(1_000);
+
+        expect(context.replicate).not.toHaveBeenCalled();
+    });
+
+    it("is not installed on the mobile app, which aborts after returning from the background instead", async () => {
+        const context = startWatching({ isMobile: true, abortedStaleRequests: 1 });
+        runReplicationCycle(context);
+
+        await vi.advanceTimersByTimeAsync(180_000);
+
+        expect(context.registerInterval).not.toHaveBeenCalled();
+        expect(context.abortStaleRemoteRequests).not.toHaveBeenCalled();
+    });
+});
+
 describe("watchWindowVisibilityAsync — sending what was written when the mobile app is hidden", () => {
     const objectStorage = { remoteType: REMOTE_MINIO };
 

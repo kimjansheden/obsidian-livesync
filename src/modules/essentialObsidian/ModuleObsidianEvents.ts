@@ -53,6 +53,12 @@ const STALE_REMOTE_REQUEST_GRACE_MS = 10_000;
 const STALE_REMOTE_REQUEST_TASK = "abort-stale-remote-requests";
 // How long to wait for the interrupted cycle to unwind before giving up on running it again straight away.
 const ABORTED_REPLICATION_UNWIND_TIMEOUT_MS = 60_000;
+// On the desktop app a request whose connection stalls without an answer has no deadline of its own. It keeps the
+// replication cycle, and every replication queued behind it, waiting until the app restarts. A request of a
+// replication cycle which has waited this long is aborted. One request over a working connection finishes well
+// within it, so an aborted request is one which was not going to be answered.
+const DESKTOP_STALLED_REMOTE_REQUEST_MS = 180_000;
+const DESKTOP_STALLED_REMOTE_REQUEST_CHECK_MS = 60_000;
 
 export class ModuleObsidianEvents extends AbstractObsidianModule {
     _everyOnloadStart(): Promise<boolean> {
@@ -299,21 +305,54 @@ export class ModuleObsidianEvents extends AbstractObsidianModule {
 
     private async abortStaleRemoteRequests(visibleSince: number) {
         if (activeWindow.document.hidden) return;
+        await this.abortReplicationRequestsStartedBefore(
+            visibleSince,
+            "which were still waiting after the app returned from the background",
+            true
+        );
+    }
+
+    /** On the desktop app, check regularly for requests of a replication cycle which never got an answer. */
+    private watchStalledDesktopRemoteRequests() {
+        if (this.services.API.isMobile()) return;
+        this.plugin.registerInterval(
+            compatGlobal.setInterval(
+                () => fireAndForget(() => this.abortStalledDesktopRemoteRequests()),
+                DESKTOP_STALLED_REMOTE_REQUEST_CHECK_MS
+            )
+        );
+    }
+
+    private async abortStalledDesktopRemoteRequests() {
+        await this.abortReplicationRequestsStartedBefore(
+            Date.now() - DESKTOP_STALLED_REMOTE_REQUEST_MS,
+            `which had waited more than ${DESKTOP_STALLED_REMOTE_REQUEST_MS / 1000} seconds without an answer`,
+            false
+        );
+    }
+
+    /**
+     * Abort the requests of the running replication cycle which started before `startedBefore`, and run the
+     * replication again once the interrupted cycle has unwound.
+     * @param onlyWhileVisible whether the replication runs again only while the app is visible.
+     */
+    private async abortReplicationRequestsStartedBefore(
+        startedBefore: number,
+        reason: string,
+        onlyWhileVisible: boolean
+    ) {
         const replicator = this.services.replicator;
         const remoteActivities = replicator.boundedRemoteActivityCount.value;
         // Only finite replication cycles can be interrupted and run again safely. Leave a rebuild or any other
         // remote work alone, even when a replication cycle is running beside it.
         if (remoteActivities === 0 || remoteActivities !== replicator.finiteReplicationActivityCount.value) return;
-        const aborted = replicator.getActiveReplicator()?.abortStaleRemoteRequests(visibleSince) ?? 0;
+        const aborted = replicator.getActiveReplicator()?.abortStaleRemoteRequests(startedBefore) ?? 0;
         if (aborted === 0) return;
-        this._log(
-            `Aborted ${aborted} remote request(s) which were still waiting after the app returned from the background`,
-            LOG_LEVEL_INFO
-        );
+        this._log(`Aborted ${aborted} remote request(s) ${reason}`, LOG_LEVEL_INFO);
         // The interrupted cycle leaves its work pending; run it again once that cycle has unwound.
         if (!(await this.waitForBoundedRemoteActivityToEnd(ABORTED_REPLICATION_UNWIND_TIMEOUT_MS))) return;
         // An unloaded plug-in counts as suspended.
-        if (activeWindow.document.hidden || this.services.appLifecycle.isSuspended()) return;
+        if ((onlyWhileVisible && activeWindow.document.hidden) || this.services.appLifecycle.isSuspended()) return;
         await this.services.replication.replicate();
     }
 
@@ -471,6 +510,7 @@ export class ModuleObsidianEvents extends AbstractObsidianModule {
     _everyOnLayoutReady(): Promise<boolean> {
         this.swapSaveCommand();
         this.registerWatchEvents();
+        this.watchStalledDesktopRemoteRequests();
         return Promise.resolve(true);
     }
 
