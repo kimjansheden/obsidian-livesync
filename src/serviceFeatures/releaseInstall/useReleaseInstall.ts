@@ -283,6 +283,8 @@ export function useReleaseInstall(
             waitForTeardown: () => bindings.waitForTeardown(),
             prepareForDowngrade: bootstrap ? undefined : bindings.prepareForDowngrade,
             records,
+            // The mobile app does not load a plug-in again within one process, so the next start loads the release.
+            activateOnRestart: host.services.API.isMobile(),
             notify,
             wait,
             timings: DEFAULT_RELEASE_INSTALL_TIMINGS,

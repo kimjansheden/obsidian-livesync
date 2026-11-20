@@ -16,6 +16,7 @@ Earlier releases remain available in the 1.0 release history, the 1.0 preview hi
 
 #### Fixed
 
+- On the mobile app, a release delivered through the vault to a bootstrap installation starts at the next start of the app. The running release keeps synchronising until then and a notice asks for a restart. Reloading the plug-in within the running app could leave Self-hosted LiveSync stopped, because the mobile app does not load a plug-in again in the same process.
 - On the desktop app, an Object Storage request of a replication cycle which has waited more than three minutes without an answer is aborted, and the replication runs again. A stalled connection no longer holds the cycle, and every replication queued behind it, until Obsidian restarts.
 - A saved revision records the size of the exact bytes it stores. A file rewritten between its stat and its read no longer produces a revision that receiving devices refuse to write. The plug-in pins attested Commonlib `0.1.19-security.31`.
 - JSON conflicts in Object Storage vaults retain their original bytes for an explicit decision, even when automatic Markdown merging is enabled. Structural JSON merging no longer rewrites indentation, key order, or line endings. Byte-identical duplicate leaves can still collapse without synthesising content.

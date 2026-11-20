@@ -119,6 +119,11 @@ export interface ReleaseInstallEnvironment {
     /** Runs while the current key-value database is still open, before the final idle check and unload. */
     prepareForDowngrade?: () => Promise<PreparedDowngrade | void>;
     records: FailedReleaseRecords;
+    /**
+     * The host cannot unload and load the plug-in again within one process, as on the mobile app. A bootstrap
+     * release then only records its intent; the permanent loader starts it at the next start of the app.
+     */
+    activateOnRestart?: boolean;
     /** Tells the user. `lasting` messages stay until dismissed. */
     notify: (message: string, lasting: boolean) => void;
     wait: (milliseconds: number) => Promise<void>;
@@ -150,6 +155,8 @@ export type ReleasePreparation =
 
 export type ReleaseInstallOutcome =
     | { status: "installed" }
+    /** The running build stays loaded; the bootstrap starts the new release at the next start of the app. */
+    | { status: "activates-on-restart" }
     /** The host did not unload the running build, so no file was replaced and it is tried again at the next start. */
     | { status: "not-installed"; reason: string }
     /** The new build was not accepted; the previous build is back and running. */
@@ -518,6 +525,7 @@ export function completeReleaseInstall(
     install: PreparedReleaseInstall
 ): Promise<ReleaseInstallOutcome> {
     if (env.bootstrap && install.bootstrap) {
+        if (env.activateOnRestart) return activateOnNextStart(env, install);
         let unloading: Promise<unknown>;
         try {
             unloading = env.host.disablePlugin(env.pluginId);
@@ -538,6 +546,33 @@ export function completeReleaseInstall(
         unloading = Promise.reject(error instanceof Error ? error : new Error(String(error)));
     }
     return finishInstall(env, install, unloading);
+}
+
+/**
+ * Record the staged release as the bootstrap's candidate and leave the running build loaded. The loader tries the
+ * candidate once at the next start and falls back to the accepted release when it does not load.
+ */
+async function activateOnNextStart(
+    env: ReleaseInstallEnvironment,
+    install: PreparedReleaseInstall
+): Promise<ReleaseInstallOutcome> {
+    try {
+        await env.bootstrap!.activate(install.packageSha256);
+    } catch (error) {
+        const reason = `its start could not be recorded: ${describeError(error)}`;
+        env.notify(
+            `Release ${install.releaseName} from the vault was not installed: ${reason}. ` +
+                `The running release is unchanged. It is tried again at the next start.`,
+            true
+        );
+        return { status: "not-installed", reason };
+    }
+    env.notify(
+        `Self-hosted LiveSync release ${install.releaseName} from the vault starts the next time the app starts. ` +
+            `Restart the app to start it now; the running release keeps synchronising until then.`,
+        true
+    );
+    return { status: "activates-on-restart" };
 }
 
 /** The permanent bootstrap owns candidate loading and fallback, so no installed executable is changed here. */
