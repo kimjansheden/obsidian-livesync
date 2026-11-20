@@ -573,6 +573,58 @@ describe("swapping, reloading and verifying", () => {
         ]);
     });
 
+    it("records a bootstrap candidate for the next start and keeps the running build where the host cannot reload", async () => {
+        const device = createDevice();
+        const activate = vi.fn(async () => undefined);
+        device.env.bootstrap = {
+            protocol: 1,
+            payloadSha256: "b".repeat(64),
+            packageSha256: "c".repeat(64),
+            stage: vi.fn(async () => undefined),
+            activate,
+        };
+        device.env.activateOnRestart = true;
+        const install = await prepared(device);
+        // A host which reloads nothing in this process, as the mobile app does.
+        device.host.loadBuild = () => undefined;
+
+        await expect(completeReleaseInstall(device.env, install)).resolves.toEqual({ status: "activates-on-restart" });
+
+        expect(activate).toHaveBeenCalledExactlyOnceWith(install.packageSha256);
+        expect(device.host.instance).toBe(device.runningInstance);
+        expect(device.adapter.operations).not.toContain("enablePlugin");
+        expect(device.adapter.operations).not.toContain("disablePlugin");
+        expect(device.failedToLoad).toEqual([]);
+        expect(device.notices).toEqual([
+            { message: expect.stringContaining("starts the next time the app starts"), lasting: true },
+        ]);
+    });
+
+    it("keeps the running build and reports when the next-start record cannot be written", async () => {
+        const device = createDevice();
+        device.env.bootstrap = {
+            protocol: 1,
+            payloadSha256: "b".repeat(64),
+            packageSha256: "c".repeat(64),
+            stage: vi.fn(async () => undefined),
+            activate: vi.fn(async () => {
+                throw new Error("synthetic: storage refused the record");
+            }),
+        };
+        device.env.activateOnRestart = true;
+        const install = await prepared(device);
+
+        await expect(completeReleaseInstall(device.env, install)).resolves.toEqual({
+            status: "not-installed",
+            reason: "its start could not be recorded: synthetic: storage refused the record",
+        });
+        expect(device.host.instance).toBe(device.runningInstance);
+        expect(device.adapter.operations).not.toContain("disablePlugin");
+        expect(device.notices).toEqual([
+            { message: expect.stringContaining("The running release is unchanged"), lasting: true },
+        ]);
+    });
+
     it("accepts the candidate which loads after its durable intent loses the write acknowledgement", async () => {
         const device = createDevice();
         const candidateInstance = loadSyntheticBuild(mainJsOf(markerOf(NEW_RELEASE)))!;

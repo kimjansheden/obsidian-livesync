@@ -24,6 +24,8 @@ The local chunk-safety check requires a complete inspection when it has no valid
 
 The bootstrap waits up to ten minutes for a payload to finish loading. Opening a large mobile database while storage is busy can exceed the former one-minute limit. A payload is still accepted only after its startup completes; a timed-out startup retains ownership of its cleanup and cannot overlap a fallback runtime.
 
+On the mobile app a release delivered through the vault is not loaded within the running app. The installer records it as the bootstrap's candidate and leaves the running release loaded; the loader tries the candidate once at the next start and falls back to the accepted release when it does not load. A notice asks for a restart. The desktop app still unloads the running build and loads the candidate once nothing is being synchronised.
+
 This limit belongs to the permanent bootstrap executable. Delivering a new payload through the vault does not change an older loader's limit. A device affected by the old timeout needs the approved release's complete, hash-verified bootstrap installation set installed locally while Obsidian is stopped. Preserve the database, pending queue, settings, local trust and earlier runtime records. The new pinned baseline then supplies the compatible recovery payload without resetting the database or retrying an already failed candidate in the old loader.
 
 The feature is off until a trust file is placed on the device. There is no setting for it.

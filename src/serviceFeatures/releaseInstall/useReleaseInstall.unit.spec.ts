@@ -601,7 +601,7 @@ describe("with trusted keys", () => {
         expect(host.manager.unloadPlugin).not.toHaveBeenCalled();
     });
 
-    it("does not swap while a replication runs or the mobile app is hidden", async () => {
+    it("records the next start on the mobile app only once nothing runs and the app is visible", async () => {
         const host = createHost({ keysFile: keysFileOf(KEY), isMobile: true });
         const stage = vi.fn(async () => undefined);
         const activate = vi.fn(async () => undefined);
@@ -631,11 +631,16 @@ describe("with trusted keys", () => {
         host.services.replicator.boundedRemoteActivityCount.value = 0;
         await new Promise((resolve) => setTimeout(resolve, 2500));
         expect(host.manager.unloadPlugin).not.toHaveBeenCalled();
+        expect(activate).not.toHaveBeenCalled();
 
         host.bindings.isAppHidden.mockReturnValue(false);
 
         await vi.waitFor(() => expect(host.notices).toHaveLength(1), { timeout: 10_000, interval: 50 });
-        expect(host.notices[0].message).toContain("installed release");
+        // The mobile app cannot load a plug-in again within one process; the next start loads the release.
+        expect(host.notices[0].message).toContain("starts the next time the app starts");
+        expect(activate).toHaveBeenCalledOnce();
+        expect(host.manager.unloadPlugin).not.toHaveBeenCalled();
+        expect(host.manager.loadPlugin).not.toHaveBeenCalled();
     }, 30_000);
 
     it.each<[string, (host: ReturnType<typeof createHost>, busy: boolean) => void]>([
