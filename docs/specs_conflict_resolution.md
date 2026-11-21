@@ -175,6 +175,16 @@ persisted across a plug-in reload. Completed pairwise resolutions are persisted
 in the ordinary revision tree, so a reload forgets only the postponement and
 does not repeat an already committed stage.
 
+On the mobile app a conflict check never opens a dialogue by itself. A dialogue
+which appears while the user types takes the place of the on-screen keyboard,
+and a tap meant for a key would choose a resolution. The conflict episode is
+postponed instead, and a notice says **<file> has a conflict. Tap here to
+resolve it.** The dialogue opens when the user taps the link, runs **Resolve if
+conflicted.**, picks the file through **Pick a file to resolve conflict**, or
+follows the start-up notice about conflicted files. The in-editor status shows
+the conflict meanwhile, as for **Not now**. The desktop app opens the dialogue
+as before.
+
 When synchronisation supplies a resolved document, the existing incoming-file
 processing event closes an open conflict dialogue for that path. The same event
 rechecks the local revision tree: if no conflict leaf remains, it ends any

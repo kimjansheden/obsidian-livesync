@@ -84,6 +84,7 @@ function createModule(conflictedRevisions: string[] = ["2-right"]) {
             registerWindow: vi.fn(),
             addRibbonIcon: vi.fn(),
             registerProtocolHandler: vi.fn(),
+            isMobile: vi.fn(() => false),
         },
         appLifecycle: {
             getUnresolvedMessages: {
@@ -126,6 +127,9 @@ function createModule(conflictedRevisions: string[] = ["2-right"]) {
         },
         confirm: {
             askSelectString: vi.fn(async (): Promise<string | undefined> => undefined),
+            askInPopup: vi.fn(
+                (_key: string, _text: string, _anchorCallback: (anchor: HTMLAnchorElement) => void) => undefined
+            ),
         },
     };
     const plugin = { app: {} };
@@ -371,6 +375,73 @@ describe("ModuleInteractiveConflictResolver postponement", () => {
 
         expect(services.conflict.resolveByDeletingRevision).not.toHaveBeenCalled();
         expect(services.conflict.queueCheckFor).toHaveBeenCalledWith(path);
+    });
+});
+
+describe("ModuleInteractiveConflictResolver on the mobile app", () => {
+    beforeEach(() => {
+        modalState.constructed = 0;
+        modalState.result = CANCELLED;
+        modalState.responses = [];
+        modalState.pending = undefined;
+    });
+
+    function createMobileModule() {
+        const created = createModule();
+        created.services.API.isMobile.mockReturnValue(true);
+        // A resolution request runs the conflict check, which asks the user interface again.
+        created.services.conflict.queueCheckFor.mockImplementation(async () => {
+            await created.module._anyResolveConflictByUI(path, conflict);
+        });
+        return created;
+    }
+
+    function tapNoticeLink(core: ReturnType<typeof createModule>["core"]) {
+        const anchorCallback = core.confirm.askInPopup.mock.calls[0]![2];
+        const listeners: (() => void)[] = [];
+        const anchor = { text: "", addEventListener: (_event: string, listener: () => void) => listeners.push(listener) };
+        anchorCallback(anchor as never);
+        for (const listener of listeners) listener();
+        return anchor;
+    }
+
+    it("does not open a dialogue by itself and shows one notice instead", async () => {
+        const { core, module } = createMobileModule();
+
+        await expect(module._anyResolveConflictByUI(path, conflict)).resolves.toBe(false);
+        await module._anyResolveConflictByUI(path, conflict);
+
+        expect(modalState.constructed).toBe(0);
+        expect(core.confirm.askInPopup).toHaveBeenCalledOnce();
+        expect(core.confirm.askInPopup.mock.calls[0]![1]).toBe("note.md has a conflict. Tap {HERE} to resolve it.");
+    });
+
+    it("opens the dialogue when the link of the notice is tapped", async () => {
+        const { core, module } = createMobileModule();
+        await module._anyResolveConflictByUI(path, conflict);
+
+        const anchor = tapNoticeLink(core);
+
+        expect(anchor.text).toBe("here");
+        await vi.waitFor(() => expect(modalState.constructed).toBe(1));
+    });
+
+    it("opens the dialogue for an explicit resolution request", async () => {
+        const { module } = createMobileModule();
+
+        await (module as any).requestConflictResolution(path);
+
+        expect(modalState.constructed).toBe(1);
+    });
+
+    it("postpones a later automatic check again after a requested dialogue has closed", async () => {
+        const { core, module } = createMobileModule();
+        await (module as any).requestConflictResolution(path);
+
+        await module._anyResolveConflictByUI(path, conflict);
+
+        expect(modalState.constructed).toBe(1);
+        expect(core.confirm.askInPopup).toHaveBeenCalledOnce();
     });
 });
 

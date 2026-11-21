@@ -21,6 +21,8 @@ import type { Editor, MarkdownFileInfo, MarkdownView } from "@/deps.ts";
 
 export class ModuleInteractiveConflictResolver extends AbstractObsidianModule {
     private postponedConflictEpisodes = new Set<FilePathWithPrefix>();
+    /** Files whose dialogue the user asked for; on the mobile app no other conflict check opens a dialogue. */
+    private requestedConflictDialogues = new Set<FilePathWithPrefix>();
 
     private async getConflictVersionCount(filename: FilePathWithPrefix): Promise<number | undefined> {
         try {
@@ -63,9 +65,36 @@ export class ModuleInteractiveConflictResolver extends AbstractObsidianModule {
 
     private async requestConflictResolution(filename: FilePathWithPrefix): Promise<void> {
         this.postponedConflictEpisodes.delete(filename);
+        this.requestedConflictDialogues.add(filename);
         eventHub.emitEvent(EVENT_ON_UNRESOLVED_ERROR);
-        await this.services.conflict.queueCheckFor(filename);
-        await this.services.conflict.ensureAllProcessed();
+        try {
+            await this.services.conflict.queueCheckFor(filename);
+            await this.services.conflict.ensureAllProcessed();
+        } finally {
+            this.requestedConflictDialogues.delete(filename);
+        }
+    }
+
+    /**
+     * On the mobile app a dialogue which opens by itself takes the place of the on-screen keyboard, and a tap meant
+     * for a key chooses a resolution. A conflict found by a check is therefore postponed with a notice, and its
+     * dialogue opens only when the user asks for it.
+     */
+    private postponeUntilRequested(filename: FilePathWithPrefix): void {
+        this.postponedConflictEpisodes.add(filename);
+        eventHub.emitEvent(EVENT_ON_UNRESOLVED_ERROR);
+        this._log(`Merge: ${filename} is conflicted; its dialogue waits until it is requested`, LOG_LEVEL_INFO);
+        const name = filename.split("/").pop() ?? filename;
+        this.core.confirm.askInPopup(
+            `conflict-${filename}`,
+            $msg("${FILE} has a conflict. Tap {HERE} to resolve it.", { FILE: name }),
+            (anchor) => {
+                anchor.text = "here";
+                anchor.addEventListener("click", () => {
+                    fireAndForget(() => this.requestConflictResolution(filename));
+                });
+            }
+        );
     }
 
     private watchForRemoteResolution(filename: FilePathWithPrefix, dialog: ConflictResolveModal): () => void {
@@ -152,6 +181,10 @@ export class ModuleInteractiveConflictResolver extends AbstractObsidianModule {
             if (this.postponedConflictEpisodes.has(filename)) {
                 this._log(`Merge: Postponed ${filename}`, LOG_LEVEL_VERBOSE);
                 eventHub.emitEvent(EVENT_ON_UNRESOLVED_ERROR);
+                return false;
+            }
+            if (this.services.API.isMobile() && !this.requestedConflictDialogues.has(filename)) {
+                this.postponeUntilRequested(filename);
                 return false;
             }
             this._log("Merge:open conflict dialog", LOG_LEVEL_VERBOSE);
