@@ -18,6 +18,7 @@ import { EVENT_FILE_SAVED, EVENT_SETTING_SAVED, eventHub } from "@/common/events
 import { $msg } from "@/common/translation";
 import type { LiveSyncCore } from "@/main";
 import { ReplicateResultProcessor } from "./ReplicateResultProcessor";
+import { sendLocalChangesOrReplicate } from "./sendLocalChanges";
 import { UnresolvedErrorManager } from "@vrtmrz/livesync-commonlib/compat/services/base/UnresolvedErrorManager";
 import { clearHandlers } from "@vrtmrz/livesync-commonlib/compat/replication/SyncParamsHandler";
 import type { NecessaryServices } from "@vrtmrz/livesync-commonlib/compat/interfaces/ServiceModule";
@@ -108,7 +109,10 @@ export class ModuleReplicator extends AbstractModule {
         this._normalFileReflectionFilterSignature = this.getNormalFileReflectionFilterSignature(this.settings);
         eventHub.onEvent(EVENT_FILE_SAVED, () => {
             if (this.settings.syncOnSave && !this.core.services.appLifecycle.isSuspended()) {
-                scheduleTask("perform-replicate-after-save", 250, () => this.services.replication.replicateByEvent());
+                // A save during a long receive leaves the device at once instead of after that receive.
+                scheduleTask("perform-replicate-after-save", 250, () =>
+                    sendLocalChangesOrReplicate(this.services, () => this.services.replication.replicateByEvent())
+                );
             }
         });
         eventHub.onEvent(EVENT_SETTING_SAVED, (setting) => {
