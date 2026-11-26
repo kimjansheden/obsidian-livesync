@@ -15,6 +15,7 @@ import {
 import type { LiveSyncCore } from "@/main.ts";
 import { compatGlobal } from "@vrtmrz/livesync-commonlib/compat/common/coreEnvFunctions";
 import type { ObsidianReplicatorService } from "@/modules/services/ObsidianServices";
+import { sendLocalChangesOrReplicate } from "@/modules/core/sendLocalChanges.ts";
 
 type MutableCommandDefinition = {
     callback?: () => void;
@@ -250,7 +251,9 @@ export class ModuleObsidianEvents extends AbstractObsidianModule {
                     }
                     await this.waitForStorageEventsToBeStored();
                     if (!(await this.hasChangesToSend())) return;
-                    await this.services.replication.replicate();
+                    // A synchronisation which is receiving would hold the send until its receive ends, which the
+                    // frozen app may never reach; the changes are sent beside it when that is safe.
+                    await sendLocalChangesOrReplicate(this.services, () => this.services.replication.replicate());
                 },
                 { label: "send-when-hidden" }
             )

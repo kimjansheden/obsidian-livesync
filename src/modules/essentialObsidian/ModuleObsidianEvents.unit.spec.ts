@@ -18,6 +18,8 @@ type SetupOptions = {
     abortedStaleRequests?: number;
     /** Whether the active replicator reports local changes which have not been sent. */
     unsentLocalChanges?: boolean;
+    /** What the active replicator answers when it is asked to send the local changes now. */
+    sendAnswer?: "nothing-to-send" | "sent" | "needs-replication" | "failed";
 };
 
 function setup(opts: SetupOptions) {
@@ -41,6 +43,7 @@ function setup(opts: SetupOptions) {
     const finiteReplicationActivityCount = reactiveSource(0);
     const abortStaleRemoteRequests = vi.fn((_startedBefore: number) => opts.abortedStaleRequests ?? 0);
     const hasUnsentLocalChanges = vi.fn(async () => opts.unsentLocalChanges ?? false);
+    const sendLocalChangesNow = vi.fn(async () => opts.sendAnswer ?? "needs-replication");
     const replicate = vi.fn(async () => true);
     const storeFileToDBUnderFileEventLock = vi.fn(async (_path: string) => true);
     // Counted before the task is awaited, as the replicator service does.
@@ -82,7 +85,7 @@ function setup(opts: SetupOptions) {
                 boundedRemoteActivityCount,
                 boundedLocalApplicationActivityCount,
                 finiteReplicationActivityCount,
-                getActiveReplicator: () => ({ abortStaleRemoteRequests, hasUnsentLocalChanges }),
+                getActiveReplicator: () => ({ abortStaleRemoteRequests, hasUnsentLocalChanges, sendLocalChangesNow }),
                 runBoundedLocalApplicationActivity,
                 runFiniteReplicationActivity,
             },
@@ -117,6 +120,7 @@ function setup(opts: SetupOptions) {
         runFiniteReplicationActivity,
         abortStaleRemoteRequests,
         hasUnsentLocalChanges,
+        sendLocalChangesNow,
         replicate,
         storeFileToDBUnderFileEventLock,
         editor,
@@ -144,6 +148,20 @@ describe("an unloaded plug-in", () => {
 
         expect(fileProcessing.commitPendingFileEvents).toHaveBeenCalled();
         expect(hasUnsentLocalChanges).toHaveBeenCalled();
+    });
+
+    it("sends beside a running synchronisation when the mobile app is hidden, without requesting another", async () => {
+        const { module, replicate, sendLocalChangesNow } = setup({
+            ...mobileObjectStorage,
+            hidden: true,
+            unsentLocalChanges: true,
+            sendAnswer: "sent",
+        });
+
+        await module.watchWindowVisibilityAsync();
+        await vi.waitFor(() => expect(sendLocalChangesNow).toHaveBeenCalledOnce(), { timeout: 5000 });
+
+        expect(replicate).not.toHaveBeenCalled();
     });
 
     it("neither saves, commits, sends nor suspends when the app is hidden", async () => {
@@ -785,6 +803,8 @@ describe("watchWindowVisibilityAsync — sending what was written when the mobil
         });
         vi.spyOn(replicator, "getActiveReplicator").mockReturnValue({
             hasUnsentLocalChanges: vi.fn(async () => true),
+            // No synchronisation is running yet, so the hidden app requests one.
+            sendLocalChangesNow: vi.fn(async () => "needs-replication"),
             openReplication,
         } as never);
         let queueState: unknown;
