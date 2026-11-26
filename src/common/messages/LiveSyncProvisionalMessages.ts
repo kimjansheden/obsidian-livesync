@@ -87,6 +87,7 @@ export const liveSyncProvisionalEnglishMessages = {
     "Change CouchDB server setting '${SETTING}' to '${VALUE}'?":
         "Change CouchDB server setting '${SETTING}' to '${VALUE}'?",
     "This file has unresolved conflicts.": "This file has unresolved conflicts.",
+    "${FILE} has a conflict. Tap {HERE} to resolve it.": "${FILE} has a conflict. Tap {HERE} to resolve it.",
     "This file has ${COUNT} unresolved versions. They will be reviewed one pair at a time.":
         "This file has ${COUNT} unresolved versions. They will be reviewed one pair at a time.",
     "Sync now": "Sync now",
